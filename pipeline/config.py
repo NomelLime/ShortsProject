@@ -152,13 +152,13 @@ SLEEP_MAX            = 30
 # ----------------------------------------------------------------------
 # Платформы для поиска
 # ----------------------------------------------------------------------
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 @dataclass(frozen=True)
 class Platform:
     name: str
-    search_suffixes: list[str]
-    prefixes: list[str]
+    search_suffixes: tuple[str, ...]
+    prefixes: tuple[str, ...]
 
     def build_queries(self, keyword: str, n: int) -> list[str]:
         queries = []
@@ -171,18 +171,18 @@ class Platform:
 PLATFORMS = [
     Platform(
         name="YouTube Shorts",
-        search_suffixes=["#shorts"],
-        prefixes=["ytsearch{n}:", "ytsearchdate{n}:"],
+        search_suffixes=("#shorts",),
+        prefixes=("ytsearch{n}:", "ytsearchdate{n}:"),
     ),
     Platform(
         name="TikTok",
-        search_suffixes=["tiktok"],
-        prefixes=["ytsearch{n}:"],
+        search_suffixes=("tiktok",),
+        prefixes=("ytsearch{n}:",),
     ),
     Platform(
         name="Instagram Reels",
-        search_suffixes=["instagram reels"],
-        prefixes=["ytsearch{n}:"],
+        search_suffixes=("instagram reels",),
+        prefixes=("ytsearch{n}:",),
     ),
 ]
 
@@ -255,3 +255,9 @@ DAILY_UPLOAD_LIMIT = int(os.getenv("DAILY_UPLOAD_LIMIT", "5"))
 
 # Все платформы, которые должны получить видео до архивирования исходника
 ALL_PLATFORMS = {"youtube", "tiktok", "instagram"}
+
+# ----------------------------------------------------------------------
+# Telegram уведомления
+# ----------------------------------------------------------------------
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
+TELEGRAM_CHAT_ID   = os.getenv("TELEGRAM_CHAT_ID", "")

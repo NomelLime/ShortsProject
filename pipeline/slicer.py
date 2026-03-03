@@ -81,7 +81,8 @@ def slice_short_video(video_path: Path, clip_dir: Path) -> List[Path]:
     return []
 
 
-def slice_long_video(video_path: Path, clip_dir: Path) -> List[Path]:
+def slice_long_video(video_path: Path, clip_dir: Path,
+                     metadata_variants: Optional[List[dict]] = None) -> List[Path]:
     """Нарезает длинное видео через AI."""
     dur = probe_video(video_path)['duration']
     source_name = video_path.stem
@@ -89,7 +90,10 @@ def slice_long_video(video_path: Path, clip_dir: Path) -> List[Path]:
     clip_counter = 0
 
     # ── Best segment как отдельный клип ──────────────────────────────────────
-    metadata = generate_video_metadata(video_path, 1)[0]
+    if metadata_variants:
+        metadata = metadata_variants[0]
+    else:
+        metadata = generate_video_metadata(video_path, num_variants=1)[0]
     best_segment = metadata.get("best_segment")
     best_segment_end = best_segment + _BEST_SEGMENT_MIN_LEN if best_segment else None
 
@@ -156,12 +160,13 @@ def slice_long_video(video_path: Path, clip_dir: Path) -> List[Path]:
     return result
 
 
-def stage_slice(video_path: Path, clip_dir: Path) -> List[Path]:
+# FIX #8: metadata_variants добавлен — совместимость с main_processing.py
+def stage_slice(video_path: Path, clip_dir: Path,
+               metadata_variants: Optional[List[dict]] = None) -> List[Path]:
     """Главный этап нарезки."""
-    dur = probe_video(video_path)['duration']
-    if dur < SHORT_VIDEO_THRESHOLD:
+    if probe_video(video_path)['duration'] < SHORT_VIDEO_THRESHOLD:
         return slice_short_video(video_path, clip_dir)
-    return slice_long_video(video_path, clip_dir)
+    return slice_long_video(video_path, clip_dir, metadata_variants=metadata_variants)
 
 
 # New: Silencedetect function
