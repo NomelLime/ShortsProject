@@ -21,6 +21,12 @@ from pipeline.logging_setup import setup_logger
 
 logger = logging.getLogger(__name__)
 
+# New imports for hashing
+import hashlib
+from PIL import Image
+import imagehash
+
+HASH_DB = config.BASE_DIR / "data" / "video_hashes.json"
 
 # ----------------------------------------------------------------------
 # Логгер
@@ -70,193 +76,68 @@ def probe_video(path: Union[str, Path]) -> Dict:
         'width':       int(v['width']),
         'height':      int(v['height']),
         'fps':         fps,
-        'duration':    float(info['format']['duration']),
-        'has_audio':   a is not None,
-        'sample_rate': int(a['sample_rate']) if a else 44100,
+        'duration':    float(info['format'].get('duration', 0)),
+        'has_audio':   bool(a),
+        'sample_rate': int(a.get('sample_rate', 0)) if a else 0,
     }
 
 
-def check_video_integrity(video_path: Path) -> bool:
-    """
-    Проверяет целостность видеофайла через ffprobe.
-    Возвращает True, если видео корректно.
-    """
-    if not video_path.exists():
-        logger.warning("Файл не найден: %s", video_path)
-        return False
-
+def check_video_integrity(path: Union[str, Path]) -> bool:
+    """Проверяет целостность видео через ffprobe."""
     try:
-        result = subprocess.run(
-            [
-                "ffprobe", "-v", "error",
-                "-select_streams", "v:0",
-                "-show_entries", "stream=codec_type",
-                "-of", "default=noprint_wrappers=1:nokey=1",
-                str(video_path),
-            ],
-            capture_output=True,
-            text=True,
-            timeout=config.FFPROBE_TIMEOUT,
-        )
-    except FileNotFoundError:
-        logger.error("ffprobe не найден – установите FFmpeg. Проверка пропущена.")
-        return True  # не блокируем пайплайн
-    except subprocess.TimeoutExpired:
-        logger.warning("ffprobe: таймаут (%d с) для %s", config.FFPROBE_TIMEOUT, video_path.name)
-        return False
-
-    if result.returncode == 0 and "video" in result.stdout.lower():
+        ffmpeg.probe(str(path))
         return True
-
-    logger.warning("ffprobe: повреждённый файл [%s] – %s",
-                   video_path.name, result.stderr.strip()[:200] or "нет деталей")
-    return False
+    except ffmpeg.Error:
+        return False
 
 
-def detect_encoder() -> Tuple[str, Dict]:
-    """Определяет доступный видеокодек (GPU h264_nvenc или CPU libx264)."""
-    test = [
-        'ffmpeg', '-y', '-f', 'lavfi',
-        '-i', 'color=c=black:size=256x256:duration=0.1:rate=30',
-        '-vcodec', 'h264_nvenc', '-f', 'null', '-',
-    ]
+def detect_encoder() -> Tuple[str, Optional[Dict]]:
+    """Определяет доступный кодек: h264_nvenc (GPU) или libx264 (CPU)."""
     try:
-        r = subprocess.run(test, capture_output=True, timeout=15)
-        if r.returncode == 0:
-            logger.info("🚀 GPU обнаружен – h264_nvenc")
-            return 'h264_nvenc', {'preset': 'p4', 'rc': 'vbr', 'cq': 21}
-        err = r.stderr.decode('utf-8', errors='replace')
-        bad = [
-            line.strip() for line in err.splitlines()
-            if any(k in line for k in ('nvenc', 'NVENC', 'No CUDA', 'driver'))
-        ]
-        if bad:
-            logger.warning("⚠️ h264_nvenc недоступен:")
-            for line in bad[:3]:
-                logger.warning("   %s", line)
-    except Exception as e:
-        logger.warning("⚠️ GPU-тест: %s", e)
-
-    logger.info("💻 libx264 (CPU)")
-    return 'libx264', {'preset': 'fast', 'crf': 21}
+        subprocess.check_output(["ffmpeg", "-encoders"])
+        return "h264_nvenc", {"preset": "fast", "cq": "23"}
+    except Exception:
+        return "libx264", {"preset": "fast", "crf": "23"}
 
 
-def get_random_asset(folder: Path, exts: tuple) -> Optional[Path]:
+# ----------------------------------------------------------------------
+# Человекоподобные задержки
+# ----------------------------------------------------------------------
+
+def human_sleep(min_sec: float, max_sec: float) -> None:
+    """Случайная задержка для имитации человека."""
+    time.sleep(random.uniform(min_sec, max_sec))
+
+
+def type_humanlike(page: Page, selector: str, text: str) -> None:
+    """Имитирует набор текста человеком с паузами."""
+    elem = page.locator(selector)
+    elem.click()
+    for char in text:
+        elem.type(char, delay=random.uniform(0.05, 0.2))
+
+
+# ----------------------------------------------------------------------
+# Загрузка ресурсов
+# ----------------------------------------------------------------------
+
+def get_random_asset(dir_path: Path, exts: Tuple[str, ...]) -> Optional[Path]:
     """Возвращает случайный файл из папки с заданными расширениями."""
-    if not folder.exists():
-        return None
-    files = [f for f in folder.iterdir() if f.suffix.lower() in exts]
+    files = [f for f in dir_path.iterdir() if f.suffix.lower() in exts]
     return random.choice(files) if files else None
 
 
-# ----------------------------------------------------------------------
-# Человекоподобные задержки и ввод текста
-# ----------------------------------------------------------------------
+def load_keywords() -> List[str]:
+    """Загружает ключевые слова из keywords.txt, по одному на строку."""
+    if not config.KEYWORDS_FILE.exists():
+        return []
+    return [line.strip() for line in config.KEYWORDS_FILE.read_text(encoding="utf-8").splitlines() if line.strip()]
 
-def human_sleep(lo: float = 3.0, hi: float = 10.0, sigma: float = 0.25) -> None:
-    """Случайная пауза с гауссовым шумом."""
-    base   = random.uniform(lo, hi)
-    jitter = random.gauss(0, sigma)
-    delay  = max(0.3, base + jitter)
-    time.sleep(delay)
-
-
-def type_humanlike(
-    page: Page,
-    selector: str,
-    text: str,
-    clear_first: bool = True,
-    min_char_delay: float = 0.04,
-    max_char_delay: float = 0.16,
-) -> None:
-    """Вводит текст посимвольно со случайными задержками."""
-    el = page.locator(selector).first
-    el.click()
-    if clear_first:
-        el.fill("")
-        human_sleep(0.2, 0.5)
-    for char in text:
-        page.keyboard.type(char)
-        time.sleep(random.uniform(min_char_delay, max_char_delay))
-    human_sleep(0.5, 1.5)
-
-
-# ----------------------------------------------------------------------
-# Работа с прокси и конфигами
-# ----------------------------------------------------------------------
 
 def load_proxy() -> Optional[str]:
-    """Читает config.json и возвращает строку прокси."""
-    if not config.CONFIG_JSON.exists():
-        logger.debug("config.json не найден – прокси не используется.")
-        return None
-
-    try:
-        data = json.loads(config.CONFIG_JSON.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError) as exc:
-        logger.warning("Не удалось прочитать config.json: %s", exc)
-        return None
-
-    if proxy := data.get("proxy", "").strip():
-        logger.info("Прокси (глобальный): %s", proxy)
-        return proxy
-
-    for acc in data.get("accounts", []):
-        if proxy := acc.get("proxy", "").strip():
-            logger.info("Прокси (accounts[0]): %s", proxy)
-            return proxy
-
-    logger.debug("Прокси в config.json не задан.")
-    return None
-
-
-# ----------------------------------------------------------------------
-# Работа с текстовыми файлами (urls, keywords)
-# ----------------------------------------------------------------------
-
-def read_lines(path: Path) -> List[str]:
-    """Читает файл, возвращает непустые строки без комментариев (#), уникальные."""
-    if not path.exists():
-        return []
-    seen: dict = {}
-    for line in path.read_text(encoding="utf-8").splitlines():
-        line = line.strip()
-        if line and not line.startswith("#"):
-            seen[line] = None
-    return list(seen)
-
-
-def write_lines(path: Path, lines: List[str]) -> None:
-    """Записывает отсортированный список строк в файл."""
-    path.write_text("\n".join(sorted(set(lines))) + "\n", encoding="utf-8")
-
-
-def merge_and_save_urls(new_urls: List[str], path: Path = config.URLS_FILE) -> int:
-    """Объединяет существующие URL с новыми, сохраняет. Возвращает количество добавленных."""
-    existing = set(read_lines(path))
-    merged   = existing | set(new_urls)
-    added    = len(merged) - len(existing)
-    write_lines(path, list(merged))
-    logger.info("urls.txt: итого %d URL (добавлено +%d) → %s", len(merged), added, path)
-    return added
-
-
-def load_keywords() -> List[str]:
-    """Загружает ключевые слова из keywords.txt."""
-    if config.KEYWORDS_FILE.exists():
-        keywords = read_lines(config.KEYWORDS_FILE)
-        if keywords:
-            logger.info("Ключевые слова из keywords.txt: %d шт.", len(keywords))
-            return keywords
-
-    example = (
-        "# Ключевые слова для поиска (по одному на строку)\n"
-        "funny cats\nlife hacks\nsatisfying videos\ncooking shorts\n"
-        "gym motivation\ntravel reels\ndance challenge\namazing nature\n"
-    )
-    config.KEYWORDS_FILE.write_text(example, encoding="utf-8")
-    logger.warning("Создан пример keywords.txt: %s – заполните его.", config.KEYWORDS_FILE)
-    return []
+    """Загружает прокси из .env или возвращает None."""
+    proxy = os.environ.get("PROXY")
+    return proxy if proxy else None
 
 
 # ----------------------------------------------------------------------
@@ -264,129 +145,75 @@ def load_keywords() -> List[str]:
 # ----------------------------------------------------------------------
 
 def get_all_accounts() -> List[Dict]:
-    """Возвращает список всех аккаунтов из папки accounts/."""
-    root = Path(config.ACCOUNTS_ROOT)
-    if not root.exists():
-        logger.warning("Папка аккаунтов не найдена: %s", root)
-        return []
-
+    """Собирает все аккаунты из ACCOUNTS_ROOT."""
     accounts = []
-    for acc_dir in sorted(root.iterdir()):
-        if not acc_dir.is_dir():
-            continue
-        config_file = acc_dir / "config.json"
-        if not config_file.exists():
-            logger.warning("Нет config.json в %s, пропускаю.", acc_dir)
-            continue
-        try:
-            # Используем имя acc_cfg, чтобы не перекрывать модуль config
-            acc_cfg = json.loads(config_file.read_text(encoding="utf-8"))
-        except json.JSONDecodeError as e:
-            logger.error("Ошибка разбора %s: %s", config_file, e)
-            continue
-
-        accounts.append({
-            "name":            acc_dir.name,
-            "config":          acc_cfg,
-            "profile_dir":     acc_dir / "browser_profile",
-            "upload_queue_dir": acc_dir / "upload_queue",
-        })
-    logger.info("Найдено аккаунтов: %d", len(accounts))
+    for acc_dir in Path(config.ACCOUNTS_ROOT).iterdir():
+        if acc_dir.is_dir():
+            cfg_path = acc_dir / "config.json"
+            if cfg_path.exists():
+                acc_cfg = json.loads(cfg_path.read_text(encoding="utf-8"))
+                accounts.append({
+                    "name": acc_dir.name,
+                    "dir": acc_dir,
+                    "config": acc_cfg,
+                    "platforms": acc_cfg.get("platforms", [acc_cfg.get("platform", "youtube")]),
+                })
     return accounts
 
 
-def get_upload_queue(upload_queue_dir: Path) -> List[Dict]:
-    """
-    Возвращает список видео для загрузки из папки upload_queue/.
-    Каждый элемент: {video_path, meta_path, meta}
-    """
-    if not upload_queue_dir.exists():
-        return []
-
+def get_upload_queue(acc_dir: Path, platform: str) -> List[Dict]:
+    """Собирает очередь загрузки для аккаунта и платформы."""
+    queue_dir = acc_dir / "upload_queue" / platform
     queue = []
-    for video_file in sorted(upload_queue_dir.glob("*.mp4")):
-        meta_file = video_file.with_suffix(".json")
-        if not meta_file.exists():
-            logger.warning("Нет метаданных для %s, пропускаю.", video_file.name)
-            continue
-        try:
-            meta = json.loads(meta_file.read_text(encoding="utf-8"))
-        except json.JSONDecodeError as e:
-            logger.error("Ошибка разбора %s: %s", meta_file, e)
-            continue
-
-        queue.append({
-            "video_path": video_file,
-            "meta_path":  meta_file,
-            "meta":       meta,
-        })
+    for mp4 in sorted(queue_dir.glob("*.mp4")):
+        meta_path = mp4.with_name(f"{mp4.stem}_meta.json")
+        meta = json.loads(meta_path.read_text(encoding="utf-8")) if meta_path.exists() else {}
+        queue.append({"video_path": mp4, "meta": meta})
     return queue
 
 
 def mark_uploaded(item: Dict) -> None:
-    """Помечает видео и метаданные как загруженные (добавляет суффикс .done)."""
-    for key in ("video_path", "meta_path"):
-        src: Path = item[key]
-        if src.exists():
-            dst = src.parent / (src.name + ".done")
-            src.rename(dst)
-            logger.debug("Помечено как done: %s", dst.name)
-
-
-def _limit_file(acc_dir: Path) -> Path:
-    return acc_dir / "daily_limit.json"
-
-
-def _load_limit_data(acc_dir: Path) -> Dict:
-    f = _limit_file(acc_dir)
-    if not f.exists():
-        return {}
-    try:
-        return json.loads(f.read_text(encoding="utf-8"))
-    except Exception:
-        return {}
-
-
-def _save_limit_data(acc_dir: Path, data: Dict) -> None:
-    """Сохраняет данные лимитов, обрезая записи старше 30 дней."""
-    cutoff = str(date.today() - timedelta(days=30))
-    data   = {k: v for k, v in data.items() if k >= cutoff}
-    _limit_file(acc_dir).write_text(
-        json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8"
-    )
+    """Удаляет загруженное видео и метаданные."""
+    item["video_path"].unlink(missing_ok=True)
+    item["video_path"].with_name(f"{item['video_path'].stem}_meta.json").unlink(missing_ok=True)
 
 
 def get_uploads_today(acc_dir: Path) -> int:
-    """Возвращает количество загрузок за сегодня для данного аккаунта."""
-    data  = _load_limit_data(acc_dir)
-    today = str(date.today())
-    return data.get(today, 0)
+    """Возвращает количество загрузок сегодня для аккаунта."""
+    limit_path = acc_dir / "daily_limit.json"
+    if not limit_path.exists():
+        return 0
+    data = json.loads(limit_path.read_text(encoding="utf-8"))
+    today = date.today().isoformat()
+    return data.get("uploaded_today", {}).get(today, 0)
 
 
 def increment_upload_count(acc_dir: Path) -> None:
-    """Увеличивает счётчик загрузок на 1 для текущей даты."""
-    data  = _load_limit_data(acc_dir)
-    today = str(date.today())
-    data[today] = data.get(today, 0) + 1
-    _save_limit_data(acc_dir, data)
+    """Инкрементирует счётчик загрузок в daily_limit.json."""
+    limit_path = acc_dir / "daily_limit.json"
+    data = json.loads(limit_path.read_text(encoding="utf-8")) if limit_path.exists() else {}
+    today = date.today().isoformat()
+    uploaded_today = data.setdefault("uploaded_today", {})
+    uploaded_today[today] = uploaded_today.get(today, 0) + 1
+    limit_path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
-def is_daily_limit_reached(acc_dir: Path, limit: int = None) -> bool:
-    """Проверяет, достигнут ли дневной лимит загрузок."""
-    limit = limit if limit is not None else config.DAILY_UPLOAD_LIMIT
-    return get_uploads_today(acc_dir) >= limit
+def is_daily_limit_reached(acc_dir: Path) -> bool:
+    """Проверяет, достигнут ли дневной лимит для аккаунта."""
+    return get_uploads_today(acc_dir) >= config.DAILY_UPLOAD_LIMIT
 
 
-def create_sample_account(account_name: str, platform: str = "youtube") -> None:
-    """Создаёт структуру папок и config.json для нового аккаунта."""
-    acc_dir = Path(config.ACCOUNTS_ROOT) / account_name
+def create_sample_account(name: str, platform: str) -> None:
+    """Создаёт шаблон аккаунта с config.json."""
+    acc_dir = Path(config.ACCOUNTS_ROOT) / name
+    acc_dir.mkdir(parents=True, exist_ok=True)
     (acc_dir / "browser_profile").mkdir(parents=True, exist_ok=True)
     (acc_dir / "upload_queue").mkdir(parents=True, exist_ok=True)
 
     config_path = acc_dir / "config.json"
     if not config_path.exists():
         sample = {
-            "platform": platform,
+            "platforms": ["youtube", "tiktok", "instagram"],
             "user_agent": (
                 "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
                 "AppleWebKit/537.36 (KHTML, like Gecko) "
@@ -445,3 +272,57 @@ def ensure_dirs() -> None:
     for d in dirs:
         d.mkdir(parents=True, exist_ok=True)
     logger.info("Все директории созданы/проверены.")
+
+
+# New: Configuration Validation
+def validate_config():
+    errors = []
+    if not config.BG_DIR.exists() or not list(config.BG_DIR.iterdir()):
+        errors.append(f"BG_DIR ({config.BG_DIR}) is empty or does not exist.")
+    keywords = load_keywords()
+    if not keywords:
+        errors.append("keywords.txt is empty or missing keywords.")
+    if config.AI_ENABLED and not check_ollama():
+        errors.append("Ollama is not available (check if running and model loaded).")
+    if errors:
+        logger.error("Configuration validation failed:\n" + "\n".join(errors))
+        raise ValueError("Invalid configuration - see logs for details.")
+
+
+# New: Perceptual Hashing for Duplicates
+def compute_perceptual_hash(video_path: Path) -> Optional[str]:
+    try:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            hashes = []
+            for i in range(3):
+                frame_path = temp_path / f'frame_{i}.png'
+                subprocess.run(['ffmpeg', '-i', str(video_path), '-vf', f'select=eq(n\,{i})', '-vframes', '1', str(frame_path)], check=True, capture_output=True)
+                img = Image.open(frame_path)
+                h = str(imagehash.phash(img))
+                hashes.append(h)
+            combined = ''.join(hashes)
+            return hashlib.sha256(combined.encode()).hexdigest()
+    except Exception as e:
+        logger.error(f"Failed to compute hash for {video_path}: {e}")
+        return None
+
+def load_hashes() -> list:
+    if HASH_DB.exists():
+        return json.loads(HASH_DB.read_text(encoding='utf-8'))
+    return []
+
+def save_hashes(hashes: list):
+    HASH_DB.parent.mkdir(parents=True, exist_ok=True)
+    HASH_DB.write_text(json.dumps(hashes, ensure_ascii=False), encoding='utf-8')
+
+def is_duplicate(video_path: Path) -> bool:
+    h = compute_perceptual_hash(video_path)
+    if h is None:
+        return False
+    hashes = load_hashes()
+    if h in hashes:
+        return True
+    hashes.append(h)
+    save_hashes(hashes)
+    return False

@@ -76,172 +76,56 @@ _failed_lock: Final[Lock] = Lock()
 def _log_failed(url: str, reason: str) -> None:
     with _failed_lock:
         with cfg.FAILED_URLS_FILE.open("a", encoding="utf-8") as f:
-            f.write(f"{url}  # {reason}\n")
+            f.write(f"{url} # {reason}\n")
 
 
-# ── Определение платформы и куки ─────────────────────────────────────────────
+# ── Скачивание одного URL ────────────────────────────────────────────────────
 
-_PLATFORM_DOMAINS: Final[dict[str, str]] = {
-    "tiktok.com":    "tiktok",
-    "instagram.com": "instagram",
-    "youtube.com":   "youtube",
-    "youtu.be":      "youtube",
-}
-
-
-def _platform_of(url: str) -> str:
-    url_lower = url.lower()
-    for domain, name in _PLATFORM_DOMAINS.items():
-        if domain in url_lower:
-            return name
-    return "unknown"
-
-
-def _cookies_for(url: str) -> str | None:
-    path = cfg.COOKIES.get(_platform_of(url))
-    if path and path.exists():
-        log.debug("Куки: %s", path.name)
-        return str(path)
-    return None
-
-
-# ── YDL-опции для скачивания ─────────────────────────────────────────────────
-
-def _download_ydl_opts(proxy: str | None, cookies_file: str | None) -> dict:
-    opts: dict = {
-        # Формат: нативный mp4, иначе лучшее доступное
-        "format":   "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best",
-
-        # Скачиваем в PREPARING_DIR — папку для «сырых» исходников,
-        # а не в OUTPUT_DIR (финальные шортсы).
-        "outtmpl":  str(cfg.PREPARING_DIR / "%(title).100s.%(ext)s"),
-
-        "writeinfojson":    True,
-        "writethumbnail":   False,
-        "writedescription": False,
-
-        "retries":                    cfg.RETRIES,
-        "fragment_retries":           cfg.RETRIES,
-        "skip_unavailable_fragments": True,
-        "ignoreerrors":               False,
-        "socket_timeout":             cfg.SOCKET_TIMEOUT,
-        "sleep_interval":             random.uniform(cfg.SLEEP_MIN, cfg.SLEEP_MAX),
-        "max_sleep_interval":         cfg.SLEEP_MAX,
-
-        "concurrent_fragment_downloads": cfg.FRAGMENT_THREADS,
-
-        "quiet":       True,
-        "no_warnings": False,
-
-        "postprocessors": [{"key": "FFmpegVideoConvertor", "preferedformat": "mp4"}],
-
+def download_single(url: str, proxy: Optional[str] = None) -> DownloadResult:
+    """Скачивает одно видео через yt-dlp."""
+    ydl_opts = {
+        "outtmpl": str(cfg.PREPARING_DIR / "%(id)s.%(ext)s"),
         "noplaylist": True,
-        "geo_bypass": True,
-        "http_headers": cfg.DEFAULT_HEADERS,
+        "quiet": True,
+        "no_warnings": True,
+        "format": "bv*+ba/b",
+        "retries": 3,
+        "continuedl": True,
+        "proxy": proxy,
     }
 
-    if proxy:
-        opts["proxy"] = proxy
-    if cookies_file:
-        opts["cookiefile"] = cookies_file
-
-    return opts
-
-
-# ── Определение пути к скачанному файлу ──────────────────────────────────────
-
-def _resolve_filepath(info: dict) -> Path | None:
-    """Извлекает путь к скачанному файлу из info-словаря yt-dlp."""
-    for dl in info.get("requested_downloads") or []:
-        if fp := dl.get("filepath"):
-            p = Path(fp)
-            if p.exists():
-                return p
-
-    title = "".join(
-        c for c in info.get("title", "")
-        if c.isalnum() or c in " _-"
-    )[:100]
-    ext       = info.get("ext", "mp4")
-    candidate = cfg.PREPARING_DIR / f"{title}.{ext}"
-    return candidate if candidate.exists() else None
-
-
-# ── Скачивание одного URL ─────────────────────────────────────────────────────
-
-def download_single(url: str, proxy: str | None) -> DownloadResult:
-    """Скачивает одно видео, проверяет целостность, возвращает DownloadResult."""
-    log.info("[%s] %s", _platform_of(url).upper(), url)
-
     try:
-        opts = _download_ydl_opts(proxy, _cookies_for(url))
-        with YoutubeDL(opts) as ydl:
+        with YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=True)
+            out_path = Path(ydl.prepare_filename(info))
 
-        if not info:
-            return _fail(url, "extract_info вернул None")
+        if not out_path.exists():
+            return DownloadResult(url, DownloadStatus.FAILED, None, "File not found after download")
 
-        filepath = _resolve_filepath(info)
-        if not filepath:
-            return _fail(url, "Файл не найден после скачивания")
+        if not check_video_integrity(out_path):
+            out_path.unlink(missing_ok=True)
+            return DownloadResult(url, DownloadStatus.INTEGRITY_ERROR, None, "Integrity check failed")
 
-        if not utils.check_video_integrity(filepath):
-            _cleanup(filepath)
-            return DownloadResult(
-                url=url,
-                status=DownloadStatus.INTEGRITY_ERROR,
-                file=filepath,
-                reason="Видео повреждено (ffprobe)",
-            )
+        # New: Duplicate check via perceptual hash
+        if utils.is_duplicate(out_path):
+            out_path.unlink(missing_ok=True)
+            _log_failed(url, "Duplicate content detected via perceptual hash")
+            return DownloadResult(url, DownloadStatus.FAILED, None, "Duplicate content")
 
-        size_mb = filepath.stat().st_size / 1_048_576
-        log.info("✓ %s  (%.1f МБ)", filepath.name, size_mb)
-        return DownloadResult(url=url, status=DownloadStatus.OK, file=filepath)
-
-    except Exception as exc:
-        return _fail(url, str(exc)[:300])
+        return DownloadResult(url, DownloadStatus.OK, out_path)
+    except Exception as e:
+        return DownloadResult(url, DownloadStatus.FAILED, None, str(e))
 
 
-def _fail(url: str, reason: str) -> DownloadResult:
-    log.error("✗ %s — %s", url, reason)
-    _log_failed(url, reason)
-    return DownloadResult(url=url, status=DownloadStatus.FAILED, reason=reason)
+# ── Скачивание всех URL ──────────────────────────────────────────────────────
 
-
-def _cleanup(filepath: Path) -> None:
-    """Удаляет повреждённый видеофайл и сопутствующий .info.json."""
-    log.warning("Удаляем повреждённый файл: %s", filepath.name)
-    for path in (filepath, filepath.with_suffix(".info.json")):
-        try:
-            path.unlink(missing_ok=True)
-        except OSError:
-            pass
-
-
-# ── Параллельное скачивание всех URL ─────────────────────────────────────────
-
-def download_all(
-    urls:        list[str] | None = None,
-    max_workers: int               = cfg.MAX_WORKERS,
-    proxy:       str | None        = None,
-) -> DownloadStats:
-    """
-    Скачивает все URL параллельно.
-
-    Параметры:
-        urls        — список URL; если None — читает из urls.txt
-        max_workers — параллельных скачиваний
-        proxy       — прокси; если None — берётся из config.json
-    """
-    log.info("═══ Запуск параллельного скачивания ═══")
-    cfg.PREPARING_DIR.mkdir(parents=True, exist_ok=True)
-
-    if urls is None:
-        urls = utils.read_lines(cfg.URLS_FILE)
-        if not urls:
-            log.error("urls.txt пуст или не найден: %s", cfg.URLS_FILE)
-            return DownloadStats()
-        log.info("Загружено %d URL из %s", len(urls), cfg.URLS_FILE)
+def download_all(max_workers: int = cfg.MAX_WORKERS, proxy: Optional[str] = None) -> DownloadStats:
+    """Скачивает все URL параллельно, проверяет целостность."""
+    urls = utils.unique_lines(cfg.URLS_FILE)
+    if not urls:
+        log.error("urls.txt пуст или не найден: %s", cfg.URLS_FILE)
+        return DownloadStats()
+    log.info("Загружено %d URL из %s", len(urls), cfg.URLS_FILE)
 
     if not urls:
         log.error("Список URL пуст.")

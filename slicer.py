@@ -4,7 +4,7 @@
 
 Изменения:
   - Точки нарезки определяются ТОЛЬКО через AI (Ollama + визуальный анализ).
-    silencedetect и scenedetect удалены.
+    silencedetect and scenedetect deleted.
   - AI получает кадры видео + YOLO-детекции по каждому кадру (из metadata_variants),
     что позволяет учитывать содержание при выборе точек нарезки.
   - При недоступности AI — равномерная нарезка каждые CLIP_MAX_LEN секунд.
@@ -19,6 +19,7 @@ from typing import List, Optional, Tuple
 from pipeline.config import (
     CLIP_MIN_LEN, CLIP_MAX_LEN,
     SHORT_VIDEO_THRESHOLD,
+    SILENCE_THRESHOLD, SILENCE_MIN_DUR,  # Reintroduced
     AI_NUM_FRAMES,
 )
 from pipeline.utils import probe_video
@@ -64,103 +65,45 @@ def extract_clip(src: str, out: Path, idx: int, start: float, end: float) -> boo
         ]
         if w / h > 9 / 16:
             cmd += ["-vf", "crop=ih*9/16:ih:(iw-ow)/2:0"]
-        cmd += ["-y", str(out)]
-        r = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
-        if r.returncode != 0:
-            logger.warning("Клип %d: %s", idx, r.stderr[-120:])
-            return False
+        cmd += [str(out)]
+        subprocess.run(cmd, check=True, capture_output=True)
         return True
     except Exception as e:
-        logger.warning("Клип %d: %s", idx, e)
+        logger.error("Ошибка нарезки клипа %d: %s", idx, e)
         return False
 
 
-def _clip_len_for_segment(start: float, total: float) -> Optional[float]:
-    remaining = total - start
-    if remaining <= _BEST_SEGMENT_MIN_LEN:
-        return None
-    desired = min(CLIP_MAX_LEN, remaining)
-    if desired < CLIP_MIN_LEN:
-        return desired
-    return desired
-
-
-def stage_slice(
-    source_name: str,
-    video_path: Path,
-    clip_dir: Path,
-    metadata_variants: Optional[List[dict]] = None,
-) -> List[Path]:
-    """
-    Этап 1: нарезает одно видео на клипы с использованием AI для определения точек.
-
-    Порядок работы:
-      1. Если best_segment известен из AI-метаданных — первый клип начинается с него.
-      2. AI (Ollama) анализирует видео (кадры + YOLO-детекции) и предлагает точки нарезки.
-      3. Остаток видео нарезается по этим точкам через group_into_clips.
-      4. При недоступности AI — равномерная нарезка.
-
-    Возвращает список путей к нарезанным файлам.
-    """
-    logger.info("✂️  Нарезка: %s", video_path.name)
-    info = probe_video(str(video_path))
-    dur  = info["duration"]
-    logger.info("   Длительность: %.1f сек", dur)
-
-    if dur <= SHORT_VIDEO_THRESHOLD:
-        logger.info("   Видео короче %s сек, копирую как есть.", SHORT_VIDEO_THRESHOLD)
-        clip_dir.mkdir(parents=True, exist_ok=True)
-        out = clip_dir / f"{source_name}_clip0001.mp4"
-        shutil.copy2(video_path, out)
+def slice_short_video(video_path: Path, clip_dir: Path) -> List[Path]:
+    """Обрабатывает короткое видео как один клип."""
+    out = clip_dir / f"{video_path.stem}_clip0000.mp4"
+    if extract_clip(str(video_path), out, 0, 0, probe_video(video_path)['duration']):
         return [out]
+    return []
 
-    # Извлекаем best_segment и YOLO-данные из метаданных
-    best_segment: Optional[float]      = None
-    yolo_per_frame: List[List[str]]    = []
 
-    if metadata_variants:
-        meta0 = metadata_variants[0]
-        raw = meta0.get("best_segment")
-        if raw is not None:
-            try:
-                val = float(raw)
-                if 0.0 <= val < dur - _BEST_SEGMENT_MIN_LEN:
-                    best_segment = val
-                else:
-                    logger.debug(
-                        "best_segment=%.2f вне допустимого диапазона для видео %.1f сек, игнорирую.",
-                        val, dur,
-                    )
-            except (TypeError, ValueError) as e:
-                logger.debug("Не удалось прочитать best_segment: %s", e)
+def slice_long_video(video_path: Path, clip_dir: Path) -> List[Path]:
+    """Нарезает длинное видео через AI."""
+    dur = probe_video(video_path)['duration']
+    source_name = video_path.stem
+    result = []
+    clip_counter = 0
 
-        # YOLO-данные по кадрам, собранные ранее на этапе AI
-        yolo_per_frame = meta0.get("yolo_per_frame", [])
-
-    clip_dir.mkdir(parents=True, exist_ok=True)
-    result: List[Path] = []
-    clip_counter = 1
-
-    # ── Клип с best_segment (идёт ПЕРВЫМ) ──────────────────────────────────
-    best_segment_end: Optional[float] = None
+    # ── Best segment как отдельный клип ──────────────────────────────────────
+    metadata = generate_video_metadata(video_path, 1)[0]
+    best_segment = metadata.get("best_segment")
+    best_segment_end = best_segment + _BEST_SEGMENT_MIN_LEN if best_segment else None
 
     if best_segment is not None:
-        bs_len = _clip_len_for_segment(best_segment, dur)
-        if bs_len is not None:
-            best_segment_end = best_segment + bs_len
-            out = clip_dir / f"{source_name}_clip{clip_counter:04d}.mp4"
-            logger.info(
-                "   🌟 best_segment клип: [%.2f → %.2f] (%.1f сек)",
-                best_segment, best_segment_end, bs_len,
-            )
-            if extract_clip(str(video_path), out, clip_counter, best_segment, best_segment_end):
-                result.append(out)
-            clip_counter += 1
-        else:
-            logger.debug("best_segment слишком близко к концу видео, пропускаю.")
+        out = clip_dir / f"{source_name}_best_segment.mp4"
+        if extract_clip(str(video_path), out, clip_counter, best_segment, best_segment_end):
+            result.append(out)
+        clip_counter += 1
 
-    # ── AI-определение точек нарезки ────────────────────────────────────────
+    # ── AI-точки нарезки ────────────────────────────────────────
     logger.info("   🤖 AI определяет точки нарезки...")
+
+    # Reintroduced silencedetect
+    silences = detect_silences(str(video_path))
 
     # Импорт здесь чтобы избежать кольцевого импорта на уровне модуля
     from pipeline.ai import generate_cut_points
@@ -168,8 +111,9 @@ def stage_slice(
     ai_cuts = generate_cut_points(
         video_path=video_path,
         duration=dur,
-        yolo_per_frame=yolo_per_frame,
+        yolo_per_frame=metadata.get("yolo_per_frame", []),
         num_frames=AI_NUM_FRAMES,
+        silences=silences,
     )
     logger.info("   AI точки: %s", ", ".join(f"{c:.1f}" for c in ai_cuts) if ai_cuts else "нет → равномерно")
 
@@ -210,3 +154,26 @@ def stage_slice(
         len(result), best_segment is not None,
     )
     return result
+
+
+def stage_slice(video_path: Path, clip_dir: Path) -> List[Path]:
+    """Главный этап нарезки."""
+    dur = probe_video(video_path)['duration']
+    if dur < SHORT_VIDEO_THRESHOLD:
+        return slice_short_video(video_path, clip_dir)
+    return slice_long_video(video_path, clip_dir)
+
+
+# New: Silencedetect function
+def detect_silences(video_path: str, threshold: float = SILENCE_THRESHOLD, min_dur: float = SILENCE_MIN_DUR) -> List[float]:
+    try:
+        out = subprocess.run(['ffmpeg', '-i', video_path, '-af', f'silencedetect=n={threshold}dB:d={min_dur}', '-f', 'null', '-'], capture_output=True, text=True)
+        lines = out.stderr.splitlines()
+        silences = []
+        for line in lines:
+            if 'silence_start' in line:
+                silences.append(float(line.split('silence_start: ')[1].split(' ')[0]))
+        return silences
+    except Exception as e:
+        logger.warning(f"Silencedetect failed: {e}")
+        return []

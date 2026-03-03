@@ -83,31 +83,34 @@ def launch_browser(account_cfg: dict, profile_dir: Path) -> tuple[Playwright, Br
     context.on("page", apply_stealth_to_page)
 
     if manual_login_needed:
-        _manual_login_flow(context, account_cfg.get("platform", "youtube"))
+        _manual_login_flow(context, account_cfg.get("platforms", ["youtube"]))
 
     return pw, context
 
 
-def _manual_login_flow(context: BrowserContext, platform: str) -> None:
-    """Ожидает ручного входа пользователя."""
+def _manual_login_flow(context: BrowserContext, platforms: List[str]) -> None:
+    """Ожидает ручного входа пользователя for multiple platforms."""
     login_urls = {
         "youtube": "https://accounts.google.com/ServiceLogin",
         "tiktok": "https://www.tiktok.com/login",
         "instagram": "https://www.instagram.com/accounts/login/",
     }
-    url = login_urls.get(platform, "https://www.google.com")
-    page = context.new_page()
-    # Stealth уже применяется автоматически через обработчик событий
-    page.goto(url)
+    pages = []
+    for platform in platforms:
+        url = login_urls.get(platform, "https://www.google.com")
+        page = context.new_page()
+        page.goto(url)
+        pages.append(page)
 
     logger.info(
         "\n" + "="*60 +
-        f"\n  РУЧНОЙ ЛОГИН: войдите в аккаунт {platform.upper()} в открытом браузере."
+        f"\n  РУЧНОЙ ЛОГИН: войдите в аккаунты {', '.join(platforms).upper()} в открытых вкладках."
         "\n  Когда закончите — нажмите ENTER в терминале."
         "\n" + "="*60
     )
     input("  >>> Нажмите ENTER после завершения логина: ")
-    page.close()
+    for page in pages:
+        page.close()
     logger.info("Сессия сохранена в папку профиля.")
 
 
