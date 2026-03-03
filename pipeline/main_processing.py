@@ -84,8 +84,9 @@ def run_processing(dry_run: bool = False) -> List[Path]:
         # ── 1. Нарезка (с передачей best_segment из метаданных) ────────────
         clip_dir = config.TEMP_DIR / source_name
         try:
+            # FIX #8: убран лишний source_name — новая сигнатура stage_slice
             clips = stage_slice(
-                source_name, video_path, clip_dir,
+                video_path, clip_dir,
                 metadata_variants=metadata_variants,
             )
         except Exception as e:
@@ -116,22 +117,22 @@ def run_processing(dry_run: bool = False) -> List[Path]:
                 continue
 
             if bg_path:
-                ok = stage_postprocess(
-                    clip_path, str(bg_path), out_path,
-                    vcodec, vcodec_opts,
-                    meta=clip_meta,     # передаём метаданные для текстовых оверлеев
+                # FIX #7: новая сигнатура stage_postprocess(clips, banner_path, vcodec, opts, variants)
+                post_results = stage_postprocess(
+                    clips=[clip_path],
+                    banner_path=banner_path,
+                    vcodec=vcodec,
+                    vcodec_opts=vcodec_opts,
+                    metadata_variants=[clip_meta],
                 )
+                if post_results:
+                    postprocessed.extend(post_results)
+                else:
+                    logger.warning("Постобработка не удалась: %s", clip_path.name)
             else:
                 # Нет фона — просто копируем клип
                 shutil.copy2(clip_path, out_path)
-                ok = True
-
-            if ok:
                 postprocessed.append(out_path)
-                # Намеренно НЕ сохраняем _description.txt здесь:
-                # финальные метаданные будут сохранены в .json при клонировании
-            else:
-                logger.warning("Постобработка не удалась: %s", clip_path.name)
 
         if not postprocessed:
             logger.warning(

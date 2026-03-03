@@ -2,29 +2,31 @@
 pipeline/utils.py – Единый набор утилит для всего проекта.
 """
 
+import hashlib
 import json
 import logging
+import os
 import random
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 from datetime import date, timedelta
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Union
 
 import ffmpeg
-from playwright.sync_api import Page
+from PIL import Image
+import imagehash
+
+# FIX #2: использовать rebrowser_playwright везде, не стандартный playwright
+from rebrowser_playwright.sync_api import Page
 
 from pipeline import config
 from pipeline.logging_setup import setup_logger
 
 logger = logging.getLogger(__name__)
-
-# New imports for hashing
-import hashlib
-from PIL import Image
-import imagehash
 
 HASH_DB = config.BASE_DIR / "data" / "video_hashes.json"
 
@@ -44,7 +46,7 @@ def get_logger(name: str) -> logging.Logger:
 def check_ffmpeg() -> None:
     """Проверяет наличие ffmpeg в системе, иначе завершает работу."""
     if not shutil.which('ffmpeg'):
-        logger.error("❌ FFmpeg не найден. Установите: https://ffmpeg.org")
+        logger.error("FFmpeg не найден. Установите: https://ffmpeg.org")
         sys.exit(1)
 
 
@@ -123,6 +125,8 @@ def type_humanlike(page: Page, selector: str, text: str) -> None:
 
 def get_random_asset(dir_path: Path, exts: Tuple[str, ...]) -> Optional[Path]:
     """Возвращает случайный файл из папки с заданными расширениями."""
+    if not dir_path.exists():
+        return None
     files = [f for f in dir_path.iterdir() if f.suffix.lower() in exts]
     return random.choice(files) if files else None
 
@@ -140,6 +144,30 @@ def load_proxy() -> Optional[str]:
     return proxy if proxy else None
 
 
+def unique_lines(path: Path) -> List[str]:
+    """Читает файл и возвращает уникальные непустые строки (порядок сохраняется)."""
+    if not path.exists():
+        return []
+    seen = set()
+    result = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if line and line not in seen:
+            seen.add(line)
+            result.append(line)
+    return result
+
+
+def merge_and_save_urls(new_urls: List[str], urls_file: Path) -> int:
+    """Добавляет новые URL в файл (без дубликатов). Возвращает количество добавленных."""
+    existing = set(unique_lines(urls_file))
+    to_add = [u for u in new_urls if u not in existing]
+    if to_add:
+        with urls_file.open("a", encoding="utf-8") as f:
+            f.write("\n".join(to_add) + "\n")
+    return len(to_add)
+
+
 # ----------------------------------------------------------------------
 # Работа с аккаунтами и очередями загрузки
 # ----------------------------------------------------------------------
@@ -147,7 +175,10 @@ def load_proxy() -> Optional[str]:
 def get_all_accounts() -> List[Dict]:
     """Собирает все аккаунты из ACCOUNTS_ROOT."""
     accounts = []
-    for acc_dir in Path(config.ACCOUNTS_ROOT).iterdir():
+    root = Path(config.ACCOUNTS_ROOT)
+    if not root.exists():
+        return accounts
+    for acc_dir in root.iterdir():
         if acc_dir.is_dir():
             cfg_path = acc_dir / "config.json"
             if cfg_path.exists():
@@ -165,6 +196,8 @@ def get_upload_queue(acc_dir: Path, platform: str) -> List[Dict]:
     """Собирает очередь загрузки для аккаунта и платформы."""
     queue_dir = acc_dir / "upload_queue" / platform
     queue = []
+    if not queue_dir.exists():
+        return queue
     for mp4 in sorted(queue_dir.glob("*.mp4")):
         meta_path = mp4.with_name(f"{mp4.stem}_meta.json")
         meta = json.loads(meta_path.read_text(encoding="utf-8")) if meta_path.exists() else {}
@@ -248,6 +281,7 @@ def load_json(path: Path) -> Optional[Dict]:
 
 def save_json(path: Path, data: Dict) -> None:
     """Сохраняет словарь в JSON-файл."""
+    path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
@@ -274,49 +308,68 @@ def ensure_dirs() -> None:
     logger.info("Все директории созданы/проверены.")
 
 
-# New: Configuration Validation
-def validate_config():
+# FIX #3: validate_config — ленивый импорт check_ollama, чтобы избежать
+# кольцевого импорта и NameError (check_ollama живёт в ai.py, не здесь)
+def validate_config() -> None:
+    """Проверяет корректность конфигурации перед запуском пайплайна."""
     errors = []
-    if not config.BG_DIR.exists() or not list(config.BG_DIR.iterdir()):
-        errors.append(f"BG_DIR ({config.BG_DIR}) is empty or does not exist.")
+    if not config.BG_DIR.exists() or not any(config.BG_DIR.iterdir()):
+        errors.append(f"BG_DIR ({config.BG_DIR}) пуст или не существует.")
     keywords = load_keywords()
     if not keywords:
-        errors.append("keywords.txt is empty or missing keywords.")
-    if config.AI_ENABLED and not check_ollama():
-        errors.append("Ollama is not available (check if running and model loaded).")
+        errors.append("keywords.txt пуст или не содержит ключевых слов.")
+    if config.AI_ENABLED:
+        try:
+            from pipeline.ai import check_ollama  # ленивый импорт — избегаем цикл
+            if not check_ollama():
+                errors.append("Ollama недоступен (проверьте, запущен ли сервис и загружена ли модель).")
+        except ImportError as exc:
+            errors.append(f"Не удалось импортировать pipeline.ai: {exc}")
     if errors:
-        logger.error("Configuration validation failed:\n" + "\n".join(errors))
-        raise ValueError("Invalid configuration - see logs for details.")
+        logger.error("Проверка конфигурации не прошла:\n%s", "\n".join(errors))
+        raise ValueError("Некорректная конфигурация — см. лог для деталей.")
 
 
-# New: Perceptual Hashing for Duplicates
+# ----------------------------------------------------------------------
+# Перцептивное хеширование для определения дублей
+# ----------------------------------------------------------------------
+
 def compute_perceptual_hash(video_path: Path) -> Optional[str]:
+    """Вычисляет perceptual hash по 3 кадрам видео."""
     try:
-        with tempfile.TemporaryDirectory() as temp_dir:
-            temp_path = Path(temp_dir)
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
             hashes = []
             for i in range(3):
-                frame_path = temp_path / f'frame_{i}.png'
-                subprocess.run(['ffmpeg', '-i', str(video_path), '-vf', f'select=eq(n\,{i})', '-vframes', '1', str(frame_path)], check=True, capture_output=True)
+                frame_path = tmp_path / f"frame_{i}.png"
+                subprocess.run(
+                    ["ffmpeg", "-i", str(video_path), "-vf", f"select=eq(n\\,{i})",
+                     "-vframes", "1", str(frame_path)],
+                    check=True, capture_output=True,
+                )
                 img = Image.open(frame_path)
-                h = str(imagehash.phash(img))
-                hashes.append(h)
-            combined = ''.join(hashes)
+                hashes.append(str(imagehash.phash(img)))
+            combined = "".join(hashes)
             return hashlib.sha256(combined.encode()).hexdigest()
     except Exception as e:
-        logger.error(f"Failed to compute hash for {video_path}: {e}")
+        # FIX: %-форматирование вместо f-string в logger
+        logger.error("Не удалось вычислить хеш для %s: %s", video_path, e)
         return None
 
-def load_hashes() -> list:
+
+def load_hashes() -> List[str]:
     if HASH_DB.exists():
-        return json.loads(HASH_DB.read_text(encoding='utf-8'))
+        return json.loads(HASH_DB.read_text(encoding="utf-8"))
     return []
 
-def save_hashes(hashes: list):
+
+def save_hashes(hashes: List[str]) -> None:
     HASH_DB.parent.mkdir(parents=True, exist_ok=True)
-    HASH_DB.write_text(json.dumps(hashes, ensure_ascii=False), encoding='utf-8')
+    HASH_DB.write_text(json.dumps(hashes, ensure_ascii=False), encoding="utf-8")
+
 
 def is_duplicate(video_path: Path) -> bool:
+    """Возвращает True если видео уже было обработано (по perceptual hash)."""
     h = compute_perceptual_hash(video_path)
     if h is None:
         return False

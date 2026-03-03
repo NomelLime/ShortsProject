@@ -22,7 +22,7 @@ from pipeline import (
     uploader,          # содержит функцию upload_all()
     finalize,
 )
-from pipeline.utils import ensure_dirs
+from pipeline.utils import ensure_dirs, validate_config
 from pipeline import config
 
 def parse_args():
@@ -51,6 +51,9 @@ def run_stage(stage_func, stage_name, *args, **kwargs):
 
 def main():
     args = parse_args()
+
+    # Ранняя проверка конфигурации
+    validate_config()
 
     # Создаём все необходимые директории
     ensure_dirs()
@@ -81,8 +84,12 @@ def main():
 
     # ---- Этап 4: Загрузка на платформы ----
     if not args.skip_upload:
-        # uploader.upload_all() может возвращать список результатов для финализации
+        # uploader.upload_all() возвращает список результатов для финализации
         upload_results = run_stage(uploader.upload_all, "uploader", dry_run=args.dry_run)
+        # FIX #1: run_stage возвращает False при исключении — защищаемся от TypeError в finalize
+        if not isinstance(upload_results, list):
+            logger.warning("Загрузка не вернула список результатов — финализация получит пустой список.")
+            upload_results = []
     else:
         upload_results = []
         logger.info("Пропуск этапа загрузки (--skip-upload)")

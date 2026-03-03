@@ -14,12 +14,19 @@ torchvision
 yt-dlp
 
 # Браузерная автоматизация
-playwright
+# FIX #13: заменён playwright на rebrowser-playwright (используется везде в коде)
+rebrowser-playwright
 playwright-stealth
+
+# Веб-интерфейс (app.py)
+streamlit
+
+# Хэширование для дедупликации (utils.py)
+Pillow
+imagehash
 
 # Утилиты
 requests
 python-dotenv
-scenedetect[opencv]  # или просто scenedetect
 
 # Для работы с датами и т.д.

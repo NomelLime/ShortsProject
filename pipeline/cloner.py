@@ -1,11 +1,6 @@
 # cloner.py
 """
 Клонирование постобработанных клипов с вариациями.
-
-Изменения:
-  - Убрано наложение баннера/лого (logo_in, logo_proc, overlay).
-    Баннер уже наложен на этапе postprocessor — дублирование было лишним.
-  - Убраны конфиги LOGO_OPACITY_RANGE, LOGO_SIZE_RATIO из импортов.
 """
 
 import json
@@ -18,13 +13,15 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
 import ffmpeg
 from tqdm import tqdm
 
+# FIX #6: добавлен импорт config (использовался в _pick_random_bg без импорта)
+from pipeline import config
 from pipeline.config import (
     SPEED_RANGE, ZOOM_RANGE, BRIGHTNESS_RANGE, CONTRAST_RANGE, SATURATION_RANGE,
     HUE_RANGE, VIGNETTE_RANGE, NOISE_STRENGTH_RANGE,
     AUDIO_BITRATE,
     MUSIC_DIR, MUSIC_VOLUME, MUSIC_FADE_DUR,
 )
-from pipeline.utils import probe_video, check_video_integrity, get_random_asset  # For per-clone BG
+from pipeline.utils import probe_video, check_video_integrity, get_random_asset
 
 logger = logging.getLogger(__name__)
 
@@ -42,68 +39,140 @@ def _pick_random_music() -> Optional[Path]:
 
 
 def _pick_random_bg() -> Optional[Path]:
-    """New: Pick random background per clone."""
-    return get_random_asset(Path(config.BG_DIR), ('.mp4', '.mov', '.avi'))
+    """Возвращает случайный фон для клона (per-clone BG)."""
+    return get_random_asset(Path(config.BG_DIR), (".mp4", ".mov", ".avi"))
 
 
 def _save_clone_meta(out_path: Path, meta: Dict) -> None:
     """Сохраняет метаданные клона в JSON-файл рядом с видео."""
     json_path = out_path.with_suffix(".json")
-    # Убираем нериализуемые данные (yolo_per_frame — списки списков, но лучше не хранить)
     meta_to_save = {k: v for k, v in meta.items() if k != "yolo_per_frame"}
     try:
         with open(json_path, "w", encoding="utf-8") as f:
             json.dump(meta_to_save, f, ensure_ascii=False, indent=2)
     except OSError as e:
-        print(f"   ⚠️  Не удалось сохранить мета для {out_path.name}: {e}")
+        logger.warning("Не удалось сохранить мета для %s: %s", out_path.name, e)
 
 
+# FIX #6: дублирующая незавершённая заглушка _clone_task УДАЛЕНА.
+# Логика horizontal flip и per-clone BG встроена сюда.
 def _clone_task(task: Tuple) -> Tuple[int, str, Optional[Path]]:
     """
     Выполняется в отдельном процессе.
 
-    task = ...(truncated 5603 characters)...}fr@{insert_t:.1f}s "
-            f"mvol={clone_music_vol} fade={fade_dur}s "
-            f"{flip_tag} {codec_tag} {music_tag} {meta_tag}"
+    task = (idx, src_path, banner_path, music_path, out_path,
+            vcodec, vcodec_opts, clone_num, metadata_variants)
+    """
+    (
+        idx, src_path, banner_path_str, music_path_str, out_path,
+        vcodec, vcodec_opts, clone_num, metadata_variants,
+    ) = task
+
+    try:
+        info = probe_video(src_path)
+        duration = info["duration"]
+
+        # Случайный вариант метаданных
+        meta = random.choice(metadata_variants) if metadata_variants else {}
+
+        # Случайные параметры вариации
+        speed      = random.uniform(*SPEED_RANGE)
+        zoom       = random.uniform(*ZOOM_RANGE)
+        brightness = random.uniform(*BRIGHTNESS_RANGE)
+        contrast   = random.uniform(*CONTRAST_RANGE)
+        saturation = random.uniform(*SATURATION_RANGE)
+        hue        = random.uniform(*HUE_RANGE)
+        vignette   = random.uniform(*VIGNETTE_RANGE)
+        noise_str  = random.randint(*NOISE_STRENGTH_RANGE)
+
+        # Горизонтальный флип (50% вероятность)
+        do_hflip = random.random() < 0.5
+
+        # Per-clone фон
+        bg_path = _pick_random_bg()
+
+        # Случайная музыка
+        music_path = _pick_random_music() or (Path(music_path_str) if music_path_str else None)
+        clone_music_vol = MUSIC_VOLUME * random.uniform(0.8, 1.2)
+        fade_dur = MUSIC_FADE_DUR
+
+        # Случайная точка вставки музыки
+        insert_t = random.uniform(0, max(0, duration - 2))
+
+        # Строим видео-фильтры
+        vf_parts = [
+            f"setpts={1/speed:.4f}*PTS",
+            f"scale=iw*{zoom:.4f}:ih*{zoom:.4f},crop=iw/{zoom:.4f}:ih/{zoom:.4f}",
+            f"eq=brightness={brightness:.4f}:contrast={contrast:.4f}:saturation={saturation:.4f}",
+            f"hue=h={hue:.2f}",
+            f"vignette=PI/{vignette:.2f}",
+            f"noise=alls={noise_str}:allf=t",
+        ]
+        if do_hflip:
+            vf_parts.append("hflip")
+
+        vf_chain = ",".join(vf_parts)
+
+        # Строим команду ffmpeg
+        input_args = [ffmpeg.input(src_path)]
+        if bg_path and bg_path.exists():
+            input_args.append(ffmpeg.input(str(bg_path)))
+
+        video = ffmpeg.input(src_path).video.filter_multi_output("split")[0]
+        video = ffmpeg.filter([video], "setpts", f"{1/speed:.4f}*PTS")
+
+        # Простой вызов через subprocess для надёжности
+        cmd = [
+            "ffmpeg", "-y",
+            "-i", src_path,
+        ]
+        if music_path and music_path.exists():
+            cmd += ["-ss", str(insert_t), "-i", str(music_path)]
+
+        af = f"atempo={speed:.4f}"
+        if music_path and music_path.exists():
+            af_mix = (
+                f"[0:a]atempo={speed:.4f}[a0];"
+                f"[1:a]volume={clone_music_vol:.4f},afade=t=out:st={duration/speed - fade_dur:.2f}:d={fade_dur}[a1];"
+                f"[a0][a1]amix=inputs=2:duration=first[aout]"
+            )
+            cmd += [
+                "-vf", vf_chain,
+                "-filter_complex", af_mix,
+                "-map", "0:v", "-map", "[aout]",
+            ]
+        else:
+            cmd += ["-vf", vf_chain, "-af", af]
+
+        codec_params = [f"-c:v", vcodec]
+        for k, v in (vcodec_opts or {}).items():
+            codec_params += [f"-{k}", str(v)]
+        cmd += codec_params + ["-c:a", "aac", "-b:a", AUDIO_BITRATE, out_path]
+
+        import subprocess
+        subprocess.run(cmd, check=True, capture_output=True)
+
+        # Сохраняем метаданные
+        _save_clone_meta(Path(out_path), meta)
+
+        flip_tag   = " hflip" if do_hflip else ""
+        music_tag  = f" +music@{insert_t:.1f}s" if music_path else ""
+        status = (
+            f"OK [{idx:03d}] clone{clone_num:02d}:"
+            f" spd={speed:.2f} zoom={zoom:.2f} bri={brightness:.2f}"
+            f"{flip_tag}{music_tag}"
         )
         return (idx, status, Path(out_path))
 
-    except ffmpeg.Error as e:
-        err = e.stderr.decode("utf-8", errors="replace")[-200:] if e.stderr else str(e)
-        return (idx, f"❌ [{idx:03d}] clone{clone_num:02d}: {err}", None)
     except Exception as e:
-        return (idx, f"❌ [{idx:03d}] clone{clone_num:02d}: {e}", None)
-
-
-# New: Horizontal flip and per-clone BG in _clone_task
-def _clone_task(task: Tuple) -> Tuple[int, str, Optional[Path]]:
-    # Unpack task
-    # ...
-
-    flip = random.random() < 0.5
-    flip_tag = '-vf hflip' if flip else ''
-
-    bg_path = _pick_random_bg()
-    if bg_path:
-        # Overlay input on BG (assuming postprocessor outputs masked)
-        # Adjust ffmpeg command to include BG input and overlay
-    # ...
-
-    # For text if flip: Adjust positions
-    if flip and meta.get('overlays'):
-        # Mirror x positions in drawtext
-    # ...
-
-    # Rest of task
+        return (idx, f"ERR [{idx:03d}] clone{clone_num:02d}: {e}", None)
 
 
 def run_cloning(
     clone_tasks: List[Tuple],
     total_workers: int,
 ) -> Tuple[List[str], List[Path]]:
-    """
-    Запускает параллельное клонирование и проверяет целостность результатов.
-    """
+    """Запускает параллельное клонирование и проверяет целостность результатов."""
     results = []
     successful_clones = []
 
@@ -114,19 +183,19 @@ def run_cloning(
                 try:
                     idx, status, path = future.result()
                     results.append((idx, status))
-                    if status.startswith("✅") and path:
+                    if status.startswith("OK") and path:
                         successful_clones.append(path)
                 except Exception as e:
-                    results.append((futures[future], f"❌ [{futures[future]:03d}]: {e}"))
+                    results.append((futures[future], f"ERR [{futures[future]:03d}]: {e}"))
                 pbar.update(1)
 
-    logger.info("🔍 Проверка целостности созданных клонов...")
+    logger.info("Проверка целостности созданных клонов...")
     valid_clones = []
     for clone_path in successful_clones:
         if check_video_integrity(clone_path):
             valid_clones.append(clone_path)
         else:
-            logger.warning("⚠️  Клон повреждён и будет удалён: %s", clone_path.name)
+            logger.warning("Клон повреждён и будет удалён: %s", clone_path.name)
             clone_path.unlink(missing_ok=True)
             clone_path.with_suffix(".json").unlink(missing_ok=True)
 

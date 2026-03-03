@@ -5,6 +5,7 @@ browser.py – Инициализация браузера с поддержко
 
 import logging
 from pathlib import Path
+from typing import List
 from rebrowser_playwright.sync_api import sync_playwright, BrowserContext, Playwright
 from playwright_stealth import Stealth
 
@@ -83,7 +84,11 @@ def launch_browser(account_cfg: dict, profile_dir: Path) -> tuple[Playwright, Br
     context.on("page", apply_stealth_to_page)
 
     if manual_login_needed:
-        _manual_login_flow(context, account_cfg.get("platforms", ["youtube"]))
+        platforms = account_cfg.get("platforms", ["youtube"])
+        # FIX #9: убеждаемся, что передаём список, а не строку
+        if isinstance(platforms, str):
+            platforms = [platforms]
+        _manual_login_flow(context, platforms)
 
     return pw, context
 

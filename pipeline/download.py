@@ -14,7 +14,7 @@ from dataclasses import dataclass, field
 from enum import Enum, auto
 from pathlib import Path
 from threading import Lock
-from typing import Final
+from typing import Final, Optional
 
 from yt_dlp import YoutubeDL
 
@@ -46,15 +46,19 @@ class DownloadResult:
 
 @dataclass
 class DownloadStats:
-    total:           int        = 0
+    # FIX #12: total убран из конструктора — теперь это вычисляемое свойство,
+    # исключающее расхождение между переданным значением и реальным счётчиком.
     ok:              int        = 0
     failed:          int        = 0
     integrity_error: int        = 0
     files:           list[Path] = field(default_factory=list)
 
     def __post_init__(self) -> None:
-        # Инициализируем блокировку в __post_init__, чтобы не засорять dataclass
         self._lock: Lock = Lock()
+
+    @property
+    def total(self) -> int:
+        return self.ok + self.failed + self.integrity_error
 
     def record(self, result: DownloadResult) -> None:
         with self._lock:
@@ -139,7 +143,7 @@ def download_all(max_workers: int = cfg.MAX_WORKERS, proxy: Optional[str] = None
         encoding="utf-8",
     )
 
-    stats = DownloadStats(total=len(urls))
+    stats = DownloadStats()
     log.info("Всего: %d | Потоков: %d | Прокси: %s",
              len(urls), max_workers, proxy or "нет")
 
