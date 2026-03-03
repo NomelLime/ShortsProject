@@ -22,7 +22,7 @@ from pipeline import (
     uploader,          # содержит функцию upload_all()
     finalize,
 )
-from pipeline.utils import ensure_dirs
+from pipeline.utils import ensure_dirs, validate_config
 from pipeline import config
 
 def parse_args():
@@ -51,6 +51,9 @@ def run_stage(stage_func, stage_name, *args, **kwargs):
 
 def main():
     args = parse_args()
+
+    # Validate config early
+    validate_config()
 
     # Создаём все необходимые директории
     ensure_dirs()

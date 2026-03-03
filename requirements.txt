@@ -1,0 +1,25 @@
+# Основные
+ffmpeg-python
+opencv-python
+numpy
+tqdm
+
+# AI
+ultralytics
+ollama
+torch
+torchvision
+
+# Скачивание и поиск
+yt-dlp
+
+# Браузерная автоматизация
+playwright
+playwright-stealth
+
+# Утилиты
+requests
+python-dotenv
+scenedetect[opencv]  # или просто scenedetect
+
+# Для работы с датами и т.д.
