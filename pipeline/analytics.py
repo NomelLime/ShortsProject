@@ -701,6 +701,62 @@ def mark_repost_queued(video_stem: str, platform: str) -> None:
         _save_analytics(data)
 
 
+
+def _make_unique_variant(src: Path, out_dir: Path) -> Optional[Path]:
+    """
+    Создаёт уникализированную версию видео для репоста через ffmpeg.
+
+    Применяет лёгкие вариации, чтобы платформы не определили повтор:
+      - случайная скорость ±3%
+      - случайная яркость/контраст
+      - горизонтальный флип (50%)
+      - случайный шум
+    Лёгче полного клонера: работает в одном процессе, нет фона/музыки.
+    Возвращает путь к новому файлу или None при ошибке.
+    """
+    import subprocess as _sp, random as _rnd, tempfile as _tmp
+
+    out_dir.mkdir(parents=True, exist_ok=True)
+    out_path = out_dir / f"_unique_{src.stem}.mp4"
+
+    speed      = _rnd.uniform(0.97, 1.03)
+    brightness = _rnd.uniform(-0.03, 0.03)
+    contrast   = _rnd.uniform(0.96, 1.04)
+    saturation = _rnd.uniform(0.90, 1.10)
+    hue        = _rnd.uniform(-8.0, 8.0)
+    noise      = _rnd.randint(3, 8)
+    do_hflip   = _rnd.random() < 0.5
+
+    vf_parts = [
+        f"setpts={1/speed:.4f}*PTS",
+        f"eq=brightness={brightness:.4f}:contrast={contrast:.4f}:saturation={saturation:.4f}",
+        f"hue=h={hue:.2f}",
+        f"noise=alls={noise}:allf=t",
+    ]
+    if do_hflip:
+        vf_parts.append("hflip")
+
+    cmd = [
+        "ffmpeg", "-y", "-i", str(src),
+        "-vf", ",".join(vf_parts),
+        "-af", f"atempo={speed:.4f}",
+        "-c:v", "libx264", "-crf", "23",
+        "-c:a", "aac", "-b:a", "192k",
+        "-map_metadata", "-1",
+        str(out_path),
+    ]
+
+    try:
+        _sp.run(cmd, check=True, capture_output=True, timeout=300)
+        logger.debug("[repost] Уникализировано: %s -> %s", src.name, out_path.name)
+        return out_path
+    except Exception as exc:
+        logger.warning("[repost] Уникализация не удалась (%s) — используем оригинал", exc)
+        if out_path.exists():
+            out_path.unlink(missing_ok=True)
+        return None
+
+
 def _find_archived_video(stem: str) -> Optional[Path]:
     """Ищет архивированное видео по stem во всех папках архива."""
     archive_root = config.ARCHIVE_DIR
@@ -764,15 +820,23 @@ def queue_reposts(dry_run: bool = False) -> int:
         else:
             try:
                 import shutil as _sh, json as _j
-                _sh.copy2(archive_path, dest_video)
+                # Уникализация: прогоняем через лёгкую вариацию (ffmpeg)
+                # чтобы платформа не определила повторную загрузку того же контента
+                unique_path = _make_unique_variant(archive_path, dest_video.parent)
+                if unique_path:
+                    _sh.move(str(unique_path), str(dest_video))
+                else:
+                    _sh.copy2(archive_path, dest_video)
+
                 dest_meta.write_text(
                     _j.dumps(repost_meta, ensure_ascii=False, indent=2), encoding="utf-8"
                 )
                 mark_repost_queued(stem, platform)
                 queued += 1
                 logger.info(
-                    "[repost] ✅ %s -> %s/%s (было %d просмотров)",
-                    archive_path.name, acc["name"], platform, candidate["original_views"],
+                    "[repost] ✅ %s -> %s/%s (было %d просмотров, уникализировано: %s)",
+                    archive_path.name, acc["name"], platform,
+                    candidate["original_views"], unique_path is not None,
                 )
             except Exception as exc:
                 logger.error("[repost] Ошибка: %s", exc)

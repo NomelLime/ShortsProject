@@ -43,10 +43,24 @@ def _pick_random_bg() -> Optional[Path]:
     return get_random_asset(Path(config.BG_DIR), (".mp4", ".mov", ".avi"))
 
 
-def _save_clone_meta(out_path: Path, meta: Dict) -> None:
-    """Сохраняет метаданные клона в JSON-файл рядом с видео."""
+def _save_clone_meta(
+    out_path: Path,
+    meta: Dict,
+    all_variants: Optional[List[Dict]] = None,
+) -> None:
+    """
+    Сохраняет метаданные клона в JSON-файл рядом с видео.
+    all_variants — полный список вариантов метаданных от AI;
+    сохраняется в ключе "all_variants" для A/B тестирования в distributor.py.
+    """
     json_path = out_path.with_suffix(".json")
     meta_to_save = {k: v for k, v in meta.items() if k != "yolo_per_frame"}
+    if all_variants and len(all_variants) > 1:
+        meta_to_save["all_variants"] = [
+            {k: v for k, v in m.items()
+             if k not in ("yolo_per_frame", "best_segment", "overlays")}
+            for m in all_variants
+        ]
     try:
         with open(json_path, "w", encoding="utf-8") as f:
             json.dump(meta_to_save, f, ensure_ascii=False, indent=2)
@@ -152,8 +166,8 @@ def _clone_task(task: Tuple) -> Tuple[int, str, Optional[Path]]:
         import subprocess
         subprocess.run(cmd, check=True, capture_output=True)
 
-        # Сохраняем метаданные
-        _save_clone_meta(Path(out_path), meta)
+        # Сохраняем метаданные (all_variants нужен для A/B в distributor)
+        _save_clone_meta(Path(out_path), meta, all_variants=metadata_variants)
 
         flip_tag   = " hflip" if do_hflip else ""
         music_tag  = f" +music@{insert_t:.1f}s" if music_path else ""

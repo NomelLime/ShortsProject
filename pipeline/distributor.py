@@ -195,6 +195,24 @@ def distribute_shorts(dry_run: bool = False) -> None:
         log.info("Все очереди заполнены — нечего распределять.")
         return
 
+    # ── A/B: регистрируем варианты метаданных для каждого source-стема ─────────
+    # Группируем клоны по «source stem» (без суффикса _clone0X/_clip0001)
+    # и регистрируем all_variants в analytics.json через assign_ab_variants.
+    # Это позволяет дистрибьютору выдать каждому аккаунту свой вариант заголовка.
+    if config.AB_TEST_ENABLED:
+        import re as _re
+        seen_ab_stems: set = set()
+        for _item in shorts:
+            _m   = _item["meta"]
+            _all = _m.get("all_variants")
+            if not _all or len(_all) < 2:
+                continue
+            _stem = _item["video_path"].stem
+            _src  = _re.sub(r"_clone\d+$", "", _re.sub(r"_clip\d+$", "", _stem))
+            if _src not in seen_ab_stems:
+                assign_ab_variants(_src, _all)
+                seen_ab_stems.add(_src)
+
     # Round-robin: циклично обходим слоты, пока есть видео и свободные слоты
     short_idx = 0
     exhausted = set()
