@@ -24,6 +24,7 @@ from pipeline import (
 )
 from pipeline.utils import ensure_dirs, validate_config
 from pipeline import config
+from pipeline.scheduler import ActivityScheduler
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Запуск полного пайплайна обработки и загрузки видео")
@@ -58,47 +59,49 @@ def main():
     # Создаём все необходимые директории
     ensure_dirs()
 
-    # ---- Этап 0: Поиск трендов ----
-    if not args.skip_search:
-        run_stage(downloader.search_and_save, "downloader")
-    else:
-        logger.info("Пропуск этапа поиска (--skip-search)")
+    # Запускаем фоновый планировщик активности аккаунтов
+    # Активность идёт параллельно с пайплайном, независимо от загрузки
+    with ActivityScheduler():
 
-    # ---- Этап 1: Скачивание ----
-    if not args.skip_download:
-        run_stage(download.download_all, "download")
-    else:
-        logger.info("Пропуск этапа скачивания (--skip-download)")
+        # ---- Этап 0: Поиск трендов ----
+        if not args.skip_search:
+            run_stage(downloader.search_and_save, "downloader")
+        else:
+            logger.info("Пропуск этапа поиска (--skip-search)")
 
-    # ---- Этап 2: Обработка (нарезка, AI, постобработка, клонирование) ----
-    if not args.skip_processing:
-        run_stage(main_processing.run_processing, "processing", dry_run=args.dry_run)
-    else:
-        logger.info("Пропуск этапа обработки (--skip-processing)")
+        # ---- Этап 1: Скачивание ----
+        if not args.skip_download:
+            run_stage(download.download_all, "download")
+        else:
+            logger.info("Пропуск этапа скачивания (--skip-download)")
 
-    # ---- Этап 3: Распределение по аккаунтам ----
-    if not args.skip_distribute:
-        run_stage(distributor.distribute_shorts, "distributor", dry_run=args.dry_run)
-    else:
-        logger.info("Пропуск этапа распределения (--skip-distribute)")
+        # ---- Этап 2: Обработка (нарезка, AI, постобработка, клонирование) ----
+        if not args.skip_processing:
+            run_stage(main_processing.run_processing, "processing", dry_run=args.dry_run)
+        else:
+            logger.info("Пропуск этапа обработки (--skip-processing)")
 
-    # ---- Этап 4: Загрузка на платформы ----
-    if not args.skip_upload:
-        # uploader.upload_all() возвращает список результатов для финализации
-        upload_results = run_stage(uploader.upload_all, "uploader", dry_run=args.dry_run)
-        # FIX #1: run_stage возвращает False при исключении — защищаемся от TypeError в finalize
-        if not isinstance(upload_results, list):
-            logger.warning("Загрузка не вернула список результатов — финализация получит пустой список.")
+        # ---- Этап 3: Распределение по аккаунтам ----
+        if not args.skip_distribute:
+            run_stage(distributor.distribute_shorts, "distributor", dry_run=args.dry_run)
+        else:
+            logger.info("Пропуск этапа распределения (--skip-distribute)")
+
+        # ---- Этап 4: Загрузка на платформы ----
+        if not args.skip_upload:
+            upload_results = run_stage(uploader.upload_all, "uploader", dry_run=args.dry_run)
+            if not isinstance(upload_results, list):
+                logger.warning("Загрузка не вернула список результатов — финализация получит пустой список.")
+                upload_results = []
+        else:
             upload_results = []
-    else:
-        upload_results = []
-        logger.info("Пропуск этапа загрузки (--skip-upload)")
+            logger.info("Пропуск этапа загрузки (--skip-upload)")
 
-    # ---- Этап 5: Финализация (архивирование, отчёт) ----
-    if not args.skip_finalize:
-        run_stage(finalize.finalize_and_report, "finalize", upload_results, dry_run=args.dry_run)
-    else:
-        logger.info("Пропуск этапа финализации (--skip-finalize)")
+        # ---- Этап 5: Финализация (архивирование, отчёт) ----
+        if not args.skip_finalize:
+            run_stage(finalize.finalize_and_report, "finalize", upload_results, dry_run=args.dry_run)
+        else:
+            logger.info("Пропуск этапа финализации (--skip-finalize)")
 
     logger.info("=" * 60)
     logger.info("ПАЙПЛАЙН ЗАВЕРШЁН")

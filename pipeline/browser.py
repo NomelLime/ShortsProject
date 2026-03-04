@@ -28,6 +28,53 @@ def _build_proxy_config(proxy: dict) -> dict | None:
     return proxy_cfg
 
 
+def resolve_working_proxy(account_cfg: dict) -> dict | None:
+    """
+    Возвращает первый работающий прокси для аккаунта.
+
+    Порядок проверки:
+      1. Основной прокси: account_cfg["proxy"]
+      2. Резервные прокси: account_cfg["fallback_proxies"] (список)
+
+    Если рабочий прокси найден — обновляет account_cfg["_active_proxy"]
+    для использования в этой сессии. Возвращает dict прокси или None.
+
+    Пример конфига аккаунта с резервными прокси:
+      {
+        "proxy": {"host": "1.2.3.4", "port": 8080},
+        "fallback_proxies": [
+          {"host": "5.6.7.8", "port": 8080, "username": "u", "password": "p"},
+          {"host": "9.10.11.12", "port": 3128}
+        ]
+      }
+    """
+    candidates: list[dict] = []
+
+    primary = account_cfg.get("proxy", {})
+    if primary and primary.get("host"):
+        candidates.append(primary)
+
+    for fb in account_cfg.get("fallback_proxies", []):
+        if fb and fb.get("host"):
+            candidates.append(fb)
+
+    if not candidates:
+        return None  # прокси не настроен вообще
+
+    for proxy in candidates:
+        label = f"{proxy.get('host')}:{proxy.get('port')}"
+        logger.debug("[proxy] Проверяем %s...", label)
+        if utils.check_proxy_health(proxy):
+            logger.info("[proxy] Рабочий прокси: %s", label)
+            account_cfg["_active_proxy"] = proxy
+            return proxy
+        else:
+            logger.warning("[proxy] Недоступен: %s — пробуем следующий...", label)
+
+    logger.error("[proxy] Все прокси (%d) недоступны для аккаунта.", len(candidates))
+    return None
+
+
 def _is_profile_empty(profile_dir: Path) -> bool:
     """Проверяет, пустая ли папка профиля."""
     if not profile_dir.exists():
@@ -94,19 +141,24 @@ def check_session_valid(context: BrowserContext, platforms: list[str]) -> dict[s
 def launch_browser(account_cfg: dict, profile_dir: Path) -> tuple[Playwright, BrowserContext]:
     """
     Запускает persistent context для аккаунта с применением stealth.
-    Перед запуском проверяет работоспособность прокси.
-    Если прокси указан, но недоступен — выбрасывает RuntimeError.
-    """
-    proxy_raw = account_cfg.get("proxy", {})
-    proxy_config = _build_proxy_config(proxy_raw)
 
-    # Проверяем прокси ДО запуска браузера
-    if proxy_raw and proxy_raw.get("host"):
-        if not utils.check_proxy_health(proxy_raw):
-            raise RuntimeError(
-                f"Прокси {proxy_raw.get('host')}:{proxy_raw.get('port')} недоступен. "
-                "Запуск браузера для этого аккаунта отменён."
-            )
+    Перед запуском перебирает прокси (основной + резервные) и использует
+    первый работающий. Если ни один прокси не работает — выбрасывает RuntimeError.
+    Если прокси не настроен вообще — запускает без прокси.
+    """
+    active_proxy = resolve_working_proxy(account_cfg)
+
+    # Есть кандидаты, но ни один не ответил
+    has_proxy_cfg = bool(
+        account_cfg.get("proxy", {}).get("host") or account_cfg.get("fallback_proxies")
+    )
+    if has_proxy_cfg and active_proxy is None:
+        raise RuntimeError(
+            "Все прокси аккаунта недоступны (основной + резервные). "
+            "Запуск браузера отменён."
+        )
+
+    proxy_config = _build_proxy_config(active_proxy) if active_proxy else None
     user_agent = account_cfg.get(
         "user_agent",
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "

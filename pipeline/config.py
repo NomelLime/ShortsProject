@@ -26,13 +26,14 @@ HASHTAGS_FILE = ASSETS_DIR / 'trending_hashtags.txt'
 # ----------------------------------------------------------------------
 # Пути для загрузчика
 # ----------------------------------------------------------------------
-KEYWORDS_FILE     = BASE_DIR / "data" / "keywords.txt"
-URLS_FILE         = BASE_DIR / "data" / "urls.txt"
-FAILED_URLS_FILE  = BASE_DIR / "data" / "failed_urls.txt"
-DAILY_LIMIT_FILE  = BASE_DIR / "data" / "daily_limit.json"
+KEYWORDS_FILE        = BASE_DIR / "data" / "keywords.txt"
+URLS_FILE            = BASE_DIR / "data" / "urls.txt"
+FAILED_URLS_FILE     = BASE_DIR / "data" / "failed_urls.txt"
+DOWNLOAD_CHECKPOINT  = BASE_DIR / "data" / "download_checkpoint.json"   # чекпоинт скачивания
+DAILY_LIMIT_FILE     = BASE_DIR / "data" / "daily_limit.json"
 UPLOAD_TRACKING_FILE = BASE_DIR / "data" / "upload_tracking.json"
-CONFIG_JSON       = BASE_DIR / "config.json"
-ACCOUNTS_ROOT     = os.getenv("ACCOUNTS_ROOT", "accounts")
+CONFIG_JSON          = BASE_DIR / "config.json"
+ACCOUNTS_ROOT        = os.getenv("ACCOUNTS_ROOT", "accounts")
 LOG_FILE          = BASE_DIR / "data" / "pipeline.log"
 
 # Куки-файлы
@@ -141,6 +142,14 @@ BROWSER_SEARCH_ENABLED      = True   # включить Playwright-поиск п
 BROWSER_SEARCH_HEADLESS     = False  # False = видимый браузер для стелс-режима
 BROWSER_SEARCH_KEYWORDS_MAX = 3      # сколько keywords обрабатывать через браузер
 
+# ----------------------------------------------------------------------
+# Планировщик фоновой активности (scheduler.py)
+# Активность запускается независимо от цикла загрузки
+# ----------------------------------------------------------------------
+ACTIVITY_SCHEDULER_ENABLED      = True
+ACTIVITY_SCHEDULER_INTERVAL_MIN = int(os.getenv("ACTIVITY_INTERVAL_MIN", "90"))   # раз в 90 мин на аккаунт
+ACTIVITY_SCHEDULER_JITTER_SEC   = int(os.getenv("ACTIVITY_JITTER_SEC",   "300"))  # ±5 мин разброс
+
 # AI-расширение ключевых слов
 AI_KEYWORD_EXPANSION        = True   # расширять keywords через Ollama перед поиском
 AI_KEYWORD_EXPANSION_COUNT  = 5      # сколько новых запросов генерировать на 1 keyword
@@ -186,11 +195,9 @@ PLATFORMS = [
         search_suffixes=("tiktok",),
         prefixes=("ytsearch{n}:",),
     ),
-    Platform(
-        name="Instagram Reels",
-        search_suffixes=("instagram reels",),
-        prefixes=("ytsearch{n}:",),
-    ),
+    # Instagram Reels намеренно исключён из yt-dlp поиска:
+    # ytsearch не достаёт Reels напрямую. Instagram ищется через
+    # браузерный поиск (_search_browser в downloader.py).
 ]
 
 # ----------------------------------------------------------------------
