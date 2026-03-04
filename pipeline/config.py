@@ -227,6 +227,7 @@ PLATFORM_URLS = {
 BROWSER_SEARCH_URLS = {
     "youtube":   "https://www.youtube.com/results?search_query={query}&sp=EgIYAQ%253D%253D",  # фильтр: Short
     "tiktok":    "https://www.tiktok.com/search?q={query}",
+    "instagram": "https://www.instagram.com/explore/search/keyword/?q={query}",
 }
 
 # ----------------------------------------------------------------------

@@ -38,8 +38,19 @@ def _is_profile_empty(profile_dir: Path) -> bool:
 def launch_browser(account_cfg: dict, profile_dir: Path) -> tuple[Playwright, BrowserContext]:
     """
     Запускает persistent context для аккаунта с применением stealth.
+    Перед запуском проверяет работоспособность прокси.
+    Если прокси указан, но недоступен — выбрасывает RuntimeError.
     """
-    proxy_config = _build_proxy_config(account_cfg.get("proxy", {}))
+    proxy_raw = account_cfg.get("proxy", {})
+    proxy_config = _build_proxy_config(proxy_raw)
+
+    # Проверяем прокси ДО запуска браузера
+    if proxy_raw and proxy_raw.get("host"):
+        if not utils.check_proxy_health(proxy_raw):
+            raise RuntimeError(
+                f"Прокси {proxy_raw.get('host')}:{proxy_raw.get('port')} недоступен. "
+                "Запуск браузера для этого аккаунта отменён."
+            )
     user_agent = account_cfg.get(
         "user_agent",
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "

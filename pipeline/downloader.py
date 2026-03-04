@@ -226,6 +226,22 @@ def _browser_search_platform(
                     except Exception:
                         pass
 
+        elif platform == "instagram":
+            selectors = [
+                "a[href*='/reel/']",
+                "a[href*='/p/']",
+            ]
+            for sel in selectors:
+                for el in page.locator(sel).all()[:30]:
+                    try:
+                        href = el.get_attribute("href")
+                        if href and ("/reel/" in href or "/p/" in href):
+                            if not href.startswith("http"):
+                                href = "https://www.instagram.com" + href
+                            urls_found.append(href)
+                    except Exception:
+                        pass
+
         # Имитируем «просмотр» нескольких результатов — кратко зависаем
         watch_time = random.uniform(3, 8)
         log.debug("[browser][%s] «Изучаем» результаты %.1f сек", platform, watch_time)
@@ -246,8 +262,9 @@ def _browser_search_platform(
 def _try_like_first_result(page, platform: str) -> None:
     """Пытается поставить лайк первому видео в результатах поиска."""
     selectors = {
-        "youtube": "ytd-video-renderer #top-level-buttons button[aria-label*='like']",
-        "tiktok":  "[data-e2e='like-icon']",
+        "youtube":   "ytd-video-renderer #top-level-buttons button[aria-label*='like']",
+        "tiktok":    "[data-e2e='like-icon']",
+        "instagram": "svg[aria-label='Like']",
     }
     sel = selectors.get(platform)
     if not sel:
@@ -317,7 +334,7 @@ def _search_browser(keywords: list[str], proxy: str | None) -> list[str]:
         stealth.apply_stealth_sync(page)
 
         for keyword in kws:
-            for platform in ("youtube", "tiktok"):
+            for platform in ("youtube", "tiktok", "instagram"):
                 found = _browser_search_platform(page, platform, keyword)
                 all_browser_urls.extend(found)
 

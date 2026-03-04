@@ -111,7 +111,25 @@ def upload_all(dry_run: bool = False) -> List[Dict]:
                 continue
 
             profile_dir = acc_dir / "browser_profile"
-            pw, context = launch_browser(acc_cfg, profile_dir)
+
+            try:
+                pw, context = launch_browser(acc_cfg, profile_dir)
+            except RuntimeError as proxy_err:
+                logger.error(
+                    "[%s][%s] Прокси недоступен — аккаунт пропущен. %s",
+                    acc_name, platform, proxy_err,
+                )
+                send_telegram(
+                    f"⚠️ [{acc_name}] Прокси недоступен — загрузка на {platform} пропущена.\n"
+                    f"{proxy_err}"
+                )
+                results.append({
+                    "status": "proxy_error",
+                    "platform": platform,
+                    "account_id": acc_name,
+                    "error_msg": str(proxy_err),
+                })
+                continue
 
             try:
                 run_activity(context, platform, queue[0].get("meta", {}))

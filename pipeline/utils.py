@@ -144,6 +144,55 @@ def load_proxy() -> Optional[str]:
     return proxy if proxy else None
 
 
+def check_proxy_health(proxy_cfg: dict, timeout: int = 10) -> bool:
+    """
+    Проверяет работоспособность прокси из конфига аккаунта.
+
+    proxy_cfg — словарь вида:
+        {"host": "...", "port": 8080, "username": "...", "password": "..."}
+
+    Возвращает True если прокси отвечает, False если недоступен.
+    """
+    import urllib.request
+    import urllib.error
+
+    if not proxy_cfg or not proxy_cfg.get("host"):
+        return True  # прокси не настроен — считаем OK
+
+    host = proxy_cfg["host"]
+    port = proxy_cfg.get("port", 8080)
+    username = proxy_cfg.get("username", "")
+    password = proxy_cfg.get("password", "")
+
+    if username:
+        proxy_url = f"http://{username}:{password}@{host}:{port}"
+    else:
+        proxy_url = f"http://{host}:{port}"
+
+    proxy_handler = urllib.request.ProxyHandler({"http": proxy_url, "https": proxy_url})
+
+    if username:
+        password_mgr = urllib.request.HTTPPasswordMgrWithDefaultRealm()
+        password_mgr.add_password(None, proxy_url, username, password)
+        auth_handler = urllib.request.ProxyBasicAuthHandler(password_mgr)
+        opener = urllib.request.build_opener(proxy_handler, auth_handler)
+    else:
+        opener = urllib.request.build_opener(proxy_handler)
+
+    try:
+        req = urllib.request.Request(
+            "http://httpbin.org/ip",
+            headers={"User-Agent": "Mozilla/5.0"},
+        )
+        with opener.open(req, timeout=timeout):
+            return True
+    except Exception as exc:
+        get_logger("utils").warning(
+            "Прокси %s:%s недоступен: %s", host, port, exc
+        )
+        return False
+
+
 def unique_lines(path: Path) -> List[str]:
     """Читает файл и возвращает уникальные непустые строки (порядок сохраняется)."""
     if not path.exists():
