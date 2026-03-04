@@ -20,9 +20,50 @@ from pipeline import config
 
 log = logging.getLogger("distributor")
 
-# FIX #11: TODAY убран с уровня модуля — теперь вычисляется внутри функций,
-# чтобы корректно работать при запусках через полночь.
 MIN_PER_ACCOUNT = 3
+
+# JSON-файл для отслеживания, на какие платформы распределено каждое видео
+DISTRIBUTED_TRACKING_FILE = config.BASE_DIR / "data" / "distributed_tracking.json"
+
+
+def _load_distributed_tracking() -> dict:
+    """Загружает таблицу распределения. Структура: {video_stem: {platform: bool}}"""
+    if not DISTRIBUTED_TRACKING_FILE.exists():
+        return {}
+    try:
+        return json.loads(DISTRIBUTED_TRACKING_FILE.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+
+def _save_distributed_tracking(data: dict) -> None:
+    DISTRIBUTED_TRACKING_FILE.parent.mkdir(parents=True, exist_ok=True)
+    DISTRIBUTED_TRACKING_FILE.write_text(
+        json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+
+
+def _get_active_platforms() -> set:
+    """
+    Возвращает множество платформ, для которых существует хотя бы один аккаунт.
+    Именно они считаются «обязательными» для распределения перед удалением из OUTPUT_DIR.
+    """
+    accounts_root = Path(config.ACCOUNTS_ROOT)
+    active: set = set()
+    if not accounts_root.exists():
+        return active
+    for acc_dir in accounts_root.iterdir():
+        cfg_path = acc_dir / "config.json"
+        if acc_dir.is_dir() and cfg_path.exists():
+            try:
+                acc_cfg = json.loads(cfg_path.read_text(encoding="utf-8"))
+                platforms = acc_cfg.get("platforms", [acc_cfg.get("platform", "youtube")])
+                if isinstance(platforms, str):
+                    platforms = [platforms]
+                active.update(platforms)
+            except Exception:
+                pass
+    return active or set(config.ALL_PLATFORMS)
 
 
 # ─────────────────────────── Парсинг описания ────────────────────────────
@@ -89,9 +130,17 @@ def distribute_shorts(dry_run: bool = False) -> None:
     """
     Распределяет готовые шортсы по папкам upload_queue/<platform>/
     для каждого аккаунта с учётом дневных лимитов по платформам.
+
+    После того как видео распределено во все очереди активных платформ,
+    оно удаляется из OUTPUT_DIR — копии уже в очередях на загрузку.
+    Архивирование исходника из preparing_shorts/ выполняет finalize.py
+    после подтверждения реальной загрузки на все платформы.
     """
-    today = date.today().isoformat()   # FIX #11: вычисляем здесь, а не на уровне модуля
-    shorts = collect_shorts()
+    today             = date.today().isoformat()
+    shorts            = collect_shorts()
+    active_platforms  = _get_active_platforms()
+    dist_tracking     = _load_distributed_tracking()
+
     if not shorts:
         log.warning("Нет готовых шортсов в %s", config.OUTPUT_DIR)
         return
@@ -127,11 +176,13 @@ def distribute_shorts(dry_run: bool = False) -> None:
             queue_dir = acc_dir / "upload_queue" / platform
             queue_dir.mkdir(parents=True, exist_ok=True)
 
-            # Считаем уже распределённые сегодня
             existing = len(list(queue_dir.glob("*.mp4")))
             slots = max(0, daily_limit - existing)
             if slots == 0:
-                log.info("[%s][%s] Очередь полная (%d/%d).", acc_dir.name, platform, existing, daily_limit)
+                log.info(
+                    "[%s][%s] Очередь полная (%d/%d).",
+                    acc_dir.name, platform, existing, daily_limit,
+                )
                 continue
 
             assigned = 0
@@ -139,26 +190,64 @@ def distribute_shorts(dry_run: bool = False) -> None:
                 item = shorts[short_idx]
                 short_idx += 1
                 video_src = item["video_path"]
-                meta = item["meta"]
+                meta      = item["meta"]
+                stem      = video_src.stem
 
                 dest_video = queue_dir / video_src.name
                 dest_meta  = queue_dir / f"{video_src.stem}_meta.json"
 
                 if dry_run:
                     log.info("[dry_run] %s -> %s/%s", video_src.name, platform, acc_dir.name)
+                    dist_tracking.setdefault(stem, {p: False for p in active_platforms})
+                    dist_tracking[stem][platform] = True
                 else:
                     try:
                         shutil.copy2(video_src, dest_video)
                         dest_meta.write_text(
                             json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8"
                         )
-                        log.info("Распределено: %s -> %s/%s", video_src.name, acc_dir.name, platform)
+                        log.info(
+                            "Распределено: %s -> %s/%s",
+                            video_src.name, acc_dir.name, platform,
+                        )
+                        dist_tracking.setdefault(stem, {p: False for p in active_platforms})
+                        dist_tracking[stem][platform] = True
                     except Exception as e:
                         log.error("Ошибка копирования %s: %s", video_src.name, e)
                         continue
 
                 assigned += 1
 
-    log.info("Распределение завершено. Использовано шортсов: %d / %d", short_idx, len(shorts))
+    if not dry_run:
+        _save_distributed_tracking(dist_tracking)
 
-# ... (adjust distribution logic for multi-platform)
+    # Удаляем из OUTPUT_DIR видео, которые распределены на все активные платформы
+    deleted = 0
+    for stem, platform_map in dist_tracking.items():
+        all_covered = all(platform_map.get(p, False) for p in active_platforms)
+        if not all_covered:
+            missing = [p for p in active_platforms if not platform_map.get(p, False)]
+            log.debug("Пропуск удаления %s — ещё не распределено на: %s", stem, ", ".join(missing))
+            continue
+
+        for ext in config.VIDEO_EXT:
+            video_file = config.OUTPUT_DIR / f"{stem}{ext}"
+            if video_file.exists():
+                if dry_run:
+                    log.info("[dry_run] Удалено бы из OUTPUT_DIR: %s", video_file.name)
+                else:
+                    try:
+                        video_file.unlink()
+                        json_file = video_file.with_suffix(".json")
+                        if json_file.exists():
+                            json_file.unlink()
+                        log.info("Удалено из OUTPUT_DIR (все платформы покрыты): %s", video_file.name)
+                        deleted += 1
+                    except Exception as exc:
+                        log.error("Не удалось удалить %s: %s", video_file, exc)
+                break
+
+    log.info(
+        "Распределение завершено. Использовано шортсов: %d / %d. Удалено из OUTPUT_DIR: %d.",
+        short_idx, len(shorts), deleted,
+    )

@@ -6,6 +6,7 @@ import logging
 import random
 import shutil
 import subprocess
+import threading
 import time
 from pathlib import Path
 from typing import Dict, List, Optional
@@ -19,6 +20,10 @@ from pipeline.notifications import check_and_handle_captcha, send_telegram
 
 logger = logging.getLogger(__name__)
 
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Утилиты
+# ─────────────────────────────────────────────────────────────────────────────
 
 def clean_video_metadata(video_path: Path) -> Path:
     """Очищает метаданные видео через ffmpeg. Возвращает путь к очищенному файлу."""
@@ -42,6 +47,418 @@ def clean_video_metadata(video_path: Path) -> Path:
         return video_path
 
 
+def _human_type(page: Page, text: str) -> None:
+    """Печатает текст посимвольно с задержками, имитируя живого пользователя."""
+    for char in text:
+        page.keyboard.type(char)
+        time.sleep(random.uniform(0.03, 0.12))
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# YouTube
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _upload_youtube(page: Page, video_path: Path, meta: Dict) -> None:
+    """Загружает видео на YouTube через YouTube Studio."""
+    title       = (meta.get("title") or video_path.stem)[:100]
+    description = (meta.get("description") or "")[:4900]
+
+    logger.info("[youtube] Переход в YouTube Studio...")
+    page.goto("https://studio.youtube.com", wait_until="domcontentloaded", timeout=30_000)
+    time.sleep(random.uniform(2, 4))
+    check_and_handle_captcha(page, "youtube")
+
+    # Кнопка «Создать» → «Загрузить видео»
+    logger.info("[youtube] Открываем диалог загрузки...")
+    for sel in ["ytcp-button#create-icon", "button[aria-label*='reate']", "#create-icon"]:
+        try:
+            btn = page.locator(sel).first
+            if btn.is_visible(timeout=5_000):
+                btn.click()
+                break
+        except Exception:
+            continue
+    time.sleep(random.uniform(1, 2))
+
+    for sel in [
+        "tp-yt-paper-item#text-item-0",
+        "[test-id='upload-beta']",
+        "tp-yt-paper-listbox tp-yt-paper-item:first-child",
+    ]:
+        try:
+            item = page.locator(sel).first
+            if item.is_visible(timeout=3_000):
+                item.click()
+                break
+        except Exception:
+            continue
+    time.sleep(random.uniform(1, 2))
+
+    # Загрузка файла
+    logger.info("[youtube] Загружаем файл: %s", video_path.name)
+    page.locator("input[type=file]").first.set_input_files(str(video_path))
+
+    # Ждём появления поля заголовка
+    logger.info("[youtube] Ожидаем открытия формы...")
+    page.wait_for_selector(
+        "#title-textarea, ytcp-social-suggestions-textbox#title-textarea",
+        timeout=60_000,
+    )
+    time.sleep(random.uniform(1, 2))
+
+    # Заголовок
+    logger.info("[youtube] Заполняем заголовок...")
+    for sel in [
+        "#title-textarea div[contenteditable='true']",
+        "ytcp-social-suggestions-textbox#title-textarea div[contenteditable]",
+        "#container #title div[contenteditable]",
+    ]:
+        try:
+            el = page.locator(sel).first
+            if el.is_visible(timeout=3_000):
+                el.click()
+                page.keyboard.press("Control+a")
+                _human_type(page, title)
+                break
+        except Exception:
+            continue
+    time.sleep(random.uniform(0.5, 1.5))
+
+    # Описание
+    if description:
+        for sel in [
+            "#description-textarea div[contenteditable='true']",
+            "#description-container div[contenteditable]",
+            "ytcp-social-suggestions-textbox#description-textarea div[contenteditable]",
+        ]:
+            try:
+                el = page.locator(sel).first
+                if el.is_visible(timeout=3_000):
+                    el.click()
+                    _human_type(page, description)
+                    break
+            except Exception:
+                continue
+        time.sleep(random.uniform(0.5, 1))
+
+    # Не для детей
+    try:
+        el = page.locator("tp-yt-paper-radio-button[name='VIDEO_MADE_FOR_KIDS_NOT_MFK']").first
+        if el.is_visible(timeout=3_000):
+            el.click()
+    except Exception:
+        pass
+
+    # «Далее» × 3
+    for step in range(3):
+        logger.info("[youtube] Шаг %d/3 — нажимаем «Далее»...", step + 1)
+        for sel in [
+            "ytcp-button#next-button",
+            "button[aria-label*='ext']",
+            "ytcp-stepper-navigation ytcp-button:last-child",
+        ]:
+            try:
+                btn = page.locator(sel).first
+                if btn.is_visible(timeout=5_000):
+                    btn.click()
+                    break
+            except Exception:
+                continue
+        time.sleep(random.uniform(1.5, 2.5))
+        check_and_handle_captcha(page, "youtube")
+
+    # Ждём завершения загрузки файла на сервер
+    logger.info("[youtube] Ожидаем завершения загрузки файла (до 10 мин)...")
+    deadline = time.time() + 600
+    while time.time() < deadline:
+        try:
+            done_el = page.locator(
+                "span.ytcp-video-upload-progress:has-text('Upload complete'),"
+                "span.ytcp-video-upload-progress:has-text('Processing complete'),"
+                "[class*='progress-label']:has-text('100%')"
+            ).first
+            if done_el.is_visible(timeout=3_000):
+                break
+        except Exception:
+            pass
+        try:
+            content = page.locator("ytcp-video-upload-progress").inner_text(timeout=2_000)
+            if "complete" in content.lower() or "100" in content:
+                break
+        except Exception:
+            pass
+        time.sleep(5)
+
+    # Публикация
+    logger.info("[youtube] Нажимаем «Сохранить»...")
+    for sel in [
+        "ytcp-button#done-button",
+        "ytcp-button[test-id='publish-button']",
+        "button[aria-label*='ublish']",
+        "button[aria-label*='ave']",
+    ]:
+        try:
+            btn = page.locator(sel).first
+            if btn.is_visible(timeout=5_000):
+                btn.click()
+                break
+        except Exception:
+            continue
+
+    try:
+        page.wait_for_selector(
+            "ytcp-video-upload-dialog[uploading='false'], "
+            "[class*='success-dialog'], "
+            "ytcp-uploads-still-processing-dialog",
+            timeout=30_000,
+        )
+    except Exception:
+        pass
+
+    time.sleep(random.uniform(2, 4))
+    logger.info("[youtube] Публикация завершена: %s", video_path.name)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# TikTok
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _upload_tiktok(page: Page, video_path: Path, meta: Dict) -> None:
+    """Загружает видео на TikTok через веб-интерфейс загрузки."""
+    title    = meta.get("title") or ""
+    tags     = meta.get("tags", [])
+    hashtags = " ".join(f"#{t.strip().replace(' ', '')}" for t in tags[:20])
+    caption  = f"{title} {hashtags}".strip()[:2200]
+
+    logger.info("[tiktok] Переходим на страницу загрузки...")
+    page.goto("https://www.tiktok.com/upload", wait_until="domcontentloaded", timeout=30_000)
+    time.sleep(random.uniform(2, 4))
+    check_and_handle_captcha(page, "tiktok")
+
+    # Загрузка файла
+    logger.info("[tiktok] Загружаем файл: %s", video_path.name)
+    for sel in ["input[type='file']", "input[name='upload-btn']", "input[accept*='video']"]:
+        try:
+            el = page.locator(sel).first
+            el.set_input_files(str(video_path))
+            break
+        except Exception:
+            continue
+
+    # Ждём появления поля caption (означает, что видео обработано)
+    logger.info("[tiktok] Ожидаем обработки видео (до 3 мин)...")
+    deadline = time.time() + 180
+    while time.time() < deadline:
+        try:
+            caption_el = page.locator(
+                ".public-DraftEditor-content, "
+                "[class*='caption'][contenteditable='true'], "
+                "[data-e2e='video-desc'] div[contenteditable]"
+            ).first
+            if caption_el.is_visible(timeout=3_000):
+                break
+        except Exception:
+            pass
+        check_and_handle_captcha(page, "tiktok")
+        time.sleep(4)
+    time.sleep(random.uniform(1, 2))
+
+    # Заполняем подпись
+    if caption:
+        logger.info("[tiktok] Заполняем подпись...")
+        for sel in [
+            ".public-DraftEditor-content",
+            "[class*='caption'][contenteditable='true']",
+            "[data-e2e='video-desc'] div[contenteditable]",
+            "div[contenteditable='true']",
+        ]:
+            try:
+                el = page.locator(sel).first
+                if el.is_visible(timeout=3_000):
+                    el.click()
+                    page.keyboard.press("Control+a")
+                    _human_type(page, caption)
+                    break
+            except Exception:
+                continue
+        time.sleep(random.uniform(0.5, 1.5))
+
+    # Публикация
+    logger.info("[tiktok] Нажимаем «Post»...")
+    for sel in [
+        "button.btn-post",
+        "button[data-e2e='post_video_button']",
+        "button:has-text('Post')",
+        "div[data-e2e='post_video_button']",
+    ]:
+        try:
+            btn = page.locator(sel).first
+            if btn.is_visible(timeout=5_000):
+                btn.click()
+                break
+        except Exception:
+            continue
+
+    try:
+        page.wait_for_url("**/upload**", timeout=30_000)
+    except Exception:
+        pass
+
+    time.sleep(random.uniform(2, 4))
+    logger.info("[tiktok] Публикация завершена: %s", video_path.name)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Instagram
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _upload_instagram(page: Page, video_path: Path, meta: Dict) -> None:
+    """
+    Загружает видео как Instagram Reels.
+    Использует мобильный viewport — Instagram требует его для загрузки видео
+    в браузерном режиме автоматизации.
+    """
+    description = meta.get("description") or meta.get("title") or ""
+    tags        = meta.get("tags", [])
+    hashtags    = " ".join(f"#{t.strip().replace(' ', '')}" for t in tags[:30])
+    caption     = f"{description} {hashtags}".strip()[:2200]
+
+    # Мобильный viewport для корректной работы загрузки
+    page.set_viewport_size({"width": 390, "height": 844})
+    page.evaluate(
+        "Object.defineProperty(navigator, 'userAgent', {get: () => "
+        "'Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) "
+        "AppleWebKit/605.1.15 (KHTML, like Gecko) "
+        "Version/16.0 Mobile/15E148 Safari/604.1'})"
+    )
+
+    logger.info("[instagram] Переходим на Instagram...")
+    page.goto("https://www.instagram.com", wait_until="domcontentloaded", timeout=30_000)
+    time.sleep(random.uniform(2, 4))
+    check_and_handle_captcha(page, "instagram")
+
+    # Кнопка «+» для создания поста
+    logger.info("[instagram] Открываем форму создания поста...")
+    for sel in [
+        "svg[aria-label='New post']",
+        "a[href='/create/select/']",
+        "svg[aria-label='New Post']",
+        "[data-testid='new-post-button']",
+    ]:
+        try:
+            el = page.locator(sel).first
+            if el.is_visible(timeout=5_000):
+                el.click()
+                break
+        except Exception:
+            continue
+    time.sleep(random.uniform(1, 2))
+
+    # Загрузка файла
+    logger.info("[instagram] Загружаем файл: %s", video_path.name)
+    uploaded = False
+    try:
+        file_input = page.locator("input[type='file']").first
+        file_input.set_input_files(str(video_path))
+        uploaded = True
+    except Exception:
+        pass
+
+    if not uploaded:
+        for sel in ["button:has-text('Select from computer')", "button:has-text('Select From Computer')"]:
+            try:
+                btn = page.locator(sel).first
+                if btn.is_visible(timeout=3_000):
+                    with page.expect_file_chooser() as fc_info:
+                        btn.click()
+                    fc_info.value.set_files(str(video_path))
+                    break
+            except Exception:
+                continue
+    time.sleep(random.uniform(2, 4))
+
+    # Выбираем Reels если появился выбор формата
+    try:
+        reels_btn = page.locator("button:has-text('Reels'), [aria-label='Reels']").first
+        if reels_btn.is_visible(timeout=5_000):
+            reels_btn.click()
+            time.sleep(1)
+    except Exception:
+        pass
+
+    # Нажимаем «Next» до экрана описания (до 3 раз)
+    for _ in range(3):
+        try:
+            next_btn = page.locator(
+                "button:has-text('Next'), button:has-text('Далее'), [aria-label='Next']"
+            ).first
+            if next_btn.is_visible(timeout=5_000):
+                next_btn.click()
+                time.sleep(random.uniform(1, 2))
+                check_and_handle_captcha(page, "instagram")
+            else:
+                break
+        except Exception:
+            break
+
+    # Заполняем подпись
+    if caption:
+        logger.info("[instagram] Заполняем подпись...")
+        for sel in [
+            "textarea[aria-label*='caption'], textarea[placeholder*='caption']",
+            "div[contenteditable='true'][aria-label*='caption']",
+            "div[role='textbox'][contenteditable='true']",
+        ]:
+            try:
+                el = page.locator(sel).first
+                if el.is_visible(timeout=3_000):
+                    el.click()
+                    _human_type(page, caption)
+                    break
+            except Exception:
+                continue
+        time.sleep(random.uniform(0.5, 1.5))
+
+    # Публикация
+    logger.info("[instagram] Нажимаем «Share»...")
+    for sel in [
+        "button:has-text('Share')",
+        "button:has-text('Поделиться')",
+        "div[role='button']:has-text('Share')",
+        "[aria-label='Share']",
+    ]:
+        try:
+            btn = page.locator(sel).first
+            if btn.is_visible(timeout=5_000):
+                btn.click()
+                break
+        except Exception:
+            continue
+
+    try:
+        page.wait_for_selector(
+            "span:has-text('Your reel has been shared'), "
+            "div:has-text('Your video has been shared')",
+            timeout=60_000,
+        )
+    except Exception:
+        pass
+
+    time.sleep(random.uniform(2, 4))
+    logger.info("[instagram] Публикация завершена: %s", video_path.name)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Диспетчер
+# ─────────────────────────────────────────────────────────────────────────────
+
+_PLATFORM_UPLOADERS = {
+    "youtube":   _upload_youtube,
+    "tiktok":    _upload_tiktok,
+    "instagram": _upload_instagram,
+}
+
+
 def upload_video(
     context: BrowserContext,
     platform: str,
@@ -50,22 +467,40 @@ def upload_video(
     account_name: str = "",
     account_cfg: Dict = None,
 ) -> bool:
-    # FIX #5: last_error объявлен снаружи цикла — доступен после него
+    """
+    Загружает видео на платформу с повторными попытками (до 5).
+    Возвращает True при успехе, False после 5 неудач.
+    """
+    uploader_fn = _PLATFORM_UPLOADERS.get(platform)
+    if uploader_fn is None:
+        logger.error("[%s] Неизвестная платформа — загрузка невозможна.", platform)
+        return False
+
     last_error: Optional[Exception] = None
 
     for attempt in range(5):
+        page = context.new_page()
         try:
-            # TODO: реализовать логику загрузки для каждой платформы
-            send_telegram(f"Upload success for {video_path.name} on {platform}")
+            uploader_fn(page, video_path, meta)
+            send_telegram(f"✅ Загружено <b>{video_path.name}</b> на <b>{platform}</b>")
             return True
         except Exception as e:
             last_error = e
             backoff = 2 ** attempt * 60
-            logger.warning("Retry %d/5 after %.1f min: %s", attempt + 1, backoff / 60, e)
+            logger.warning(
+                "[%s] Попытка %d/5 неудачна: %s — следующая через %.1f мин",
+                platform, attempt + 1, e, backoff / 60,
+            )
             time.sleep(backoff)
             send_telegram(
-                f"Upload retry {attempt+1} for {video_path.name} on {platform}: {str(e)[:100]}"
+                f"⚠️ Повтор {attempt+1}/5 для <b>{video_path.name}</b> "
+                f"на <b>{platform}</b>: {str(e)[:100]}"
             )
+        finally:
+            try:
+                page.close()
+            except Exception:
+                pass
 
     # Все 5 попыток провалились
     failed_dir = Path(config.ACCOUNTS_ROOT) / account_name / "failed"
@@ -75,9 +510,16 @@ def upload_video(
         failed_dir / f"{video_path.stem}.error.json",
         {"error": str(last_error)},
     )
-    send_telegram(f"Upload failed after 5 attempts for {video_path.name} on {platform}")
+    send_telegram(
+        f"❌ Не удалось загрузить <b>{video_path.name}</b> на <b>{platform}</b> "
+        f"после 5 попыток. Видео перемещено в <code>failed/</code>."
+    )
     return False
 
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Основная функция
+# ─────────────────────────────────────────────────────────────────────────────
 
 def upload_all(dry_run: bool = False) -> List[Dict]:
     """Загружает все видео из очередей всех аккаунтов. Возвращает список результатов."""
@@ -124,28 +566,23 @@ def upload_all(dry_run: bool = False) -> List[Dict]:
                     f"{proxy_err}"
                 )
                 results.append({
-                    "status": "proxy_error",
-                    "platform": platform,
-                    "account_id": acc_name,
-                    "error_msg": str(proxy_err),
+                    "status": "proxy_error", "platform": platform,
+                    "account_id": acc_name, "error_msg": str(proxy_err),
                 })
                 continue
 
             try:
-                # Проверяем сессию для текущей платформы
                 session_status = check_session_valid(context, [platform])
                 if not session_status.get(platform, False):
                     logger.warning(
                         "[%s][%s] Аккаунт не залогинен. Ожидаем ручного входа (до %d мин).",
-                        acc_name, platform,
-                        config.CAPTCHA_WAIT_TIMEOUT_SEC // 60,
+                        acc_name, platform, config.CAPTCHA_WAIT_TIMEOUT_SEC // 60,
                     )
                     send_telegram(
                         f"🔐 [{acc_name}] Требуется вход в {platform}.\n"
-                        f"Откройте браузер, войдите в аккаунт и нажмите ENTER в терминале.\n"
+                        f"Откройте браузер, войдите и нажмите ENTER в терминале.\n"
                         f"Ожидание до {config.CAPTCHA_WAIT_TIMEOUT_SEC // 60} мин."
                     )
-
                     login_urls = {
                         "youtube":   "https://accounts.google.com/ServiceLogin",
                         "tiktok":    "https://www.tiktok.com/login",
@@ -154,14 +591,11 @@ def upload_all(dry_run: bool = False) -> List[Dict]:
                     login_page = context.new_page()
                     login_page.goto(login_urls.get(platform, "https://google.com"))
 
-                    import threading
                     logged_in = threading.Event()
 
                     def _wait_for_login() -> None:
                         try:
-                            input(
-                                f"\n  >>> [{acc_name}][{platform}] Войдите в аккаунт и нажмите ENTER: "
-                            )
+                            input(f"\n  >>> [{acc_name}][{platform}] Войдите и нажмите ENTER: ")
                         except (EOFError, KeyboardInterrupt):
                             pass
                         logged_in.set()
@@ -169,32 +603,31 @@ def upload_all(dry_run: bool = False) -> List[Dict]:
                     t = threading.Thread(target=_wait_for_login, daemon=True)
                     t.start()
                     t.join(timeout=config.CAPTCHA_WAIT_TIMEOUT_SEC)
-
                     try:
                         login_page.close()
                     except Exception:
                         pass
 
-                    # Повторная проверка сессии после ожидания
                     session_status = check_session_valid(context, [platform])
                     if not session_status.get(platform, False):
                         logger.error(
-                            "[%s][%s] Вход не выполнен по истечении таймаута — аккаунт пропущен.",
+                            "[%s][%s] Вход не выполнен по таймауту — аккаунт пропущен.",
                             acc_name, platform,
                         )
                         send_telegram(
                             f"❌ [{acc_name}] Вход в {platform} не выполнен — загрузка пропущена."
                         )
                         results.append({
-                            "status": "not_logged_in",
-                            "platform": platform,
+                            "status": "not_logged_in", "platform": platform,
                             "account_id": acc_name,
                             "error_msg": "Сессия недействительна, ручной вход не завершён",
                         })
-                        return  # выходим из try — finally закроет браузер
+                        return
 
                     logger.info("[%s][%s] Вход выполнен успешно.", acc_name, platform)
-                    send_telegram(f"✅ [{acc_name}] Вход в {platform} выполнен, загрузка продолжается.")
+                    send_telegram(
+                        f"✅ [{acc_name}] Вход в {platform} выполнен, загрузка продолжается."
+                    )
 
                 run_activity(context, platform, queue[0].get("meta", {}))
 

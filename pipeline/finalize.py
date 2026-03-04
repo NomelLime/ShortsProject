@@ -73,7 +73,9 @@ def _update_tracking(
     """
     Обновляет tracking-таблицу на основе результатов загрузки.
     Только успешно загруженные ('status': 'uploaded') обновляют таблицу.
+    Инициализация записи использует активные платформы из аккаунтов.
     """
+    required = _get_required_platforms()
     for item in upload_results:
         if item.get("status") != "uploaded":
             continue
@@ -85,21 +87,52 @@ def _update_tracking(
 
         stem = _extract_source_stem(source_path)
         if stem not in tracking:
-            tracking[stem] = {p: False for p in config.ALL_PLATFORMS}
+            tracking[stem] = {p: False for p in required}
         tracking[stem][platform] = True
 
     return tracking
+
+
+def _get_required_platforms() -> set:
+    """
+    Возвращает множество платформ, которые считаются обязательными для архивирования.
+    Берётся из реально существующих аккаунтов — если нет ни одного TikTok-аккаунта,
+    TikTok не будет блокировать архивирование.
+    Fallback: config.ALL_PLATFORMS если аккаунты не найдены.
+    """
+    from pathlib import Path as _Path
+    import json as _json
+
+    accounts_root = _Path(config.ACCOUNTS_ROOT)
+    active: set = set()
+    if accounts_root.exists():
+        for acc_dir in accounts_root.iterdir():
+            cfg_path = acc_dir / "config.json"
+            if acc_dir.is_dir() and cfg_path.exists():
+                try:
+                    acc_cfg = _json.loads(cfg_path.read_text(encoding="utf-8"))
+                    platforms = acc_cfg.get("platforms", [acc_cfg.get("platform", "youtube")])
+                    if isinstance(platforms, str):
+                        platforms = [platforms]
+                    active.update(platforms)
+                except Exception:
+                    pass
+    return active if active else set(config.ALL_PLATFORMS)
 
 
 def _find_complete_sources(
     tracking: Dict[str, Dict[str, bool]],
 ) -> Set[str]:
     """
-    Возвращает множество stems исходников, загруженных на ВСЕ платформы.
+    Возвращает множество stems исходников, загруженных на все АКТИВНЫЕ платформы.
+    Активные платформы определяются по существующим аккаунтам, а не по ALL_PLATFORMS.
+    Это означает: если у пользователя только YouTube-аккаунты — видео архивируется
+    после загрузки на YouTube, не ожидая TikTok/Instagram.
     """
+    required = _get_required_platforms()
     complete: Set[str] = set()
     for stem, platforms in tracking.items():
-        if all(platforms.get(p, False) for p in config.ALL_PLATFORMS):
+        if all(platforms.get(p, False) for p in required):
             complete.add(stem)
     return complete
 
