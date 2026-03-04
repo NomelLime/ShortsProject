@@ -383,25 +383,96 @@ def validate_config() -> None:
 # Перцептивное хеширование для определения дублей
 # ----------------------------------------------------------------------
 
-def compute_perceptual_hash(video_path: Path) -> Optional[str]:
-    """Вычисляет perceptual hash по 3 кадрам видео."""
+def _get_video_duration(video_path: Path) -> Optional[float]:
+    """Возвращает длительность видео в секундах через ffprobe."""
     try:
+        result = subprocess.run(
+            [
+                "ffprobe", "-v", "error",
+                "-show_entries", "format=duration",
+                "-of", "default=noprint_wrappers=1:nokey=1",
+                str(video_path),
+            ],
+            check=True, capture_output=True, text=True,
+        )
+        return float(result.stdout.strip())
+    except Exception as e:
+        logger.warning("ffprobe не смог определить длину %s: %s", video_path, e)
+        return None
+
+
+def compute_perceptual_hash(video_path: Path) -> Optional[str]:
+    """
+    Вычисляет perceptual hash по кадрам, взятым равномерно по всему видео.
+
+    Кадры снимаются с интервалом DEDUP_FRAME_INTERVAL_SEC (по умолчанию 3 сек).
+    Пример: видео 60 сек → кадр каждые 3 сек → 20 кадров.
+    Минимум — 1 кадр (середина видео) если длина не определена.
+    """
+    try:
+        duration = _get_video_duration(video_path)
+        interval = config.DEDUP_FRAME_INTERVAL_SEC
+
+        if duration and duration > 0:
+            # Генерируем временны́е метки: 0.5*interval, 1.5*interval, ...
+            # чтобы не попасть на самый первый/последний кадр
+            timestamps = []
+            t = interval / 2.0
+            while t < duration:
+                timestamps.append(t)
+                t += interval
+            if not timestamps:
+                timestamps = [duration / 2.0]
+        else:
+            # Длина неизвестна — берём один кадр из середины по номеру
+            timestamps = None
+
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
             hashes = []
-            for i in range(3):
-                frame_path = tmp_path / f"frame_{i}.png"
-                subprocess.run(
-                    ["ffmpeg", "-i", str(video_path), "-vf", f"select=eq(n\\,{i})",
-                     "-vframes", "1", str(frame_path)],
-                    check=True, capture_output=True,
-                )
-                img = Image.open(frame_path)
-                hashes.append(str(imagehash.phash(img)))
+
+            if timestamps:
+                for idx, ts in enumerate(timestamps):
+                    frame_path = tmp_path / f"frame_{idx}.png"
+                    subprocess.run(
+                        [
+                            "ffmpeg", "-ss", str(ts),
+                            "-i", str(video_path),
+                            "-vframes", "1",
+                            "-q:v", "2",
+                            str(frame_path),
+                        ],
+                        check=True, capture_output=True,
+                    )
+                    if frame_path.exists():
+                        img = Image.open(frame_path)
+                        hashes.append(str(imagehash.phash(img)))
+            else:
+                # Fallback: первые 3 кадра по номеру
+                for i in range(3):
+                    frame_path = tmp_path / f"frame_{i}.png"
+                    subprocess.run(
+                        ["ffmpeg", "-i", str(video_path), "-vf", f"select=eq(n\\,{i})",
+                         "-vframes", "1", str(frame_path)],
+                        check=True, capture_output=True,
+                    )
+                    if frame_path.exists():
+                        img = Image.open(frame_path)
+                        hashes.append(str(imagehash.phash(img)))
+
+            if not hashes:
+                logger.warning("Не удалось извлечь ни одного кадра из %s", video_path)
+                return None
+
+            logger.debug(
+                "Хеш %s: %d кадров (интервал %.1f сек, длина %s сек)",
+                video_path.name, len(hashes), interval,
+                f"{duration:.1f}" if duration else "?",
+            )
             combined = "".join(hashes)
             return hashlib.sha256(combined.encode()).hexdigest()
+
     except Exception as e:
-        # FIX: %-форматирование вместо f-string в logger
         logger.error("Не удалось вычислить хеш для %s: %s", video_path, e)
         return None
 

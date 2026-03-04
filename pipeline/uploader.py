@@ -14,7 +14,7 @@ from rebrowser_playwright.sync_api import BrowserContext, Page
 
 from pipeline import config, utils
 from pipeline.activity import run_activity
-from pipeline.browser import launch_browser, close_browser
+from pipeline.browser import launch_browser, close_browser, check_session_valid
 from pipeline.notifications import check_and_handle_captcha, send_telegram
 
 logger = logging.getLogger(__name__)
@@ -132,6 +132,70 @@ def upload_all(dry_run: bool = False) -> List[Dict]:
                 continue
 
             try:
+                # Проверяем сессию для текущей платформы
+                session_status = check_session_valid(context, [platform])
+                if not session_status.get(platform, False):
+                    logger.warning(
+                        "[%s][%s] Аккаунт не залогинен. Ожидаем ручного входа (до %d мин).",
+                        acc_name, platform,
+                        config.CAPTCHA_WAIT_TIMEOUT_SEC // 60,
+                    )
+                    send_telegram(
+                        f"🔐 [{acc_name}] Требуется вход в {platform}.\n"
+                        f"Откройте браузер, войдите в аккаунт и нажмите ENTER в терминале.\n"
+                        f"Ожидание до {config.CAPTCHA_WAIT_TIMEOUT_SEC // 60} мин."
+                    )
+
+                    login_urls = {
+                        "youtube":   "https://accounts.google.com/ServiceLogin",
+                        "tiktok":    "https://www.tiktok.com/login",
+                        "instagram": "https://www.instagram.com/accounts/login/",
+                    }
+                    login_page = context.new_page()
+                    login_page.goto(login_urls.get(platform, "https://google.com"))
+
+                    import threading
+                    logged_in = threading.Event()
+
+                    def _wait_for_login() -> None:
+                        try:
+                            input(
+                                f"\n  >>> [{acc_name}][{platform}] Войдите в аккаунт и нажмите ENTER: "
+                            )
+                        except (EOFError, KeyboardInterrupt):
+                            pass
+                        logged_in.set()
+
+                    t = threading.Thread(target=_wait_for_login, daemon=True)
+                    t.start()
+                    t.join(timeout=config.CAPTCHA_WAIT_TIMEOUT_SEC)
+
+                    try:
+                        login_page.close()
+                    except Exception:
+                        pass
+
+                    # Повторная проверка сессии после ожидания
+                    session_status = check_session_valid(context, [platform])
+                    if not session_status.get(platform, False):
+                        logger.error(
+                            "[%s][%s] Вход не выполнен по истечении таймаута — аккаунт пропущен.",
+                            acc_name, platform,
+                        )
+                        send_telegram(
+                            f"❌ [{acc_name}] Вход в {platform} не выполнен — загрузка пропущена."
+                        )
+                        results.append({
+                            "status": "not_logged_in",
+                            "platform": platform,
+                            "account_id": acc_name,
+                            "error_msg": "Сессия недействительна, ручной вход не завершён",
+                        })
+                        return  # выходим из try — finally закроет браузер
+
+                    logger.info("[%s][%s] Вход выполнен успешно.", acc_name, platform)
+                    send_telegram(f"✅ [{acc_name}] Вход в {platform} выполнен, загрузка продолжается.")
+
                 run_activity(context, platform, queue[0].get("meta", {}))
 
                 for item in queue:

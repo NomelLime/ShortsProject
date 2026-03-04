@@ -35,6 +35,62 @@ def _is_profile_empty(profile_dir: Path) -> bool:
     return not any(profile_dir.glob("**/Cookies"))
 
 
+# URL для проверки авторизации — открываем страницу и смотрим, не редиректит ли нас на логин
+_SESSION_CHECK_URLS: dict[str, str] = {
+    "youtube":   "https://studio.youtube.com",
+    "tiktok":    "https://www.tiktok.com/upload",
+    "instagram": "https://www.instagram.com/accounts/edit/",
+}
+
+_LOGIN_REDIRECT_MARKERS: dict[str, list[str]] = {
+    "youtube":   ["accounts.google.com/signin", "accounts.google.com/ServiceLogin"],
+    "tiktok":    ["tiktok.com/login", "/login?redirect"],
+    "instagram": ["instagram.com/accounts/login", "/login/?next="],
+}
+
+
+def check_session_valid(context: BrowserContext, platforms: list[str]) -> dict[str, bool]:
+    """
+    Проверяет, залогинен ли браузер на каждой из платформ.
+
+    Открывает служебную страницу (требующую авторизации) и проверяет,
+    не произошёл ли редирект на страницу логина.
+
+    Возвращает словарь {platform: is_logged_in}.
+    """
+    results: dict[str, bool] = {}
+    page = context.new_page()
+
+    for platform in platforms:
+        check_url = _SESSION_CHECK_URLS.get(platform)
+        if not check_url:
+            results[platform] = True  # неизвестная платформа — не блокируем
+            continue
+
+        try:
+            page.goto(check_url, wait_until="domcontentloaded", timeout=20_000)
+            current_url = page.url
+            markers = _LOGIN_REDIRECT_MARKERS.get(platform, [])
+            redirected = any(marker in current_url for marker in markers)
+            results[platform] = not redirected
+            logger.debug(
+                "[session][%s] URL после перехода: %s → %s",
+                platform,
+                current_url,
+                "залогинен" if results[platform] else "НЕ залогинен",
+            )
+        except Exception as exc:
+            logger.warning("[session][%s] Не удалось проверить сессию: %s", platform, exc)
+            results[platform] = False  # при ошибке считаем не залогиненным
+
+    try:
+        page.close()
+    except Exception:
+        pass
+
+    return results
+
+
 def launch_browser(account_cfg: dict, profile_dir: Path) -> tuple[Playwright, BrowserContext]:
     """
     Запускает persistent context для аккаунта с применением stealth.

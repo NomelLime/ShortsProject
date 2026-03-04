@@ -106,10 +106,17 @@ MAX_WORKERS = os.cpu_count() or 2
 # AI
 # ----------------------------------------------------------------------
 OLLAMA_MODEL    = 'qwen2.5-vl:7b'
-YOLO_MODEL_PT   = 'yolo11n.pt'
+YOLO_MODEL_PT   = 'yolo11x.pt'
 AI_ENABLED      = True
 OLLAMA_TIMEOUT  = 60
 AI_NUM_FRAMES   = 6      # увеличено: кадры для YOLO + метаданных + точек нарезки
+
+# ----------------------------------------------------------------------
+# Дедупликация видео (perceptual hash)
+# Кадры берутся равномерно с интервалом DEDUP_FRAME_INTERVAL_SEC.
+# Например: видео 60 сек → кадр каждые 3 сек → 20 кадров.
+# ----------------------------------------------------------------------
+DEDUP_FRAME_INTERVAL_SEC = float(os.getenv("DEDUP_FRAME_INTERVAL_SEC", "3.0"))
 AI_NUM_VARIANTS = 3
 
 # Автозапуск Ollama если не запущен
