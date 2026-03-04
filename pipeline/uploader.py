@@ -6,7 +6,6 @@ import logging
 import random
 import shutil
 import subprocess
-import threading
 import time
 from pathlib import Path
 from typing import Dict, List, Optional
@@ -17,6 +16,8 @@ from pipeline import config, utils
 from pipeline.activity import run_activity
 from pipeline.browser import launch_browser, close_browser, check_session_valid
 from pipeline.notifications import check_and_handle_captcha, send_telegram
+from pipeline.session_manager import ensure_session_fresh, mark_session_verified
+from pipeline.analytics import register_upload
 
 logger = logging.getLogger(__name__)
 
@@ -572,62 +573,17 @@ def upload_all(dry_run: bool = False) -> List[Dict]:
                 continue
 
             try:
-                session_status = check_session_valid(context, [platform])
-                if not session_status.get(platform, False):
-                    logger.warning(
-                        "[%s][%s] Аккаунт не залогинен. Ожидаем ручного входа (до %d мин).",
-                        acc_name, platform, config.CAPTCHA_WAIT_TIMEOUT_SEC // 60,
-                    )
-                    send_telegram(
-                        f"🔐 [{acc_name}] Требуется вход в {platform}.\n"
-                        f"Откройте браузер, войдите и нажмите ENTER в терминале.\n"
-                        f"Ожидание до {config.CAPTCHA_WAIT_TIMEOUT_SEC // 60} мин."
-                    )
-                    login_urls = {
-                        "youtube":   "https://accounts.google.com/ServiceLogin",
-                        "tiktok":    "https://www.tiktok.com/login",
-                        "instagram": "https://www.instagram.com/accounts/login/",
-                    }
-                    login_page = context.new_page()
-                    login_page.goto(login_urls.get(platform, "https://google.com"))
-
-                    logged_in = threading.Event()
-
-                    def _wait_for_login() -> None:
-                        try:
-                            input(f"\n  >>> [{acc_name}][{platform}] Войдите и нажмите ENTER: ")
-                        except (EOFError, KeyboardInterrupt):
-                            pass
-                        logged_in.set()
-
-                    t = threading.Thread(target=_wait_for_login, daemon=True)
-                    t.start()
-                    t.join(timeout=config.CAPTCHA_WAIT_TIMEOUT_SEC)
-                    try:
-                        login_page.close()
-                    except Exception:
-                        pass
-
-                    session_status = check_session_valid(context, [platform])
-                    if not session_status.get(platform, False):
-                        logger.error(
-                            "[%s][%s] Вход не выполнен по таймауту — аккаунт пропущен.",
-                            acc_name, platform,
-                        )
-                        send_telegram(
-                            f"❌ [{acc_name}] Вход в {platform} не выполнен — загрузка пропущена."
-                        )
-                        results.append({
-                            "status": "not_logged_in", "platform": platform,
-                            "account_id": acc_name,
-                            "error_msg": "Сессия недействительна, ручной вход не завершён",
-                        })
-                        return
-
-                    logger.info("[%s][%s] Вход выполнен успешно.", acc_name, platform)
-                    send_telegram(
-                        f"✅ [{acc_name}] Вход в {platform} выполнен, загрузка продолжается."
-                    )
+                # Проверяем и при необходимости обновляем сессию через session_manager
+                session_ok = ensure_session_fresh(context, acc_name, platform)
+                if session_ok:
+                    mark_session_verified(acc_name, platform, valid=True)
+                else:
+                    results.append({
+                        "status": "not_logged_in", "platform": platform,
+                        "account_id": acc_name,
+                        "error_msg": "Сессия недействительна, ручной вход не завершён",
+                    })
+                    continue
 
                 run_activity(context, platform, queue[0].get("meta", {}))
 
@@ -655,6 +611,14 @@ def upload_all(dry_run: bool = False) -> List[Dict]:
                     if success:
                         utils.mark_uploaded(item)
                         utils.increment_upload_count(acc_dir)
+                        # Регистрируем загрузку в analytics.json для отложенного сбора статистики
+                        # video_url будет уточнён при первом сборе (пока неизвестен)
+                        register_upload(
+                            video_stem=Path(video_path).stem,
+                            platform=platform,
+                            video_url="",
+                            meta=meta,
+                        )
                         results.append({
                             "status": "uploaded", "platform": platform,
                             "account_id": acc_name, "source_path": str(video_path),

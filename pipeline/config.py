@@ -31,7 +31,9 @@ URLS_FILE            = BASE_DIR / "data" / "urls.txt"
 FAILED_URLS_FILE     = BASE_DIR / "data" / "failed_urls.txt"
 DOWNLOAD_CHECKPOINT  = BASE_DIR / "data" / "download_checkpoint.json"   # чекпоинт скачивания
 DAILY_LIMIT_FILE     = BASE_DIR / "data" / "daily_limit.json"
-UPLOAD_TRACKING_FILE = BASE_DIR / "data" / "upload_tracking.json"
+UPLOAD_TRACKING_FILE  = BASE_DIR / "data" / "upload_tracking.json"
+ANALYTICS_FILE        = BASE_DIR / "data" / "analytics.json"
+SESSION_HEALTH_FILE   = BASE_DIR / "data" / "session_health.json"
 CONFIG_JSON          = BASE_DIR / "config.json"
 ACCOUNTS_ROOT        = os.getenv("ACCOUNTS_ROOT", "accounts")
 LOG_FILE          = BASE_DIR / "data" / "pipeline.log"
@@ -255,6 +257,24 @@ CLICK_DELAY_MIN_SEC       = 3
 CLICK_DELAY_MAX_SEC       = 10
 UPLOAD_TIMEOUT_MS         = 300_000
 CAPTCHA_WAIT_TIMEOUT_SEC  = int(os.getenv("CAPTCHA_WAIT_TIMEOUT_SEC", str(30 * 60)))
+
+# ----------------------------------------------------------------------
+# Сессии / авто-обновление cookies
+# SESSION_MAX_AGE_HOURS — максимальный возраст сессии без проверки.
+# По умолчанию 20 ч: проверка/обновление до истечения типичного срока cookies.
+# SESSION_REFRESH_WARN_HOURS — порог для предупреждения в Telegram.
+# ----------------------------------------------------------------------
+SESSION_MAX_AGE_HOURS      = int(os.getenv("SESSION_MAX_AGE_HOURS",      "20"))
+SESSION_REFRESH_WARN_HOURS = int(os.getenv("SESSION_REFRESH_WARN_HOURS", "18"))
+
+# ----------------------------------------------------------------------
+# Аналитика
+# ANALYTICS_COLLECT_AFTER_HOURS — через сколько часов после загрузки
+# собирать статистику (просмотры / лайки / комментарии).
+# ANALYTICS_COLLECT_MAX_HOURS   — не собирать если видео старше этого порога.
+# ----------------------------------------------------------------------
+ANALYTICS_COLLECT_AFTER_HOURS = int(os.getenv("ANALYTICS_COLLECT_AFTER_HOURS", "24"))
+ANALYTICS_COLLECT_MAX_HOURS   = int(os.getenv("ANALYTICS_COLLECT_MAX_HOURS",   "72"))
 
 # ----------------------------------------------------------------------
 # Лимиты загрузок — ПО ПЛАТФОРМАМ
