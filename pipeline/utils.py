@@ -131,6 +131,63 @@ def get_random_asset(dir_path: Path, exts: Tuple[str, ...]) -> Optional[Path]:
     return random.choice(files) if files else None
 
 
+# ── Ротация фоновых материалов (C) ───────────────────────────────────────────
+
+_BG_USAGE_FILE = config.BASE_DIR / "data" / "bg_usage.json"
+_bg_usage_lock = Lock()
+
+
+def _load_bg_usage() -> Dict:
+    if not _BG_USAGE_FILE.exists():
+        return {}
+    try:
+        return json.loads(_BG_USAGE_FILE.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+
+def _save_bg_usage(data: Dict) -> None:
+    with _bg_usage_lock:
+        _BG_USAGE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        _BG_USAGE_FILE.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+
+
+def get_unique_bg(
+    dir_path: Path,
+    exts: Tuple[str, ...],
+    video_stem: str,
+) -> Optional[Path]:
+    """
+    Возвращает фоновое видео, которое ещё не использовалось для данного video_stem.
+    При исчерпании всех вариантов — сбрасывает историю и начинает заново.
+    """
+    if not dir_path.exists():
+        return None
+    files = [f for f in dir_path.iterdir() if f.suffix.lower() in exts]
+    if not files:
+        return None
+
+    usage = _load_bg_usage()
+    used  = set(usage.get(video_stem, []))
+
+    # Доступные — те, что ещё не использовались
+    available = [f for f in files if f.name not in used]
+
+    # Если всё использовано — сбрасываем историю для этого стема
+    if not available:
+        used = set()
+        available = files
+
+    chosen = random.choice(available)
+
+    # Записываем использование
+    used.add(chosen.name)
+    usage[video_stem] = list(used)
+    _save_bg_usage(usage)
+
+    return chosen
+
+
 def load_keywords() -> List[str]:
     """Загружает ключевые слова из keywords.txt, по одному на строку."""
     if not config.KEYWORDS_FILE.exists():
@@ -401,76 +458,47 @@ def _get_video_duration(video_path: Path) -> Optional[float]:
         return None
 
 
-def compute_perceptual_hash(video_path: Path) -> Optional[str]:
+def compute_perceptual_hash(video_path: Path) -> Optional["imagehash.ImageHash"]:
     """
-    Вычисляет perceptual hash по кадрам, взятым равномерно по всему видео.
-
-    Кадры снимаются с интервалом DEDUP_FRAME_INTERVAL_SEC (по умолчанию 3 сек).
-    Пример: видео 60 сек → кадр каждые 3 сек → 20 кадров.
-    Минимум — 1 кадр (середина видео) если длина не определена.
+    Вычисляет perceptual hash по кадрам видео.
+    Возвращает усреднённый ImageHash объект для сравнения по расстоянию Хэмминга.
     """
+    import numpy as np
     try:
         duration = _get_video_duration(video_path)
         interval = config.DEDUP_FRAME_INTERVAL_SEC
 
+        timestamps: list = []
         if duration and duration > 0:
-            # Генерируем временны́е метки: 0.5*interval, 1.5*interval, ...
-            # чтобы не попасть на самый первый/последний кадр
-            timestamps = []
             t = interval / 2.0
             while t < duration:
                 timestamps.append(t)
                 t += interval
-            if not timestamps:
-                timestamps = [duration / 2.0]
-        else:
-            # Длина неизвестна — берём один кадр из середины по номеру
-            timestamps = None
+        if not timestamps:
+            timestamps = [duration / 2.0] if duration else [0.5]
 
         with tempfile.TemporaryDirectory() as tmp:
-            tmp_path = Path(tmp)
-            hashes = []
+            tmp_path    = Path(tmp)
+            frame_hashes: list = []
+            for idx, ts in enumerate(timestamps):
+                frame_path = tmp_path / f"frame_{idx}.png"
+                subprocess.run(
+                    ["ffmpeg", "-ss", str(ts), "-i", str(video_path),
+                     "-vframes", "1", "-q:v", "2", str(frame_path)],
+                    check=True, capture_output=True,
+                )
+                if frame_path.exists():
+                    img = Image.open(frame_path)
+                    frame_hashes.append(imagehash.phash(img))
 
-            if timestamps:
-                for idx, ts in enumerate(timestamps):
-                    frame_path = tmp_path / f"frame_{idx}.png"
-                    subprocess.run(
-                        [
-                            "ffmpeg", "-ss", str(ts),
-                            "-i", str(video_path),
-                            "-vframes", "1",
-                            "-q:v", "2",
-                            str(frame_path),
-                        ],
-                        check=True, capture_output=True,
-                    )
-                    if frame_path.exists():
-                        img = Image.open(frame_path)
-                        hashes.append(str(imagehash.phash(img)))
-            else:
-                # Fallback: первые 3 кадра по номеру
-                for i in range(3):
-                    frame_path = tmp_path / f"frame_{i}.png"
-                    subprocess.run(
-                        ["ffmpeg", "-i", str(video_path), "-vf", f"select=eq(n\\,{i})",
-                         "-vframes", "1", str(frame_path)],
-                        check=True, capture_output=True,
-                    )
-                    if frame_path.exists():
-                        img = Image.open(frame_path)
-                        hashes.append(str(imagehash.phash(img)))
-
-            if not hashes:
+            if not frame_hashes:
                 logger.warning("Не удалось извлечь ни одного кадра из %s", video_path)
                 return None
 
-            logger.debug(
-                "Хеш %s: %d кадров (интервал %.1f сек, длина %s сек)",
-                video_path.name, len(hashes), interval,
-                f"{duration:.1f}" if duration else "?",
-            )
-            combined = "".join(hashes)
-            return hashlib.sha256(combined.encode()).hexdigest()
+            # Усредняем хэши через numpy
+            arrays    = np.array([h.hash.flatten() for h in frame_hashes], dtype=float)
+            avg_array = (arrays.mean(axis=0) >= 0.5).reshape(8, 8)
+            return imagehash.ImageHash(avg_array)
 
     except Exception as e:
         logger.error("Не удалось вычислить хеш для %s: %s", video_path, e)
@@ -478,8 +506,12 @@ def compute_perceptual_hash(video_path: Path) -> Optional[str]:
 
 
 def load_hashes() -> List[str]:
+    """Загружает список hex-строк phash из HASH_DB."""
     if HASH_DB.exists():
-        return json.loads(HASH_DB.read_text(encoding="utf-8"))
+        try:
+            return json.loads(HASH_DB.read_text(encoding="utf-8"))
+        except Exception:
+            return []
     return []
 
 
@@ -489,13 +521,29 @@ def save_hashes(hashes: List[str]) -> None:
 
 
 def is_duplicate(video_path: Path) -> bool:
-    """Возвращает True если видео уже было обработано (по perceptual hash)."""
-    h = compute_perceptual_hash(video_path)
-    if h is None:
+    """
+    Возвращает True если видео похоже на уже обработанное.
+    Сравнение по расстоянию Хэмминга (config.DEDUP_HAMMING_THRESHOLD).
+    Порог 10 из 64 бит — находит похожие клоны, не только точные копии.
+    """
+    new_hash = compute_perceptual_hash(video_path)
+    if new_hash is None:
         return False
-    hashes = load_hashes()
-    if h in hashes:
-        return True
-    hashes.append(h)
-    save_hashes(hashes)
+
+    threshold = config.DEDUP_HAMMING_THRESHOLD
+    stored    = load_hashes()
+
+    for hex_str in stored:
+        try:
+            if (new_hash - imagehash.hex_to_hash(hex_str)) <= threshold:
+                logger.info(
+                    "Дубликат: %s (расстояние Хэмминга ≤ %d)", video_path.name, threshold
+                )
+                return True
+        except Exception:
+            continue
+
+    stored.append(str(new_hash))
+    save_hashes(stored)
     return False
+

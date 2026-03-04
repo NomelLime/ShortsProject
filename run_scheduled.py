@@ -39,7 +39,7 @@ from pipeline.utils import ensure_dirs, validate_config
 from pipeline.scheduler import ActivityScheduler
 from pipeline.session_manager import SessionHealthMonitor
 from pipeline.upload_scheduler import UploadScheduler
-from pipeline.analytics import collect_pending_analytics
+from pipeline.analytics import collect_pending_analytics, queue_reposts, compare_ab_results
 from pipeline import downloader, download, main_processing, distributor
 
 
@@ -64,6 +64,17 @@ class _AnalyticsCollectorThread(threading.Thread):
                 count = collect_pending_analytics()
                 if count:
                     logger.info("[analytics_thread] Собрано записей: %d", count)
+
+                # Сравниваем A/B результаты
+                ab_results = compare_ab_results()
+                if ab_results:
+                    logger.info("[analytics_thread] A/B сравнено: %d видео", len(ab_results))
+
+                # Ставим в очередь слабые видео на репост
+                reposted = queue_reposts()
+                if reposted:
+                    logger.info("[analytics_thread] В очередь репоста: %d видео", reposted)
+
             except Exception as exc:
                 logger.error("[analytics_thread] Ошибка: %s", exc, exc_info=True)
             self._stop_event.wait(timeout=self._interval_sec)

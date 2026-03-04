@@ -17,6 +17,7 @@ from datetime import date
 from pathlib import Path
 
 from pipeline import config
+from pipeline.analytics import assign_ab_variants, get_ab_meta_for_account
 
 log = logging.getLogger("distributor")
 
@@ -158,13 +159,17 @@ def distribute_shorts(dry_run: bool = False) -> None:
         log.warning("Аккаунты не найдены в %s", accounts_root)
         return
 
-    short_idx = 0
+    # ── Fix #3: round-robin — сначала собираем слоты всех аккаунтов, ────────
+    # затем раздаём видео поочерёдно, чтобы каждый аккаунт получил
+    # примерно одинаковое количество видео независимо от порядка итерации.
+
+    # Структура слота: {"acc_dir", "platform", "queue_dir", "slots", "assigned", "acc_cfg"}
+    slot_list: list[dict] = []
     for acc_dir in accounts:
-        acc_cfg_path = acc_dir / "config.json"
         try:
-            acc_cfg = json.loads(acc_cfg_path.read_text(encoding="utf-8"))
+            acc_cfg = json.loads((acc_dir / "config.json").read_text(encoding="utf-8"))
         except Exception as e:
-            log.warning("Не удалось прочитать конфиг аккаунта %s: %s", acc_dir.name, e)
+            log.warning("Не удалось прочитать конфиг %s: %s", acc_dir.name, e)
             continue
 
         platforms = acc_cfg.get("platforms", [acc_cfg.get("platform", "youtube")])
@@ -173,53 +178,74 @@ def distribute_shorts(dry_run: bool = False) -> None:
 
         for platform in platforms:
             daily_limit = config.PLATFORM_DAILY_LIMITS.get(platform, config.DAILY_UPLOAD_LIMIT)
-            queue_dir = acc_dir / "upload_queue" / platform
+            queue_dir   = acc_dir / "upload_queue" / platform
             queue_dir.mkdir(parents=True, exist_ok=True)
-
-            existing = len(list(queue_dir.glob("*.mp4")))
-            slots = max(0, daily_limit - existing)
+            existing    = len(list(queue_dir.glob("*.mp4")))
+            slots       = max(0, daily_limit - existing)
             if slots == 0:
-                log.info(
-                    "[%s][%s] Очередь полная (%d/%d).",
-                    acc_dir.name, platform, existing, daily_limit,
-                )
+                log.info("[%s][%s] Очередь полная (%d/%d).", acc_dir.name, platform, existing, daily_limit)
+                continue
+            slot_list.append({
+                "acc_dir": acc_dir, "platform": platform,
+                "queue_dir": queue_dir, "slots": slots, "assigned": 0,
+                "acc_cfg": acc_cfg,
+            })
+
+    if not slot_list:
+        log.info("Все очереди заполнены — нечего распределять.")
+        return
+
+    # Round-robin: циклично обходим слоты, пока есть видео и свободные слоты
+    short_idx = 0
+    exhausted = set()
+    while short_idx < len(shorts) and len(exhausted) < len(slot_list):
+        for i, slot in enumerate(slot_list):
+            if i in exhausted or short_idx >= len(shorts):
+                continue
+            if slot["assigned"] >= slot["slots"]:
+                exhausted.add(i)
                 continue
 
-            assigned = 0
-            while assigned < slots and short_idx < len(shorts):
-                item = shorts[short_idx]
-                short_idx += 1
-                video_src = item["video_path"]
-                meta      = item["meta"]
-                stem      = video_src.stem
+            item      = shorts[short_idx]
+            short_idx += 1
+            video_src = item["video_path"]
+            meta      = item["meta"]
+            stem      = video_src.stem
+            platform  = slot["platform"]
+            queue_dir = slot["queue_dir"]
+            acc_name  = slot["acc_dir"].name
 
-                dest_video = queue_dir / video_src.name
-                dest_meta  = queue_dir / f"{video_src.stem}_meta.json"
+            dest_video = queue_dir / video_src.name
+            dest_meta  = queue_dir / f"{video_src.stem}_meta.json"
 
-                if dry_run:
-                    log.info("[dry_run] %s -> %s/%s", video_src.name, platform, acc_dir.name)
+            if dry_run:
+                log.info("[dry_run] %s -> %s/%s", video_src.name, acc_name, platform)
+                dist_tracking.setdefault(stem, {p: False for p in active_platforms})
+                dist_tracking[stem][platform] = True
+                slot["assigned"] += 1
+            else:
+                try:
+                    shutil.copy2(video_src, dest_video)
+                    # A/B: назначаем вариант метаданных по индексу аккаунта
+                    ab_meta    = get_ab_meta_for_account(stem, platform, slot["assigned"])
+                    write_meta = {**meta, **(ab_meta or {})}
+                    dest_meta.write_text(
+                        json.dumps(write_meta, ensure_ascii=False, indent=2), encoding="utf-8"
+                    )
+                    log.info("Распределено: %s -> %s/%s", video_src.name, acc_name, platform)
                     dist_tracking.setdefault(stem, {p: False for p in active_platforms})
                     dist_tracking[stem][platform] = True
-                else:
-                    try:
-                        shutil.copy2(video_src, dest_video)
-                        dest_meta.write_text(
-                            json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8"
-                        )
-                        log.info(
-                            "Распределено: %s -> %s/%s",
-                            video_src.name, acc_dir.name, platform,
-                        )
-                        dist_tracking.setdefault(stem, {p: False for p in active_platforms})
-                        dist_tracking[stem][platform] = True
-                    except Exception as e:
-                        log.error("Ошибка копирования %s: %s", video_src.name, e)
-                        continue
+                    slot["assigned"] += 1
+                except Exception as e:
+                    log.error("Ошибка копирования %s: %s", video_src.name, e)
 
-                assigned += 1
+            if slot["assigned"] >= slot["slots"]:
+                exhausted.add(i)
 
     if not dry_run:
         _save_distributed_tracking(dist_tracking)
+
+    total_assigned = sum(s["assigned"] for s in slot_list)
 
     # Удаляем из OUTPUT_DIR видео, которые распределены на все активные платформы
     deleted = 0
@@ -248,6 +274,6 @@ def distribute_shorts(dry_run: bool = False) -> None:
                 break
 
     log.info(
-        "Распределение завершено. Использовано шортсов: %d / %d. Удалено из OUTPUT_DIR: %d.",
-        short_idx, len(shorts), deleted,
+        "Распределение завершено. Распределено: %d / %d шортсов. Удалено из OUTPUT_DIR: %d.",
+        total_assigned, len(shorts), deleted,
     )

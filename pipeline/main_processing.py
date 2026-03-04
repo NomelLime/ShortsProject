@@ -14,6 +14,48 @@ from pipeline.cloner import run_cloning
 from pipeline.postprocessor import stage_postprocess
 from pipeline.slicer import stage_slice
 
+
+def _compute_clones_needed() -> int:
+    """
+    Вычисляет нужное количество клонов динамически:
+        кол-во аккаунтов × платформ × дневной_лимит
+
+    Это гарантирует, что для каждого аккаунта будет достаточно уникальных
+    клонов, и не создаёт лишних при малом числе аккаунтов.
+    Минимум — 1, максимум — config.CLONES_PER_VIDEO (жёсткий потолок).
+    """
+    from pathlib import Path as _Path
+    accounts_root = _Path(config.ACCOUNTS_ROOT)
+    if not accounts_root.exists():
+        return max(1, config.CLONES_PER_VIDEO)
+
+    total_slots = 0
+    for acc_dir in accounts_root.iterdir():
+        cfg_path = acc_dir / "config.json"
+        if not acc_dir.is_dir() or not cfg_path.exists():
+            continue
+        try:
+            import json as _json
+            acc_cfg   = _json.loads(cfg_path.read_text(encoding="utf-8"))
+            platforms = acc_cfg.get("platforms", [acc_cfg.get("platform", "youtube")])
+            if isinstance(platforms, str):
+                platforms = [platforms]
+            for p in platforms:
+                total_slots += config.PLATFORM_DAILY_LIMITS.get(p, config.DAILY_UPLOAD_LIMIT)
+        except Exception:
+            continue
+
+    if total_slots == 0:
+        return max(1, config.CLONES_PER_VIDEO)
+
+    # Зажимаем между 1 и жёстким потолком из конфига
+    result = max(1, min(total_slots, config.CLONES_PER_VIDEO))
+    logger.info(
+        "Динамических клонов на видео: %d (аккаунты дают %d слотов, потолок %d)",
+        result, total_slots, config.CLONES_PER_VIDEO,
+    )
+    return result
+
 logger = logging.getLogger(__name__)
 
 
@@ -149,7 +191,8 @@ def run_processing(dry_run: bool = False) -> List[Path]:
         clone_tasks = _build_clone_tasks(
             postprocessed, banner_path, music_path,
             vcodec, vcodec_opts,
-            metadata_variants=metadata_variants,   # передаём все варианты
+            metadata_variants=metadata_variants,
+            clones_per_video=_compute_clones_needed(),
         )
 
         if clone_tasks:
@@ -203,19 +246,21 @@ def _build_clone_tasks(
     vcodec: str,
     vcodec_opts: dict,
     metadata_variants: Optional[List[dict]] = None,
+    clones_per_video: Optional[int] = None,
 ) -> list:
     """
     Формирует список задач для cloner.run_cloning.
-    Каждая задача включает metadata_variants — список вариантов метаданных,
-    из которых cloner случайно выберет один при создании клона.
+    clones_per_video — динамически вычисленное кол-во клонов (из _compute_clones_needed).
     """
     if metadata_variants is None:
         metadata_variants = []
+    if clones_per_video is None:
+        clones_per_video = config.CLONES_PER_VIDEO
 
     tasks = []
     idx   = 0
     for src_path in sources:
-        for clone_num in range(1, config.CLONES_PER_VIDEO + 1):
+        for clone_num in range(1, clones_per_video + 1):
             out_path = src_path.parent / f"{src_path.stem}_clone{clone_num:02d}.mp4"
             tasks.append((
                 idx,

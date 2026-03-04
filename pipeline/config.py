@@ -115,11 +115,39 @@ OLLAMA_TIMEOUT  = 60
 AI_NUM_FRAMES   = 6      # увеличено: кадры для YOLO + метаданных + точек нарезки
 
 # ----------------------------------------------------------------------
-# Дедупликация видео (perceptual hash)
-# Кадры берутся равномерно с интервалом DEDUP_FRAME_INTERVAL_SEC.
-# Например: видео 60 сек → кадр каждые 3 сек → 20 кадров.
+# Дедупликация видео (perceptual hash + Hamming distance)
+# DEDUP_HAMMING_THRESHOLD — макс. расстояние Хэмминга (из 64 бит):
+#   0 = только точные копии | 10 = похожие клоны | 20 = агрессивно
 # ----------------------------------------------------------------------
-DEDUP_FRAME_INTERVAL_SEC = float(os.getenv("DEDUP_FRAME_INTERVAL_SEC", "3.0"))
+DEDUP_FRAME_INTERVAL_SEC  = float(os.getenv("DEDUP_FRAME_INTERVAL_SEC", "3.0"))
+DEDUP_HAMMING_THRESHOLD   = int(os.getenv("DEDUP_HAMMING_THRESHOLD",    "10"))
+
+# ----------------------------------------------------------------------
+# Карантин аккаунтов
+# ----------------------------------------------------------------------
+QUARANTINE_ERROR_THRESHOLD = int(os.getenv("QUARANTINE_ERROR_THRESHOLD", "3"))
+QUARANTINE_DURATION_HOURS  = int(os.getenv("QUARANTINE_DURATION_HOURS",  "6"))
+
+# ----------------------------------------------------------------------
+# A/B тестирование заголовков
+# ----------------------------------------------------------------------
+AB_TEST_ENABLED         = os.getenv("AB_TEST_ENABLED", "1") != "0"
+AB_TEST_COMPARE_AFTER_H = int(os.getenv("AB_TEST_COMPARE_AFTER_H", "24"))
+
+# ----------------------------------------------------------------------
+# Авто-репост слабых видео
+# ----------------------------------------------------------------------
+REPOST_ENABLED      = os.getenv("REPOST_ENABLED", "1") != "0"
+REPOST_MIN_VIEWS    = int(os.getenv("REPOST_MIN_VIEWS",    "500"))
+REPOST_AFTER_HOURS  = int(os.getenv("REPOST_AFTER_HOURS",  "48"))
+REPOST_MAX_ATTEMPTS = int(os.getenv("REPOST_MAX_ATTEMPTS", "2"))
+
+# ----------------------------------------------------------------------
+# Умное расписание (на основе аналитики)
+# ----------------------------------------------------------------------
+SMART_SCHEDULE_ENABLED     = os.getenv("SMART_SCHEDULE_ENABLED", "1") != "0"
+SMART_SCHEDULE_MIN_SAMPLES = int(os.getenv("SMART_SCHEDULE_MIN_SAMPLES", "10"))
+
 AI_NUM_VARIANTS = 3
 
 # Автозапуск Ollama если не запущен

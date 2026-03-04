@@ -105,17 +105,90 @@ def _next_upload_delay(times: List[str], jitter_sec: int = 120) -> Tuple[float, 
 def get_account_upload_times(account_cfg: Dict, platform: str) -> List[str]:
     """
     Возвращает список времён загрузки для аккаунта и платформы.
-    Приоритет: account_cfg["upload_schedule"][platform] > DEFAULT_UPLOAD_TIMES
+
+    Приоритет:
+      1. account_cfg["upload_schedule"][platform] — явное расписание в конфиге
+      2. Умное расписание из analytics.json (если SMART_SCHEDULE_ENABLED)
+      3. DEFAULT_UPLOAD_TIMES — глобальный дефолт
     """
+    # 1. Явное расписание в конфиге аккаунта
     schedule = account_cfg.get("upload_schedule", {})
     if isinstance(schedule, dict) and platform in schedule:
         times = schedule[platform]
         if isinstance(times, list) and times:
             return times
-    # Глобальное расписание из аккаунта (для всех платформ)
     if isinstance(schedule, list) and schedule:
         return schedule
+
+    # 2. Умное расписание из аналитики
+    if config.SMART_SCHEDULE_ENABLED:
+        smart = _get_smart_upload_times(platform)
+        if smart:
+            return smart
+
     return DEFAULT_UPLOAD_TIMES
+
+
+def _get_smart_upload_times(platform: str) -> List[str]:
+    """
+    Анализирует analytics.json и возвращает 2 лучших часа публикации
+    для данной платформы на основе средних просмотров.
+
+    Требует минимум SMART_SCHEDULE_MIN_SAMPLES записей.
+    Возвращает пустой список если данных недостаточно.
+    """
+    if not config.ANALYTICS_FILE.exists():
+        return []
+
+    try:
+        import json as _json
+        data = _json.loads(config.ANALYTICS_FILE.read_text(encoding="utf-8"))
+    except Exception:
+        return []
+
+    # Собираем: час публикации → список просмотров
+    from collections import defaultdict
+    from datetime import datetime as _dt
+
+    hour_views: dict = defaultdict(list)
+
+    for entry in data.values():
+        upload = entry.get("uploads", {}).get(platform)
+        if not upload:
+            continue
+        views       = upload.get("views")
+        uploaded_at = upload.get("uploaded_at")
+        if views is None or not uploaded_at:
+            continue
+        try:
+            hour = _dt.fromisoformat(uploaded_at).hour
+            hour_views[hour].append(views)
+        except Exception:
+            continue
+
+    if not hour_views:
+        return []
+
+    # Нужен минимум MIN_SAMPLES точек данных суммарно
+    total_samples = sum(len(v) for v in hour_views.values())
+    if total_samples < config.SMART_SCHEDULE_MIN_SAMPLES:
+        logger.debug(
+            "[smart_schedule][%s] Данных недостаточно: %d / %d",
+            platform, total_samples, config.SMART_SCHEDULE_MIN_SAMPLES,
+        )
+        return []
+
+    # Средние просмотры по часам, сортируем по убыванию
+    avg_by_hour = {h: sum(v) / len(v) for h, v in hour_views.items()}
+    best_hours  = sorted(avg_by_hour, key=avg_by_hour.get, reverse=True)[:2]
+    best_hours.sort()  # хронологически
+
+    times = [f"{h:02d}:00" for h in best_hours]
+    logger.info(
+        "[smart_schedule][%s] Лучшие часы публикации: %s (из %d образцов)",
+        platform, ", ".join(times), total_samples,
+    )
+    return times
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -196,46 +269,68 @@ class _UploadJob:
 def _run_upload_for(account: Dict, platform: str) -> None:
     """
     Запускает загрузку очереди для конкретного аккаунта и платформы.
-    Использует существующую логику из uploader.py без запуска полного пайплайна.
+
+    Fix #5: если очередь пуста — ждём до QUEUE_WAIT_MAX_MIN минут,
+    повторно проверяя каждые QUEUE_WAIT_INTERVAL_SEC секунд.
+    Это решает гонку когда пайплайн подготовки ещё не завершился
+    в момент наступления времени публикации.
     """
-    # Ленивый импорт чтобы избежать циклических зависимостей
     from pipeline.browser import launch_browser, close_browser
     from pipeline.uploader import upload_video, clean_video_metadata
     from pipeline.activity import run_activity
     from pipeline.session_manager import ensure_session_fresh, mark_session_verified
     from pipeline.analytics import register_upload
+    from pipeline.quarantine import is_quarantined, mark_error as q_err, mark_success as q_ok
     from pathlib import Path
+
+    QUEUE_WAIT_MAX_MIN      = 30   # максимум ждём 30 мин
+    QUEUE_WAIT_INTERVAL_SEC = 60   # проверяем каждые 60 сек
 
     acc_name    = account["name"]
     acc_dir     = account["dir"]
     acc_cfg     = account["config"]
     daily_limit = config.PLATFORM_DAILY_LIMITS.get(platform, config.DAILY_UPLOAD_LIMIT)
-    queue       = utils.get_upload_queue(acc_dir, platform)
 
+    # Fix #5: ждём пока очередь не заполнится
+    queue = utils.get_upload_queue(acc_dir, platform)
     if not queue:
-        logger.info("[upload_scheduler] [%s][%s] Очередь пуста — пропуск.", acc_name, platform)
-        return
+        deadline = time.time() + QUEUE_WAIT_MAX_MIN * 60
+        logger.info(
+            "[upload_scheduler] [%s][%s] Очередь пуста — ждём до %d мин...",
+            acc_name, platform, QUEUE_WAIT_MAX_MIN,
+        )
+        while time.time() < deadline:
+            time.sleep(QUEUE_WAIT_INTERVAL_SEC)
+            queue = utils.get_upload_queue(acc_dir, platform)
+            if queue:
+                logger.info("[upload_scheduler] [%s][%s] Очередь готова (%d видео).", acc_name, platform, len(queue))
+                break
+        else:
+            logger.warning("[upload_scheduler] [%s][%s] Очередь так и не появилась — пропуск.", acc_name, platform)
+            send_telegram(f"⏳ [{acc_name}][{platform}] Очередь пуста через {QUEUE_WAIT_MAX_MIN} мин — загрузка отложена.")
+            return
 
     if utils.get_uploads_today(acc_dir) >= daily_limit:
-        logger.info(
-            "[upload_scheduler] [%s][%s] Дневной лимит исчерпан.", acc_name, platform
-        )
+        logger.info("[upload_scheduler] [%s][%s] Дневной лимит исчерпан.", acc_name, platform)
+        return
+
+    if is_quarantined(acc_name, platform):
+        logger.info("[upload_scheduler] [%s][%s] Аккаунт в карантине — пропуск.", acc_name, platform)
         return
 
     profile_dir = acc_dir / "browser_profile"
-
     try:
         pw, context = launch_browser(acc_cfg, profile_dir)
     except RuntimeError as exc:
         logger.error("[upload_scheduler] [%s] Прокси недоступен: %s", acc_name, exc)
         send_telegram(f"⚠️ [{acc_name}][{platform}] Прокси недоступен — загрузка пропущена.")
+        q_err(acc_name, platform, reason="proxy_unavailable")
         return
 
     try:
         if not ensure_session_fresh(context, acc_name, platform):
             logger.error("[upload_scheduler] [%s][%s] Сессия невалидна.", acc_name, platform)
             return
-
         mark_session_verified(acc_name, platform, valid=True)
         run_activity(context, platform, queue[0].get("meta", {}))
 
@@ -244,27 +339,29 @@ def _run_upload_for(account: Dict, platform: str) -> None:
                 break
 
             video_path = item["video_path"]
-            meta       = item["meta"]
+            # A/B: берём назначенный вариант если есть
+            meta       = item.get("ab_meta") or item["meta"]
             clean_path = clean_video_metadata(video_path)
 
-            success = upload_video(
+            video_url = upload_video(
                 context, platform, clean_path, meta,
                 account_name=acc_name, account_cfg=acc_cfg,
             )
 
-            if success:
+            if video_url is not None:
                 utils.mark_uploaded(item)
                 utils.increment_upload_count(acc_dir)
+                q_ok(acc_name, platform)
                 register_upload(
                     video_stem=Path(video_path).stem,
                     platform=platform,
-                    video_url="",
+                    video_url=video_url,
                     meta=meta,
+                    ab_variant=meta.get("ab_variant"),
                 )
-                logger.info(
-                    "[upload_scheduler] ✅ [%s][%s] Загружено: %s",
-                    acc_name, platform, video_path.name,
-                )
+                logger.info("[upload_scheduler] ✅ [%s][%s] %s", acc_name, platform, video_path.name)
+            else:
+                q_err(acc_name, platform, reason="upload_failed")
     finally:
         close_browser(pw, context)
 

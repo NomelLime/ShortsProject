@@ -87,16 +87,13 @@ def register_upload(
     platform: str,
     video_url: str,
     meta: Dict,
+    ab_variant: Optional[str] = None,
 ) -> None:
     """
     Регистрирует факт загрузки видео в analytics.json.
-    Вызывается из uploader.py сразу после успешной публикации.
-
-    video_url — публичный URL опубликованного видео на платформе.
-                Если URL неизвестен сразу — передать пустую строку,
-                он будет заполнен при первом сборе статистики.
+    ab_variant — метка варианта ("A", "B", ...) для A/B тестирования.
     """
-    data = _load_analytics()
+    data  = _load_analytics()
     entry = data.setdefault(video_stem, {
         "title":   meta.get("title", ""),
         "tags":    meta.get("tags", []),
@@ -110,10 +107,11 @@ def register_upload(
         "views":        None,
         "likes":        None,
         "comments":     None,
+        "ab_variant":   ab_variant,
     }
 
     _save_analytics(data)
-    logger.debug("[analytics] Зарегистрирована загрузка: %s / %s", video_stem, platform)
+    logger.debug("[analytics] Зарегистрирована загрузка: %s / %s (A/B: %s)", video_stem, platform, ab_variant)
 
 
 def get_pending_collection() -> List[Dict]:
@@ -491,3 +489,298 @@ def _send_analytics_report(data: Dict, collected: int) -> None:
             lines.append(f"  • <b>{title[:40]}</b> — {views:,} 👁  {tag_str}")
 
     send_telegram("\n".join(lines))
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# A/B тестирование (фича B)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def assign_ab_variants(video_stem: str, meta_variants: List[Dict]) -> None:
+    """
+    Назначает A/B варианты метаданных видео в analytics.json.
+    Вызывается из distributor.py при распределении видео на несколько аккаунтов
+    одной платформы — каждый аккаунт получает свой вариант.
+
+    Структура в analytics.json:
+      "ab_test": {
+        "youtube": {
+          "A": {"title": "...", "tags": [...]},
+          "B": {"title": "...", "tags": [...]}
+        }
+      }
+    """
+    if not config.AB_TEST_ENABLED or not meta_variants:
+        return
+
+    labels = [chr(ord("A") + i) for i in range(len(meta_variants))]
+    data   = _load_analytics()
+    entry  = data.setdefault(video_stem, {"title": "", "tags": [], "uploads": {}})
+    ab     = entry.setdefault("ab_test", {})
+
+    # Сохраняем варианты (не привязываем к платформе — платформ может быть несколько)
+    for label, meta in zip(labels, meta_variants):
+        ab[label] = {
+            "title": meta.get("title", ""),
+            "tags":  meta.get("tags", []),
+            "description": meta.get("description", ""),
+        }
+
+    _save_analytics(data)
+    logger.info("[ab_test] Назначено %d вариантов для %s", len(labels), video_stem)
+
+
+def get_ab_meta_for_account(video_stem: str, platform: str, account_index: int) -> Optional[Dict]:
+    """
+    Возвращает метаданные для конкретного аккаунта (по индексу) в рамках A/B теста.
+    account_index=0 → вариант A, 1 → B, 2 → C и т.д.
+    Возвращает None если A/B не настроен для этого видео.
+    """
+    data  = _load_analytics()
+    entry = data.get(video_stem, {})
+    ab    = entry.get("ab_test")
+    if not ab:
+        return None
+    labels = sorted(ab.keys())
+    label  = labels[account_index % len(labels)]
+    meta   = dict(ab[label])
+    meta["ab_variant"] = label
+    return meta
+
+
+def compare_ab_results() -> List[Dict]:
+    """
+    Сравнивает результаты A/B тестов для всех видео, у которых накопились данные.
+    Определяет победителя по средним просмотрам.
+    Отправляет отчёт в Telegram.
+    Возвращает список результатов.
+    """
+    if not config.AB_TEST_ENABLED:
+        return []
+
+    data    = _load_analytics()
+    results = []
+    now     = datetime.now()
+
+    for stem, entry in data.items():
+        ab = entry.get("ab_test")
+        if not ab:
+            continue
+
+        # Собираем статистику по вариантам
+        variant_stats: dict = {}
+        for platform, upload in entry.get("uploads", {}).items():
+            variant = upload.get("ab_variant")
+            views   = upload.get("views")
+            if not variant or views is None:
+                continue
+
+            # Проверяем что прошло достаточно времени
+            uploaded_at = upload.get("uploaded_at")
+            if uploaded_at:
+                try:
+                    age_h = (now - datetime.fromisoformat(uploaded_at)).total_seconds() / 3600
+                    if age_h < config.AB_TEST_COMPARE_AFTER_H:
+                        continue
+                except Exception:
+                    pass
+
+            variant_stats.setdefault(variant, []).append(views)
+
+        if len(variant_stats) < 2:
+            continue  # нет данных для сравнения
+
+        avg_by_variant = {v: sum(vs) / len(vs) for v, vs in variant_stats.items()}
+        winner         = max(avg_by_variant, key=avg_by_variant.get)
+
+        result = {
+            "stem":            stem,
+            "title":           entry.get("title", stem),
+            "winner":          winner,
+            "winner_avg_views": avg_by_variant[winner],
+            "variants":        avg_by_variant,
+            "winner_meta":     ab.get(winner, {}),
+        }
+        results.append(result)
+        logger.info(
+            "[ab_test] %s — победитель: %s (%.0f просмотров vs %s)",
+            stem, winner, avg_by_variant[winner],
+            {k: f"{v:.0f}" for k, v in avg_by_variant.items() if k != winner},
+        )
+
+    if results:
+        _send_ab_report(results)
+
+    return results
+
+
+def _send_ab_report(results: List[Dict]) -> None:
+    lines = [f"🧪 <b>A/B тест — итоги ({len(results)} видео):</b>\n"]
+    for r in results[:10]:
+        variants_str = " | ".join(
+            f"{'🏆' if k == r['winner'] else '  '}{k}: {v:,.0f} 👁"
+            for k, v in sorted(r["variants"].items())
+        )
+        lines.append(f"• <b>{r['title'][:35]}</b>\n  {variants_str}")
+        w_meta = r.get("winner_meta", {})
+        if w_meta.get("title"):
+            lines.append(f"  → Лучший заголовок: <i>{w_meta['title'][:50]}</i>")
+    send_telegram("\n".join(lines))
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Авто-репост слабых видео (фича A)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def get_repost_candidates() -> List[Dict]:
+    """
+    Возвращает список видео-кандидатов на репост:
+      - просмотров < REPOST_MIN_VIEWS
+      - прошло > REPOST_AFTER_HOURS с момента публикации
+      - количество попыток репоста < REPOST_MAX_ATTEMPTS
+
+    Возвращает список dict с ключами: stem, platform, original_meta, repost_attempt.
+    """
+    if not config.REPOST_ENABLED:
+        return []
+
+    data       = _load_analytics()
+    candidates = []
+    now        = datetime.now()
+
+    for stem, entry in data.items():
+        for platform, upload in entry.get("uploads", {}).items():
+            views       = upload.get("views")
+            uploaded_at = upload.get("uploaded_at")
+            if views is None or not uploaded_at:
+                continue
+            try:
+                age_h = (now - datetime.fromisoformat(uploaded_at)).total_seconds() / 3600
+            except Exception:
+                continue
+
+            if age_h < config.REPOST_AFTER_HOURS:
+                continue
+            if views >= config.REPOST_MIN_VIEWS:
+                continue
+
+            attempts = upload.get("repost_attempts", 0)
+            if attempts >= config.REPOST_MAX_ATTEMPTS:
+                continue
+
+            # Ищем исходный архив видео
+            archive_path = _find_archived_video(stem)
+            if not archive_path:
+                continue
+
+            candidates.append({
+                "stem":           stem,
+                "platform":       platform,
+                "archive_path":   archive_path,
+                "original_meta":  {
+                    "title":       entry.get("title", ""),
+                    "tags":        entry.get("tags", []),
+                    "description": entry.get("title", ""),
+                },
+                "repost_attempt": attempts + 1,
+                "original_views": views,
+            })
+
+    if candidates:
+        logger.info("[repost] Кандидатов на репост: %d", len(candidates))
+
+    return candidates
+
+
+def mark_repost_queued(video_stem: str, platform: str) -> None:
+    """Увеличивает счётчик попыток репоста в analytics.json."""
+    data  = _load_analytics()
+    entry = data.get(video_stem, {})
+    if platform in entry.get("uploads", {}):
+        entry["uploads"][platform]["repost_attempts"] = \
+            entry["uploads"][platform].get("repost_attempts", 0) + 1
+        _save_analytics(data)
+
+
+def _find_archived_video(stem: str) -> Optional[Path]:
+    """Ищет архивированное видео по stem во всех папках архива."""
+    archive_root = config.ARCHIVE_DIR
+    if not archive_root.exists():
+        return None
+    for video_path in archive_root.rglob(f"{stem}*.mp4"):
+        return video_path
+    return None
+
+
+def queue_reposts(dry_run: bool = False) -> int:
+    """
+    Добавляет слабые видео в очереди загрузки с изменёнными тегами.
+    Возвращает количество поставленных в очередь видео.
+    """
+    from pipeline import utils as _utils
+
+    candidates = get_repost_candidates()
+    if not candidates:
+        return 0
+
+    accounts = _utils.get_all_accounts()
+    queued   = 0
+
+    for candidate in candidates:
+        platform      = candidate["platform"]
+        archive_path  = candidate["archive_path"]
+        original_meta = candidate["original_meta"]
+        stem          = candidate["stem"]
+
+        # Ротируем теги: переставляем порядок для «свежести»
+        tags = original_meta.get("tags", [])
+        if len(tags) > 3:
+            import random as _r
+            suffix = _r.sample(tags, min(5, len(tags)))
+            tags   = suffix + [t for t in tags if t not in suffix]
+
+        repost_meta = dict(original_meta)
+        repost_meta["tags"]  = tags
+        repost_meta["title"] = f"{original_meta.get('title', '')} 🔁".strip()
+
+        # Находим аккаунты для этой платформы
+        target_accounts = [a for a in accounts if platform in a.get("platforms", [])]
+        if not target_accounts:
+            continue
+
+        import random as _r
+        acc = _r.choice(target_accounts)
+
+        queue_dir = acc["dir"] / "upload_queue" / platform
+        queue_dir.mkdir(parents=True, exist_ok=True)
+
+        dest_video = queue_dir / f"repost_{archive_path.name}"
+        dest_meta  = queue_dir / f"repost_{archive_path.stem}_meta.json"
+
+        if dest_video.exists():
+            continue  # уже в очереди
+
+        if dry_run:
+            logger.info("[repost][dry_run] %s -> %s/%s", archive_path.name, acc["name"], platform)
+        else:
+            try:
+                import shutil as _sh, json as _j
+                _sh.copy2(archive_path, dest_video)
+                dest_meta.write_text(
+                    _j.dumps(repost_meta, ensure_ascii=False, indent=2), encoding="utf-8"
+                )
+                mark_repost_queued(stem, platform)
+                queued += 1
+                logger.info(
+                    "[repost] ✅ %s -> %s/%s (было %d просмотров)",
+                    archive_path.name, acc["name"], platform, candidate["original_views"],
+                )
+            except Exception as exc:
+                logger.error("[repost] Ошибка: %s", exc)
+
+    if queued:
+        send_telegram(
+            f"🔁 <b>Авто-репост:</b> поставлено в очередь {queued} видео\n"
+            f"(просмотров < {config.REPOST_MIN_VIEWS} за {config.REPOST_AFTER_HOURS} ч)"
+        )
+
+    return queued
