@@ -3,9 +3,18 @@ pipeline/crew.py — Сборка и запуск всей агентной си
 
 Использование:
     from pipeline.crew import ShortsProjectCrew
+
+    # Запуск
     crew = ShortsProjectCrew()
     crew.start()
-    crew.commander.handle_command("статус")
+
+    # Команда от пользователя
+    reply = crew.command("статус")
+
+    # Context manager
+    with ShortsProjectCrew() as crew:
+        crew.command("добавь 5 аккаунтов tiktok")
+
     crew.stop()
 """
 from __future__ import annotations
@@ -35,10 +44,11 @@ class ShortsProjectCrew:
     """
     Полная система из 12 агентов.
 
-    После инициализации:
-      crew.start()                              → запустить всё
-      crew.commander.handle_command("статус")   → команда
-      crew.stop()                               → остановить всё
+    Агенты знают друг о друге там где нужна координация:
+      - EDITOR    знает VISIONARY (генерация мета)
+      - PUBLISHER знает GUARDIAN  (карантин) и ACCOUNTANT (лимиты)
+      - COMMANDER знает DIRECTOR  (делегирование)
+      - DIRECTOR  знает всех      (запуск/стоп/watchdog)
     """
 
     def __init__(
@@ -50,46 +60,76 @@ class ShortsProjectCrew:
         self.gpu     = get_gpu_manager()
         self._notify = notify
 
-        # Инициализируем агентов
-        self.director   = Director(memory=self.memory, notify=notify)
-        self.commander  = Commander(
+        # ── Инициализация агентов ─────────────────────────────────────
+        self.sentinel   = Sentinel(memory=self.memory,   notify=notify)
+        self.scout      = Scout(memory=self.memory,      notify=notify)
+        self.curator    = Curator(memory=self.memory,    notify=notify)
+        self.visionary  = Visionary(memory=self.memory,  notify=notify)
+        self.narrator   = Narrator(memory=self.memory,   notify=notify)
+        self.guardian   = Guardian(memory=self.memory,   notify=notify)
+        self.accountant = Accountant(memory=self.memory, notify=notify)
+        self.strategist = Strategist(memory=self.memory, notify=notify)
+
+        # EDITOR знает VISIONARY для генерации мета
+        self.editor = Editor(
+            memory=self.memory,
+            notify=notify,
+            visionary=self.visionary,
+        )
+
+        # PUBLISHER знает GUARDIAN и ACCOUNTANT
+        self.publisher = Publisher(
+            memory=self.memory,
+            notify=notify,
+            guardian=self.guardian,
+            accountant=self.accountant,
+        )
+
+        # DIRECTOR оркестрирует всех
+        self.director = Director(memory=self.memory, notify=notify)
+
+        # COMMANDER — интерфейс пользователя → DIRECTOR
+        self.commander = Commander(
             director=self.director,
             memory=self.memory,
             notify=notify,
             auto_confirm=auto_confirm,
         )
 
-        # Операционные агенты
-        self.scout      = Scout(memory=self.memory,      notify=notify)
-        self.curator    = Curator(memory=self.memory,    notify=notify)
-        self.visionary  = Visionary(memory=self.memory,  notify=notify)
-        self.narrator   = Narrator(memory=self.memory,   notify=notify)
-        self.editor     = Editor(memory=self.memory,     notify=notify)
-        self.strategist = Strategist(memory=self.memory, notify=notify)
-        self.guardian   = Guardian(memory=self.memory,   notify=notify)
-        self.publisher  = Publisher(memory=self.memory,  notify=notify)
-        self.accountant = Accountant(memory=self.memory, notify=notify)
-        self.sentinel   = Sentinel(memory=self.memory,   notify=notify)
-
-        # Регистрируем в Director
+        # ── Регистрация в DIRECTOR (порядок = порядок запуска) ────────
         for agent in [
-            self.sentinel, self.scout, self.curator, self.visionary,
-            self.narrator, self.editor, self.strategist, self.guardian,
-            self.publisher, self.accountant,
+            self.sentinel,    # первым — мониторинг
+            self.scout,       # поиск контента
+            self.curator,     # фильтрация
+            self.visionary,   # AI метаданные
+            self.narrator,    # TTS
+            self.editor,      # монтаж
+            self.strategist,  # аналитика
+            self.guardian,    # безопасность
+            self.publisher,   # загрузка
+            self.accountant,  # лимиты
         ]:
             self.director.register(agent)
 
-        logger.info("[CREW] Инициализировано 12 агентов")
+        logger.info("[CREW] 12 агентов инициализированы")
+
+    # ------------------------------------------------------------------
+    # Управление системой
+    # ------------------------------------------------------------------
 
     def start(self) -> None:
         """Запустить всю систему."""
         logger.info("[CREW] Запуск системы...")
         self.gpu.start()
-        self.director.start()
-        self.commander.start()
-        self.director.start_all()
+        self.director.start()   # сначала DIRECTOR (watchdog)
+        self.commander.start()  # потом COMMANDER (интерфейс)
+        self.director.start_all()  # затем все остальные
+
         if self._notify:
-            self._notify("🚀 ShortsProject запущен! Все агенты активны.")
+            self._notify(
+                "🚀 <b>ShortsProject запущен!</b>\n"
+                "12 агентов активны. Напиши <code>статус</code> для проверки."
+            )
         logger.info("[CREW] Система запущена ✓")
 
     def stop(self) -> None:
@@ -101,17 +141,21 @@ class ShortsProjectCrew:
         self.gpu.stop()
         logger.info("[CREW] Система остановлена ✓")
 
+    def command(self, text: str) -> str:
+        """Отправить команду через COMMANDER."""
+        return self.commander.handle_command(text)
+
     def status(self) -> dict:
         """Быстрый статус всей системы."""
         return self.director.full_status()
 
-    def command(self, text: str) -> str:
-        """Отправить команду через COMMANDER."""
-        return self.commander.handle_command(text)
+    # ------------------------------------------------------------------
+    # Context manager
+    # ------------------------------------------------------------------
 
     def __enter__(self):
         self.start()
         return self
 
-    def __exit__(self, *args):
+    def __exit__(self, *_):
         self.stop()
