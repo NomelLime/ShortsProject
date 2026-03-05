@@ -10,6 +10,13 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch, mock_open, call
 import pytest
 
+# Маркеры скорости:
+#   @pytest.mark.slow  — тесты с реальными потоками / ретраями / тяжёлыми моками
+#   (без маркера)      — быстрые юнит-тесты, запускаются за секунды
+#
+# Запуск только быстрых:  pytest -m "not slow"
+# Запуск только медленных: pytest -m slow
+
 # ═══════════════════════════════════════════════════════════════════════
 # FIXTURES
 # ═══════════════════════════════════════════════════════════════════════
@@ -78,6 +85,7 @@ class TestDownloadStats:
         s.record(DownloadResult("http://x.com", DownloadStatus.INTEGRITY_ERROR))
         assert s.integrity_error == 1
 
+    @pytest.mark.slow
     def test_record_is_thread_safe(self):
         """Параллельные записи не должны терять данные."""
         from pipeline.download import DownloadStats, DownloadResult, DownloadStatus
@@ -420,6 +428,7 @@ class TestCleanVideoMetadata:
         assert result == tmp_video
 
 
+@pytest.mark.slow
 class TestUploadVideo:
     def test_returns_true_on_first_success(self, tmp_video):
         from pipeline.uploader import upload_video
@@ -452,6 +461,7 @@ class TestUploadVideo:
         assert result is False
 
 
+@pytest.mark.slow
 class TestUploadAllDryRun:
     def test_dry_run_skips_actual_upload(self, tmp_path, tmp_video):
         from pipeline import uploader, utils
