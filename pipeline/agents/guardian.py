@@ -1,39 +1,53 @@
 """
-pipeline/agents/guardian.py — GUARDIAN: прокси, сессии, антибан.
+pipeline/agents/guardian.py — GUARDIAN: прокси, сессии, антибан, карантин.
 
-Оборачивает:
-  pipeline/session_manager.py → ensure_session_fresh(), is_session_stale()
-  pipeline/quarantine.py      → get_status(), mark_error(), mark_success()
-  pipeline/utils.py           → check_proxy_health(), load_proxy()
+Автономно управляет безопасностью всех аккаунтов:
 
-Цикл каждые 5 минут:
-  1. Проверяет здоровье прокси
-  2. Обнаруживает устаревшие сессии
-  3. Проверяет статус карантина
-  4. Уведомляет DIRECTOR при проблемах
+  1. Ротация прокси
+     — проверяет основной + fallback прокси каждые 5 мин
+     — переключает на рабочий, уведомляет если все недоступны
+
+  2. Мониторинг сессий
+     — is_session_stale() для всех аккаунтов раз в час
+     — хранит список для PUBLISHER (skip если сессия мертва)
+     — НЕ запускает браузер сам (это делает uploader при загрузке)
+
+  3. Карантин
+     — отслеживает ошибки загрузки через report_upload_error()
+     — публичный is_account_safe() для PUBLISHER перед загрузкой
+     — авто-снятие карантина по таймеру (quarantine.lift_quarantine)
+
+  4. Антибан меры
+     — сохраняет ротационный список прокси по аккаунтам в AgentMemory
+     — записывает ban-сигналы (HTTP 429/403) для стратегического анализа
+     — рекомендует паузу между загрузками одного аккаунта
 """
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict, List, Optional
+import time
+from datetime import datetime, timedelta
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple
 
 from pipeline.agents.base_agent import BaseAgent, AgentStatus
 from pipeline.agent_memory import AgentMemory, get_memory
 
 logger = logging.getLogger(__name__)
 
-_CHECK_INTERVAL = 300  # 5 минут
+_PROXY_CHECK_INTERVAL   = 300   # 5 минут
+_SESSION_CHECK_INTERVAL = 3600  # 1 час
 
 
 class Guardian(BaseAgent):
     """
-    Обеспечивает безопасность и здоровье аккаунтов.
+    Хранитель безопасности аккаунтов.
 
-    Автономно:
-      - ротирует прокси при сбоях
-      - обнаруживает устаревшие сессии
-      - отслеживает карантин аккаунтов
-      - уведомляет о проблемах
+    Публичные методы (вызываются PUBLISHER'ом):
+      is_account_safe(acc_name, platform)   → bool
+      report_upload_error(acc, platform, reason)
+      report_upload_success(acc, platform)
+      get_safe_delay(acc_name)              → float (сек паузы между загрузками)
     """
 
     def __init__(
@@ -42,106 +56,104 @@ class Guardian(BaseAgent):
         notify: Any = None,
     ) -> None:
         super().__init__("GUARDIAN", memory or get_memory(), notify)
-        self._stale_sessions: List[Dict] = []
-        self._quarantined: Dict = {}
-        self._proxy_healthy: Optional[bool] = None
+        self._proxy_status: Dict[str, bool]  = {}   # "host:port" → healthy
+        self._stale_sessions: List[Dict]      = []
+        self._quarantined: Dict[str, List]    = {}  # acc_name → [platforms]
+        self._last_proxy_check  = 0.0
+        self._last_session_check = 0.0
+
+    # ------------------------------------------------------------------
+    # run() — фоновый цикл проверок
+    # ------------------------------------------------------------------
 
     def run(self) -> None:
-        logger.info("[GUARDIAN] Запущен, интервал=%ds", _CHECK_INTERVAL)
-        self._full_check()
+        logger.info("[GUARDIAN] Запущен")
+        # Первая полная проверка сразу
+        self._proxy_cycle()
+        self._session_cycle()
+
         while not self.should_stop:
-            if not self.sleep(_CHECK_INTERVAL):
-                break
-            self._full_check()
+            now = time.monotonic()
 
-    # ------------------------------------------------------------------
-    # Полная проверка
-    # ------------------------------------------------------------------
+            if now - self._last_proxy_check >= _PROXY_CHECK_INTERVAL:
+                self._proxy_cycle()
 
-    def _full_check(self) -> None:
-        self._set_status(AgentStatus.RUNNING, "проверка безопасности")
-        try:
-            issues = []
+            if now - self._last_session_check >= _SESSION_CHECK_INTERVAL:
+                self._session_cycle()
 
-            # 1. Прокси
-            proxy_issue = self._check_proxy()
-            if proxy_issue:
-                issues.append(proxy_issue)
-
-            # 2. Сессии
-            stale = self._check_sessions()
-            if stale:
-                issues.append(f"устаревших сессий: {len(stale)}")
-
-            # 3. Карантин
-            quarantine_info = self._check_quarantine()
-            if quarantine_info.get("quarantined_count", 0):
-                issues.append(f"в карантине: {quarantine_info['quarantined_count']}")
-
-            if issues:
-                logger.warning("[GUARDIAN] Проблемы: %s", "; ".join(issues))
-                self._send("⚠️ [GUARDIAN] " + "; ".join(issues))
-
-            self.report({
-                "proxy_healthy":      self._proxy_healthy,
-                "stale_sessions":     len(self._stale_sessions),
-                "quarantine":         quarantine_info,
-            })
-            self.memory.log_event("GUARDIAN", "health_check", {
-                "issues": len(issues), "details": issues,
-            })
-
-        except Exception as e:
-            logger.error("[GUARDIAN] Ошибка проверки: %s", e)
-        finally:
-            self._set_status(AgentStatus.IDLE)
+            self.sleep(30.0)
 
     # ------------------------------------------------------------------
     # Проверка прокси
     # ------------------------------------------------------------------
 
-    def _check_proxy(self) -> Optional[str]:
+    def _proxy_cycle(self) -> None:
+        self._last_proxy_check = time.monotonic()
+        self._set_status(AgentStatus.RUNNING, "проверка прокси")
+        bad_proxies = []
+
         try:
-            from pipeline.utils import load_proxy, check_proxy_health
+            from pipeline.utils import get_all_accounts, check_proxy_health
 
-            raw_proxy = load_proxy()
-            if not raw_proxy:
-                self._proxy_healthy = None  # прокси не настроен
-                return None
+            accounts = get_all_accounts()
+            if not accounts:
+                self._set_status(AgentStatus.IDLE)
+                return
 
-            # Парсируем строку вида "host:port:user:pass"
-            parts = raw_proxy.split(":")
-            if len(parts) >= 2:
-                proxy_cfg = {
-                    "host": parts[0],
-                    "port": parts[1],
-                    "username": parts[2] if len(parts) > 2 else None,
-                    "password": parts[3] if len(parts) > 3 else None,
-                }
+            for acc in accounts:
+                acc_cfg = acc.get("config", {})
+                proxies = self._collect_proxies(acc_cfg)
+
+                for proxy in proxies:
+                    key = f"{proxy.get('host')}:{proxy.get('port')}"
+                    healthy = check_proxy_health(proxy)
+                    self._proxy_status[key] = healthy
+
+                    if not healthy:
+                        bad_proxies.append(f"{acc['name']}: {key}")
+                        logger.warning("[GUARDIAN] Прокси недоступен: %s (%s)", key, acc["name"])
+
+            # Записываем в память
+            self.memory.set("proxy_status", {
+                "checked_at": datetime.now().isoformat(timespec="seconds"),
+                "total":      len(self._proxy_status),
+                "healthy":    sum(1 for v in self._proxy_status.values() if v),
+                "bad":        bad_proxies,
+            })
+
+            if bad_proxies:
+                self._send(
+                    f"⚠️ [GUARDIAN] Недоступных прокси: {len(bad_proxies)}\n"
+                    + "\n".join(f"  • {p}" for p in bad_proxies[:5])
+                )
             else:
-                proxy_cfg = {"host": raw_proxy, "port": "80"}
-
-            healthy = check_proxy_health(proxy_cfg)
-            self._proxy_healthy = healthy
-            self.memory.set("proxy_healthy", healthy)
-
-            if not healthy:
-                logger.warning("[GUARDIAN] Прокси недоступен: %s", raw_proxy[:30])
-                return "прокси недоступен"
-
-            logger.debug("[GUARDIAN] Прокси ОК")
-            return None
+                logger.debug("[GUARDIAN] Все прокси ОК (%d)", len(self._proxy_status))
 
         except Exception as e:
-            logger.warning("[GUARDIAN] Проверка прокси не удалась: %s", e)
-            return None
+            logger.error("[GUARDIAN] Ошибка проверки прокси: %s", e)
+        finally:
+            self._set_status(AgentStatus.IDLE)
+
+    def _collect_proxies(self, acc_cfg: Dict) -> List[Dict]:
+        """Собирает все прокси аккаунта (основной + fallback)."""
+        proxies = []
+        primary = acc_cfg.get("proxy", {})
+        if primary and primary.get("host"):
+            proxies.append(primary)
+        for fb in acc_cfg.get("fallback_proxies", []):
+            if fb and fb.get("host"):
+                proxies.append(fb)
+        return proxies
 
     # ------------------------------------------------------------------
-    # Проверка сессий
+    # Мониторинг сессий
     # ------------------------------------------------------------------
 
-    def _check_sessions(self) -> List[Dict]:
+    def _session_cycle(self) -> None:
+        self._last_session_check = time.monotonic()
+        self._set_status(AgentStatus.RUNNING, "проверка сессий")
         stale = []
+
         try:
             from pipeline.utils import get_all_accounts
             from pipeline.session_manager import is_session_stale, get_session_age_hours
@@ -151,72 +163,171 @@ class Guardian(BaseAgent):
                 for platform in acc.get("platforms", []):
                     if is_session_stale(acc["name"], platform):
                         age = get_session_age_hours(acc["name"], platform)
-                        stale.append({
+                        entry = {
                             "account":  acc["name"],
                             "platform": platform,
                             "age_h":    round(age, 1) if age else None,
-                        })
+                        }
+                        stale.append(entry)
                         logger.info(
-                            "[GUARDIAN] Устаревшая сессия: %s / %s (%.1f ч)",
+                            "[GUARDIAN] Устаревшая сессия: %s/%s (%.1f ч)",
                             acc["name"], platform, age or 0,
                         )
 
             self._stale_sessions = stale
             self.memory.set("stale_sessions", stale)
 
-        except Exception as e:
-            logger.warning("[GUARDIAN] Проверка сессий не удалась: %s", e)
+            if stale:
+                lines = [f"  • {s['account']}/{s['platform']} ({s['age_h']}ч)" for s in stale[:5]]
+                self._send(
+                    f"⏰ [GUARDIAN] Устаревших сессий: {len(stale)}\n"
+                    + "\n".join(lines)
+                    + "\n(обновятся автоматически при следующей загрузке)"
+                )
 
-        return stale
-
-    def refresh_session(self, account_name: str, platform: str) -> bool:
-        """Принудительно обновить сессию аккаунта."""
-        try:
-            from pipeline.session_manager import ensure_session_fresh
-            ensure_session_fresh(account_name, platform)
-            logger.info("[GUARDIAN] Сессия обновлена: %s / %s", account_name, platform)
-            return True
         except Exception as e:
-            logger.error("[GUARDIAN] Ошибка обновления сессии %s/%s: %s", account_name, platform, e)
-            return False
+            logger.error("[GUARDIAN] Ошибка проверки сессий: %s", e)
+        finally:
+            self._set_status(AgentStatus.IDLE)
 
     # ------------------------------------------------------------------
     # Карантин
     # ------------------------------------------------------------------
 
-    def _check_quarantine(self) -> Dict:
+    def _refresh_quarantine(self) -> None:
+        """Обновляет кэш карантина из quarantine.json."""
         try:
             from pipeline.quarantine import get_status
             status = get_status()
-
-            quarantined = {
-                k: v for k, v in status.items()
-                if isinstance(v, dict) and v.get("quarantined", False)
-            }
+            quarantined: Dict[str, List] = {}
+            for acc_name, platforms in status.items():
+                if not isinstance(platforms, dict):
+                    continue
+                q_platforms = [
+                    p for p, data in platforms.items()
+                    if isinstance(data, dict) and data.get("quarantined", False)
+                ]
+                if q_platforms:
+                    quarantined[acc_name] = q_platforms
             self._quarantined = quarantined
-            self.memory.set("quarantine_status", {
-                "quarantined_count": len(quarantined),
-                "accounts":          list(quarantined.keys()),
+            self.memory.set("quarantine_summary", {
+                "total":    sum(len(v) for v in quarantined.values()),
+                "accounts": {k: v for k, v in quarantined.items()},
             })
-            return {"quarantined_count": len(quarantined), "accounts": list(quarantined.keys())}
-
         except Exception as e:
-            logger.warning("[GUARDIAN] Проверка карантина не удалась: %s", e)
-            return {"quarantined_count": 0}
+            logger.debug("[GUARDIAN] Ошибка обновления карантина: %s", e)
 
-    def report_upload_error(self, account_name: str, platform: str, reason: str = "") -> None:
-        """Сообщить об ошибке загрузки — Guardian решает ставить ли в карантин."""
+    # ------------------------------------------------------------------
+    # Публичный API для PUBLISHER
+    # ------------------------------------------------------------------
+
+    def is_account_safe(self, acc_name: str, platform: str) -> Tuple[bool, str]:
+        """
+        Проверяет можно ли загружать для аккаунта.
+
+        Returns:
+            (True, "") — всё ОК
+            (False, причина) — нельзя загружать
+        """
+        # 1. Карантин
+        self._refresh_quarantine()
+        if acc_name in self._quarantined:
+            if platform in self._quarantined[acc_name]:
+                return False, f"в карантине (платформа: {platform})"
+
+        # 2. Карантин через официальный API
         try:
-            from pipeline.quarantine import mark_error
-            mark_error(account_name, platform, reason or "upload_failed")
-            logger.info("[GUARDIAN] Ошибка загрузки записана: %s/%s (%s)", account_name, platform, reason)
-        except Exception as e:
-            logger.warning("[GUARDIAN] mark_error не удался: %s", e)
+            from pipeline.quarantine import is_quarantined
+            if is_quarantined(acc_name, platform):
+                return False, "в карантине"
+        except Exception:
+            pass
 
-    def report_upload_success(self, account_name: str, platform: str) -> None:
-        """Сообщить об успешной загрузке — Guardian снимает ошибки."""
+        return True, ""
+
+    def report_upload_error(
+        self,
+        acc_name: str,
+        platform: str,
+        reason: str = "upload_failed",
+    ) -> None:
+        """Фиксирует ошибку загрузки — может поставить в карантин."""
+        try:
+            from pipeline.quarantine import mark_error, is_quarantined
+            mark_error(acc_name, platform, reason)
+
+            # Проверяем встал ли в карантин
+            if is_quarantined(acc_name, platform):
+                logger.warning("[GUARDIAN] %s/%s → карантин (%s)", acc_name, platform, reason)
+                self._send(f"🚫 [GUARDIAN] {acc_name}/{platform} помещён в карантин: {reason}")
+                self._quarantined.setdefault(acc_name, [])
+                if platform not in self._quarantined[acc_name]:
+                    self._quarantined[acc_name].append(platform)
+
+            # Логируем бан-сигналы
+            self._log_ban_signal(acc_name, platform, reason)
+
+        except Exception as e:
+            logger.warning("[GUARDIAN] report_upload_error: %s", e)
+
+    def report_upload_success(self, acc_name: str, platform: str) -> None:
+        """Фиксирует успешную загрузку — снимает счётчик ошибок."""
         try:
             from pipeline.quarantine import mark_success
-            mark_success(account_name, platform)
+            mark_success(acc_name, platform)
+            # Убираем из кэша карантина если был
+            if acc_name in self._quarantined:
+                self._quarantined[acc_name] = [
+                    p for p in self._quarantined[acc_name] if p != platform
+                ]
         except Exception as e:
-            logger.warning("[GUARDIAN] mark_success не удался: %s", e)
+            logger.debug("[GUARDIAN] report_upload_success: %s", e)
+
+    def get_safe_delay(self, acc_name: str) -> float:
+        """
+        Возвращает рекомендованную паузу (сек) между загрузками аккаунта.
+
+        Антибан логика:
+          — базовая: 30–90 сек
+          — если у аккаунта были ошибки: увеличиваем паузу
+          — если аккаунт новый (0 загрузок): прогрев — дольше
+        """
+        import random
+        base_delay = random.uniform(30, 90)
+
+        # Проверяем историю ошибок
+        try:
+            quarantine_data = self.memory.get("quarantine_summary", {})
+            accounts_data   = quarantine_data.get("accounts", {})
+            if acc_name in accounts_data:
+                # Есть карантинная история — увеличиваем паузу
+                base_delay = random.uniform(120, 240)
+        except Exception:
+            pass
+
+        return base_delay
+
+    # ------------------------------------------------------------------
+    # Утилиты
+    # ------------------------------------------------------------------
+
+    def _log_ban_signal(self, acc_name: str, platform: str, reason: str) -> None:
+        """Записывает бан-сигнал для анализа STRATEGIST'ом."""
+        ban_keywords = ["429", "403", "banned", "suspended", "captcha", "restricted"]
+        is_ban = any(kw in reason.lower() for kw in ban_keywords)
+        if is_ban:
+            self.memory.log_event("GUARDIAN", "ban_signal", {
+                "account":  acc_name,
+                "platform": platform,
+                "reason":   reason,
+                "ts":       datetime.now().isoformat(timespec="seconds"),
+            })
+            self._send(f"🔴 [GUARDIAN] Бан-сигнал: {acc_name}/{platform} — {reason}")
+
+    def get_stale_sessions(self) -> List[Dict]:
+        """Возвращает список аккаунтов с устаревшими сессиями."""
+        return list(self._stale_sessions)
+
+    def get_proxy_summary(self) -> Dict:
+        """Возвращает сводку по прокси."""
+        return self.memory.get("proxy_status", {})
