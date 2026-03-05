@@ -24,6 +24,7 @@ from pipeline.config import (
     HOOK_TEXT_DURATION, HOOK_TEXT_POSITION,
     LOOP_PROMPT_DURATION,
     OVERLAY_DEFAULT_DURATION, OVERLAY_POSITION,
+    TTS_VOLUME, TTS_VOICE_OVER_MIX,
 )
 from pipeline.utils import probe_video
 
@@ -223,7 +224,157 @@ def _postprocess_single(
     meta: Dict,
     shape: str,
     bg_path: Optional[Path] = None,
+    tts_audio_path: Optional[Path] = None,
 ) -> bool:
+    try:
+        info      = probe_video(clip_path)
+        duration  = info["duration"]
+        w, h      = info["width"], info["height"]
+        has_audio = info["has_audio"]
+
+        is_landscape = w > h
+        circle_ratio = (CIRCLE_RATIO_LANDSCAPE if is_landscape else CIRCLE_RATIO_PORTRAIT)
+        circle_ratio = circle_ratio + random.uniform(-CIRCLE_VARIATION, CIRCLE_VARIATION)
+        circle_ratio = max(0.5, min(0.98, circle_ratio))
+
+        actual_banner = banner_path or _pick_random_banner()
+        has_banner    = actual_banner is not None and actual_banner.exists()
+        banner_h_px   = int(OUTPUT_H * BANNER_HEIGHT_PCT) if has_banner else 0
+        banner_h_px  -= banner_h_px % 2
+
+        has_bg  = bg_path is not None and bg_path.exists()
+        has_tts = tts_audio_path is not None and Path(tts_audio_path).exists()
+
+        # Индексы входных потоков
+        bg_idx, banner_idx, tts_idx = -1, -1, -1
+        next_idx = 1
+        if has_bg:
+            bg_idx = next_idx; next_idx += 1
+        if has_banner:
+            banner_idx = next_idx; next_idx += 1
+        if has_tts:
+            tts_idx = next_idx; next_idx += 1
+
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+
+        fc = _build_filter_complex(
+            duration=duration,
+            has_audio=has_audio,
+            has_bg=has_bg,
+            has_banner=has_banner,
+            banner_h_px=banner_h_px,
+            shape=shape,
+            font_str=font_str,
+            meta=meta,
+            circle_ratio=circle_ratio,
+            bg_idx=bg_idx,
+            banner_idx=banner_idx,
+        )
+
+        # ── Строим ffmpeg команду ──────────────────────────────────────
+        cmd = ["ffmpeg", "-y", "-i", str(clip_path)]
+        if has_bg:
+            cmd += ["-stream_loop", "-1", "-i", str(bg_path)]
+        if has_banner:
+            cmd += ["-i", str(actual_banner)]
+        if has_tts:
+            cmd += ["-i", str(tts_audio_path)]
+
+        cmd += ["-filter_complex", fc, "-map", "[vout]"]
+
+        # ── Аудио: оригинал + TTS mix ──────────────────────────────────
+        if has_tts and has_audio:
+            # Микшируем оригинальный аудио + TTS голос
+            # TTS_VOICE_OVER_MIX = 0.85 → голос 85%, оригинал 15%
+            orig_vol  = round(1.0 - TTS_VOICE_OVER_MIX, 2)
+            voice_vol = round(TTS_VOICE_OVER_MIX * TTS_VOLUME, 2)
+            # Обрезаем TTS по длине видео, затем миксуем
+            audio_fc = (
+                f"[0:a]volume={orig_vol}[orig_a];"
+                f"[{tts_idx}:a]apad,atrim=duration={duration:.3f},"
+                f"volume={voice_vol}[tts_a];"
+                f"[orig_a][tts_a]amix=inputs=2:duration=first:normalize=0[aout]"
+            )
+            cmd += [
+                "-filter_complex", f"{fc};{audio_fc}",
+                "-map", "[vout]",
+                "-map", "[aout]",
+                "-c:a", "aac", "-b:a", AUDIO_BITRATE,
+            ]
+            # Убираем предыдущий -map [vout] (он уже внутри filter_complex)
+            # Пересобираем команду без дублирования
+            cmd = ["ffmpeg", "-y", "-i", str(clip_path)]
+            if has_bg:
+                cmd += ["-stream_loop", "-1", "-i", str(bg_path)]
+            if has_banner:
+                cmd += ["-i", str(actual_banner)]
+            if has_tts:
+                cmd += ["-i", str(tts_audio_path)]
+
+            combined_fc = f"{fc};{audio_fc}"
+            cmd += ["-filter_complex", combined_fc,
+                    "-map", "[vout]", "-map", "[aout]",
+                    "-c:a", "aac", "-b:a", AUDIO_BITRATE]
+
+        elif has_tts and not has_audio:
+            # Только TTS голос — оригинал без аудио
+            audio_fc = (
+                f"[{tts_idx}:a]apad,atrim=duration={duration:.3f},"
+                f"volume={TTS_VOLUME:.2f}[aout]"
+            )
+            cmd = ["ffmpeg", "-y", "-i", str(clip_path)]
+            if has_bg:
+                cmd += ["-stream_loop", "-1", "-i", str(bg_path)]
+            if has_banner:
+                cmd += ["-i", str(actual_banner)]
+            if has_tts:
+                cmd += ["-i", str(tts_audio_path)]
+
+            combined_fc = f"{fc};{audio_fc}"
+            cmd += ["-filter_complex", combined_fc,
+                    "-map", "[vout]", "-map", "[aout]",
+                    "-c:a", "aac", "-b:a", AUDIO_BITRATE]
+
+        else:
+            # Без TTS — оригинальная логика
+            cmd += ["-filter_complex", fc, "-map", "[vout]"]
+            if has_audio:
+                cmd += ["-map", "0:a", "-c:a", "aac", "-b:a", AUDIO_BITRATE]
+            else:
+                cmd += ["-an"]
+
+        cmd += ["-c:v", vcodec]
+        for k, v in (vcodec_opts or {}).items():
+            cmd += [f"-{k}", str(v)]
+
+        cmd += [
+            "-r", str(OUTPUT_FPS),
+            "-pix_fmt", "yuv420p",
+            "-t", str(duration),
+            "-movflags", "+faststart",
+            str(out_path),
+        ]
+
+        logger.debug("ffmpeg cmd: %s", " ".join(cmd))
+        subprocess.run(cmd, check=True, capture_output=True, timeout=300)
+
+        if out_path.exists() and out_path.stat().st_size > 0:
+            logger.info("Постобработка OK: %s (shape=%s, tts=%s)", out_path.name, shape, has_tts)
+            return True
+
+        logger.error("Постобработка: выходной файл пуст: %s", out_path)
+        return False
+
+    except subprocess.CalledProcessError as e:
+        logger.error("ffmpeg ошибка %s:\n%s", clip_path.name,
+                     e.stderr.decode(errors="replace")[-800:])
+        return False
+    except subprocess.TimeoutExpired:
+        logger.error("ffmpeg timeout >300s для %s", clip_path.name)
+        return False
+    except Exception as e:
+        logger.error("Постобработка %s: %s", clip_path.name, e)
+        return False
     try:
         info      = probe_video(clip_path)
         duration  = info["duration"]
@@ -324,21 +475,33 @@ def stage_postprocess(
     vcodec_opts: Optional[Dict] = None,
     metadata_variants: Optional[List[Dict]] = None,
     bg_path: Optional[Path] = None,
+    tts_audio_paths: Optional[List[Optional[Path]]] = None,
 ) -> List[Path]:
-    """Постобработка списка клипов. Возвращает список готовых путей."""
+    """
+    Постобработка списка клипов. Возвращает список готовых путей.
+
+    Args:
+        tts_audio_paths: список .wav файлов (по одному на клип) или None.
+                         Если передан — голос микшируется с оригинальным аудио.
+    """
     if metadata_variants is None:
         metadata_variants = []
     if vcodec_opts is None:
         vcodec_opts = {}
+    if tts_audio_paths is None:
+        tts_audio_paths = []
 
     font_ok  = _check_font()
     font_str = str(FONT_PATH) if font_ok else ""
 
     successful: List[Path] = []
-    for clip_path in clips:
+    for i, clip_path in enumerate(clips):
         meta     = random.choice(metadata_variants) if metadata_variants else {}
         shape    = random.choice(SHAPES)
         out_path = config.OUTPUT_DIR / clip_path.with_suffix(".mp4").name
+
+        # TTS файл для этого клипа (если есть)
+        tts_path = tts_audio_paths[i] if i < len(tts_audio_paths) else None
 
         if _postprocess_single(
             clip_path=clip_path,
@@ -350,6 +513,7 @@ def stage_postprocess(
             meta=meta,
             shape=shape,
             bg_path=bg_path,
+            tts_audio_path=tts_path,
         ):
             successful.append(out_path)
         else:

@@ -70,11 +70,12 @@ class ShortsProjectCrew:
         self.accountant = Accountant(memory=self.memory, notify=notify)
         self.strategist = Strategist(memory=self.memory, notify=notify)
 
-        # EDITOR знает VISIONARY для генерации мета
+        # EDITOR знает VISIONARY (мета) и NARRATOR (TTS)
         self.editor = Editor(
             memory=self.memory,
             notify=notify,
             visionary=self.visionary,
+            narrator=self.narrator,
         )
 
         # PUBLISHER знает GUARDIAN и ACCOUNTANT

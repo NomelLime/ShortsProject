@@ -320,6 +320,24 @@ DAILY_UPLOAD_LIMIT = int(os.getenv("DAILY_UPLOAD_LIMIT", "5"))
 ALL_PLATFORMS = {"youtube", "tiktok", "instagram"}
 
 # ----------------------------------------------------------------------
+# TTS — Kokoro-82M (локальный, бесплатный, MIT лицензия)
+# Файлы модели: assets/tts/kokoro-v1.9.onnx + voices-v1.0.bin
+# Скачать: https://github.com/thewh1teagle/kokoro-onnx/releases
+# ----------------------------------------------------------------------
+TTS_ENABLED        = os.getenv("TTS_ENABLED", "true").lower() == "true"
+TTS_DIR            = ASSETS_DIR / "tts"
+TTS_MODEL_FILE     = TTS_DIR / "kokoro-v1.9.onnx"
+TTS_VOICES_FILE    = TTS_DIR / "voices-v1.0.bin"
+TTS_DEFAULT_LANG   = os.getenv("TTS_DEFAULT_LANG", "en")   # en | ru | en-gb
+TTS_SPEED          = float(os.getenv("TTS_SPEED", "1.0"))  # 0.5–2.0
+TTS_VOLUME         = float(os.getenv("TTS_VOLUME", "1.0")) # громкость голоса (0.1–2.0)
+TTS_VOICE_OVER_MIX = float(os.getenv("TTS_VOICE_OVER_MIX", "0.85"))  # доля голоса в миксе
+# Голос применяется к hook_text из метаданных видео
+TTS_USE_HOOK_TEXT  = os.getenv("TTS_USE_HOOK_TEXT", "true").lower() == "true"
+# Временная папка для .wav файлов до микширования
+TTS_TEMP_DIR       = BASE_DIR / "data" / "tts_temp"
+
+# ----------------------------------------------------------------------
 # Telegram уведомления
 # ----------------------------------------------------------------------
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
