@@ -14,6 +14,7 @@ import tempfile
 import time
 from datetime import date, timedelta
 from pathlib import Path
+from threading import Lock
 from typing import Dict, List, Optional, Tuple, Union
 
 import ffmpeg
@@ -94,12 +95,31 @@ def check_video_integrity(path: Union[str, Path]) -> bool:
 
 
 def detect_encoder() -> Tuple[str, Optional[Dict]]:
-    """Определяет доступный кодек: h264_nvenc (GPU) или libx264 (CPU)."""
+    """
+    Определяет доступный видеокодек.
+    Проверяет h264_nvenc (NVIDIA GPU) через реальный тест кодирования,
+    fallback на libx264 (CPU).
+    """
     try:
-        subprocess.check_output(["ffmpeg", "-encoders"])
-        return "h264_nvenc", {"preset": "fast", "cq": "23"}
+        # Реальная проверка: пробуем закодировать 1 кадр через nvenc
+        result = subprocess.run(
+            [
+                "ffmpeg", "-y",
+                "-f", "lavfi", "-i", "color=black:s=64x64:d=0.1",
+                "-c:v", "h264_nvenc", "-frames:v", "1",
+                "-f", "null", "-",
+            ],
+            capture_output=True,
+            timeout=10,
+        )
+        if result.returncode == 0:
+            logger.info("Кодек: h264_nvenc (NVIDIA GPU)")
+            return "h264_nvenc", {"preset": "p4", "cq": "23"}
     except Exception:
-        return "libx264", {"preset": "fast", "crf": "23"}
+        pass
+
+    logger.info("Кодек: libx264 (CPU fallback)")
+    return "libx264", {"preset": "fast", "crf": "23"}
 
 
 # ----------------------------------------------------------------------

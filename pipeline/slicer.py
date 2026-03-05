@@ -19,10 +19,13 @@ from typing import List, Optional, Tuple
 from pipeline.config import (
     CLIP_MIN_LEN, CLIP_MAX_LEN,
     SHORT_VIDEO_THRESHOLD,
-    SILENCE_THRESHOLD, SILENCE_MIN_DUR,  # Reintroduced
+    SILENCE_THRESHOLD, SILENCE_MIN_DUR,
     AI_NUM_FRAMES,
 )
 from pipeline.utils import probe_video
+
+# generate_video_metadata и generate_cut_points — ленивый импорт внутри функций
+# чтобы избежать кольцевого импорта: ai → utils → slicer → ai
 
 logger = logging.getLogger(__name__)
 
@@ -84,6 +87,9 @@ def slice_short_video(video_path: Path, clip_dir: Path) -> List[Path]:
 def slice_long_video(video_path: Path, clip_dir: Path,
                      metadata_variants: Optional[List[dict]] = None) -> List[Path]:
     """Нарезает длинное видео через AI."""
+    # Ленивый импорт — избегаем кольцевого импорта на уровне модуля
+    from pipeline.ai import generate_video_metadata, generate_cut_points  # noqa: F811
+
     dur = probe_video(video_path)['duration']
     source_name = video_path.stem
     result = []
@@ -108,9 +114,6 @@ def slice_long_video(video_path: Path, clip_dir: Path,
 
     # Reintroduced silencedetect
     silences = detect_silences(str(video_path))
-
-    # Импорт здесь чтобы избежать кольцевого импорта на уровне модуля
-    from pipeline.ai import generate_cut_points
 
     ai_cuts = generate_cut_points(
         video_path=video_path,
