@@ -67,8 +67,10 @@ class Strategist(BaseAgent):
             # 3. Кандидаты на репост
             repost_count = self._process_reposts()
 
-            # 4. Умное расписание
+            # 4. Умное расписание + применение к аккаунтам
             schedule_recs = self._analyse_schedule()
+            if schedule_recs:
+                self._apply_schedule_recommendations(schedule_recs)
 
             # Сохраняем рекомендации в память
             recommendations = {
@@ -144,6 +146,76 @@ class Strategist(BaseAgent):
         except Exception as e:
             logger.warning("[STRATEGIST] Репосты не удались: %s", e)
             return 0
+
+    def _apply_schedule_recommendations(
+        self, best_times: Dict[str, List[int]]
+    ) -> None:
+        """
+        Применяет рекомендованные часы публикаций к config.json каждого аккаунта.
+
+        Конвертирует часы → строки "HH:00", записывает в
+        account_cfg["upload_schedule"][platform] и сохраняет файл.
+        UploadScheduler подхватит изменения на следующем тике.
+
+        Args:
+            best_times: {platform: [час1, час2, час3]} из _analyse_schedule()
+        """
+        if not best_times:
+            return
+
+        try:
+            from pipeline.utils import get_all_accounts, save_json
+
+            accounts = get_all_accounts()
+            updated  = 0
+
+            for acc in accounts:
+                acc_dir  = acc["dir"]
+                cfg_path = acc_dir / "config.json"
+                acc_cfg  = acc.get("config", {})
+
+                if not isinstance(acc_cfg, dict):
+                    continue
+
+                schedule = acc_cfg.setdefault("upload_schedule", {})
+                changed  = False
+
+                for platform, hours in best_times.items():
+                    # Проверяем, что платформа используется этим аккаунтом
+                    if platform not in acc.get("platforms", []):
+                        continue
+
+                    new_times = [f"{h:02d}:00" for h in sorted(hours)]
+                    old_times = schedule.get(platform, [])
+
+                    if new_times != old_times:
+                        schedule[platform] = new_times
+                        changed = True
+                        logger.info(
+                            "[STRATEGIST] %s/%s расписание: %s → %s",
+                            acc["name"], platform,
+                            old_times or "(нет)", new_times,
+                        )
+
+                if changed:
+                    save_json(cfg_path, acc_cfg)
+                    updated += 1
+
+            if updated:
+                logger.info(
+                    "[STRATEGIST] Расписание обновлено у %d аккаунт(ов): %s",
+                    updated, best_times,
+                )
+                self.memory.log_event(
+                    "STRATEGIST", "schedule_applied",
+                    {"accounts_updated": updated, "best_times": best_times},
+                )
+                self._send(
+                    f"📅 [STRATEGIST] Расписание обновлено для {updated} аккаунт(ов)"
+                )
+
+        except Exception as e:
+            logger.warning("[STRATEGIST] Ошибка применения расписания: %s", e)
 
     def get_repost_candidates(self) -> List[Dict]:
         """Возвращает кандидатов на репост (для PUBLISHER)."""
