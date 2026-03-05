@@ -2,153 +2,169 @@
 pipeline/agents/base_agent.py — Базовый класс для всех агентов ShortsProject.
 
 Каждый агент:
-  - имеет имя, роль и доступ к общей памяти (AgentMemory)
-  - логирует все действия с меткой агента
-  - может отправлять Telegram-уведомления
-  - регистрирует свой статус в AgentMemory
-  - перехватывает и обрабатывает ошибки стандартным образом
+  - запускается в отдельном потоке через start() / stop()
+  - имеет доступ к AgentMemory (self.memory)
+  - автоматически регистрирует статус в памяти
+  - поддерживает прерываемый sleep() (stop() будит поток)
+  - отправляет Telegram-уведомления через self._send()
+  - сохраняет отчёты через self.report()
 """
-
 from __future__ import annotations
 
 import logging
+import threading
 import time
 import traceback
 from abc import ABC, abstractmethod
-from datetime import datetime
 from enum import Enum, auto
-from typing import Any, Dict, Optional
-
-from pipeline.notifications import send_telegram
+from typing import Any, Callable, Dict, Optional
 
 
 class AgentStatus(Enum):
-    IDLE    = auto()
-    RUNNING = auto()
-    SUCCESS = auto()
-    FAILED  = auto()
-    WAITING = auto()
+    IDLE    = "IDLE"
+    RUNNING = "RUNNING"
+    WAITING = "WAITING"   # ждёт GPU или ресурса
+    ERROR   = "ERROR"
+    STOPPED = "STOPPED"
 
 
 class BaseAgent(ABC):
     """
     Базовый класс для всех агентов.
 
-    Подклассы обязаны реализовать метод run().
-    Все вызовы run() проходят через execute() — он обеспечивает
-    логирование, трекинг статуса и обработку ошибок.
+    Подклассы обязаны реализовать run().
+    run() вызывается внутри потока, запущенного через start().
+
+    Паттерн использования в run():
+        def run(self) -> None:
+            while not self.should_stop:
+                self._set_status(AgentStatus.RUNNING, "работа")
+                # ... логика ...
+                if not self.sleep(interval):
+                    break
     """
 
     def __init__(
         self,
         name: str,
-        role: str,
-        memory=None,          # AgentMemory — опционально во избежание цикличного импорта
-        notify_on_fail: bool = True,
-        notify_on_success: bool = False,
+        memory=None,       # AgentMemory — опционально
+        notify: Any = None,
     ) -> None:
-        self.name             = name
-        self.role             = role
-        self._memory          = memory
-        self.notify_on_fail   = notify_on_fail
-        self.notify_on_success = notify_on_success
-        self.status           = AgentStatus.IDLE
-        self.last_result: Any = None
-        self.last_error: Optional[str] = None
+        self.name          = name
+        self.memory        = memory
+        self._notify       = notify
+        self.status        = AgentStatus.IDLE
+        self._last_error: Optional[str] = None
+        self._start_time:  Optional[float] = None
+
+        self._stop_event   = threading.Event()
+        self._thread:      Optional[threading.Thread] = None
 
         self.logger = logging.getLogger(f"agent.{name.lower()}")
 
-    # ── Абстрактный метод ────────────────────────────────────────────────────
+        # Регистрируем в памяти при создании
+        if self.memory:
+            self.memory.register_agent(name)
+
+    # ------------------------------------------------------------------
+    # Абстрактный метод
+    # ------------------------------------------------------------------
 
     @abstractmethod
-    def run(self, **kwargs) -> Any:
-        """Основная логика агента. Реализуется в подклассах."""
+    def run(self) -> None:
+        """Основная логика агента. Запускается в отдельном потоке."""
         ...
 
-    # ── Публичный интерфейс ──────────────────────────────────────────────────
+    # ------------------------------------------------------------------
+    # Lifecycle
+    # ------------------------------------------------------------------
 
-    def execute(self, **kwargs) -> Any:
-        """
-        Запускает агента с полным lifecycle:
-          1. Обновляет статус → RUNNING
-          2. Вызывает run(**kwargs)
-          3. Обновляет статус → SUCCESS / FAILED
-          4. Логирует результат и время выполнения
-          5. Уведомляет Telegram при ошибке (если notify_on_fail)
-        """
-        self._set_status(AgentStatus.RUNNING)
-        self._log_memory_event("start", kwargs)
-        start_ts = time.monotonic()
+    def start(self) -> None:
+        """Запустить агента в фоновом потоке."""
+        if self._thread and self._thread.is_alive():
+            self.logger.warning("[%s] Уже запущен", self.name)
+            return
+        self._stop_event.clear()
+        self._start_time = time.monotonic()
+        self._thread = threading.Thread(
+            target=self._run_wrapper,
+            name=f"agent-{self.name.lower()}",
+            daemon=True,
+        )
+        self._thread.start()
+        self.logger.info("[%s] Поток запущен", self.name)
 
+    def stop(self, timeout: float = 10.0) -> None:
+        """Запросить остановку и дождаться завершения потока."""
+        self._stop_event.set()
+        if self._thread and self._thread.is_alive():
+            self._thread.join(timeout=timeout)
+        self._set_status(AgentStatus.STOPPED)
+        self.logger.info("[%s] Остановлен", self.name)
+
+    def _run_wrapper(self) -> None:
+        """Обёртка: перехватывает ошибки, обновляет статус."""
         try:
-            result = self.run(**kwargs)
-            elapsed = time.monotonic() - start_ts
-
-            self.last_result = result
-            self.last_error  = None
-            self._set_status(AgentStatus.SUCCESS)
-            self._log_memory_event("success", {"elapsed_sec": round(elapsed, 2)})
-
-            self.logger.info(
-                "[%s] ✅ Выполнено за %.1f сек.", self.name, elapsed
-            )
-            if self.notify_on_success:
-                send_telegram(
-                    f"✅ <b>[{self.name}]</b> задача выполнена за {elapsed:.1f}с."
-                )
-            return result
-
+            self.run()
         except Exception as exc:
-            elapsed = time.monotonic() - start_ts
-            tb      = traceback.format_exc()
-            self.last_error = str(exc)
-            self._set_status(AgentStatus.FAILED)
-            self._log_memory_event("error", {"error": str(exc), "elapsed_sec": round(elapsed, 2)})
-
+            self._last_error = str(exc)
+            self._set_status(AgentStatus.ERROR, str(exc)[:120])
             self.logger.error(
-                "[%s] ❌ Ошибка за %.1f сек.: %s\n%s",
-                self.name, elapsed, exc, tb,
+                "[%s] Необработанная ошибка: %s\n%s",
+                self.name, exc, traceback.format_exc(),
             )
-            if self.notify_on_fail:
-                send_telegram(
-                    f"❌ <b>[{self.name}]</b> ошибка:\n<code>{str(exc)[:400]}</code>"
-                )
-            raise
 
-    def report(self) -> Dict:
-        """Возвращает текущий статус агента в виде словаря."""
-        return {
-            "name":        self.name,
-            "role":        self.role,
-            "status":      self.status.name,
-            "last_error":  self.last_error,
-            "last_result": str(self.last_result)[:200] if self.last_result else None,
-        }
+    # ------------------------------------------------------------------
+    # Управление потоком
+    # ------------------------------------------------------------------
 
-    # ── Вспомогательные методы ───────────────────────────────────────────────
+    @property
+    def should_stop(self) -> bool:
+        """True если получен сигнал на остановку."""
+        return self._stop_event.is_set()
 
-    def _set_status(self, status: AgentStatus) -> None:
+    def sleep(self, seconds: float) -> bool:
+        """
+        Прерываемый sleep. Возвращает False если был вызван stop().
+
+        Использование:
+            if not self.sleep(60):
+                return  # агент остановлен
+        """
+        return not self._stop_event.wait(timeout=seconds)
+
+    def get_uptime(self) -> Optional[float]:
+        """Uptime агента в секундах или None если не запущен."""
+        if self._start_time is None:
+            return None
+        return round(time.monotonic() - self._start_time, 1)
+
+    # ------------------------------------------------------------------
+    # Статус и отчётность
+    # ------------------------------------------------------------------
+
+    def _set_status(self, status: AgentStatus, detail: str = "") -> None:
+        """Обновить статус + записать в AgentMemory."""
         self.status = status
-        if self._memory:
-            self._memory.set_agent_status(self.name, status.name)
+        if self.memory:
+            status_str = status.value if not detail else f"{status.value}: {detail}"
+            self.memory.set_agent_status(self.name, status_str)
 
-    def _log_memory_event(self, event: str, data: Dict) -> None:
-        if self._memory:
-            self._memory.log_event(
-                agent=self.name,
-                event=event,
-                data=data,
-                ts=datetime.now().isoformat(timespec="seconds"),
-            )
+    def report(self, data: Dict[str, Any]) -> None:
+        """Сохранить произвольный отчёт агента в AgentMemory."""
+        if self.memory:
+            self.memory.set_agent_report(self.name, data)
 
-    def _get_memory(self, key: str, default: Any = None) -> Any:
-        if self._memory:
-            return self._memory.get(key, default)
-        return default
-
-    def _set_memory(self, key: str, value: Any) -> None:
-        if self._memory:
-            self._memory.set(key, value)
+    def _send(self, message: str) -> None:
+        """Отправить Telegram-уведомление (если notify задан)."""
+        try:
+            if callable(self._notify):
+                self._notify(message)
+            else:
+                from pipeline.notifications import send_telegram
+                send_telegram(message)
+        except Exception as e:
+            self.logger.debug("[%s] Уведомление не отправлено: %s", self.name, e)
 
     def __repr__(self) -> str:
-        return f"<Agent {self.name} [{self.status.name}]>"
+        return f"<Agent {self.name} [{self.status.value}]>"

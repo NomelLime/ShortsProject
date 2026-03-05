@@ -167,7 +167,53 @@ class Director(BaseAgent):
                 break
 
     def _watchdog(self) -> None:
+        # 1. Обрабатываем запросы на рестарт от SENTINEL
+        self._process_sentinel_requests()
+
+        # 2. Собственный watchdog: агенты в ERROR без участия SENTINEL
         for name, agent in self._agents.items():
             if agent.status == AgentStatus.ERROR:
-                logger.warning("[DIRECTOR] Агент %s в статусе ERROR — пробую перезапустить", name)
+                logger.warning(
+                    "[DIRECTOR] Агент %s в статусе ERROR — пробую перезапустить", name
+                )
                 self.restart_agent(name)
+
+    def _process_sentinel_requests(self) -> None:
+        """
+        Читает список AgentMemory["sentinel_restart_requests"] и перезапускает
+        каждого агента из списка. После обработки очищает список.
+
+        SENTINEL пишет в этот ключ имена агентов, которые были в ERROR > 2 мин.
+        """
+        requests: list = self.memory.get("sentinel_restart_requests", [])
+        if not requests:
+            return
+
+        processed = []
+        for agent_name in requests:
+            agent = self._agents.get(agent_name)
+            if agent is None:
+                logger.warning(
+                    "[DIRECTOR] SENTINEL запросил рестарт %s, но агент не зарегистрирован",
+                    agent_name,
+                )
+                processed.append(agent_name)
+                continue
+
+            # Не перезапускаем агентов, которые уже восстановились сами
+            if agent.status not in (AgentStatus.ERROR,):
+                logger.info(
+                    "[DIRECTOR] Агент %s уже в статусе %s, рестарт SENTINEL пропущен",
+                    agent_name, agent.status.value,
+                )
+                processed.append(agent_name)
+                continue
+
+            logger.info("[DIRECTOR] Рестарт по запросу SENTINEL: %s", agent_name)
+            self.restart_agent(agent_name)
+            processed.append(agent_name)
+
+        if processed:
+            # Удаляем обработанные запросы
+            remaining = [r for r in requests if r not in processed]
+            self.memory.set("sentinel_restart_requests", remaining)
