@@ -32,12 +32,11 @@ python-dotenv
 # Для работы с датами и т.д.
 
 # Агентная система
-crewai
-crewai-tools
 psutil
 
 # TTS (Kokoro-82M — локальный, MIT лицензия)
-# Установка: pip install kokoro-onnx soundfile
+# Установка: pip install kokoro-onnx soundfile langdetect
 # Модели: https://github.com/thewh1teagle/kokoro-onnx/releases
 kokoro-onnx
 soundfile
+langdetect

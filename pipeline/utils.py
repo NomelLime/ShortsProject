@@ -337,23 +337,36 @@ def mark_uploaded(item: Dict) -> None:
     item["video_path"].with_name(f"{item['video_path'].stem}_meta.json").unlink(missing_ok=True)
 
 
-def get_uploads_today(acc_dir: Path) -> int:
-    """Возвращает количество загрузок сегодня для аккаунта."""
+def get_uploads_today(acc_dir: Path, platform: Optional[str] = None) -> int:
+    """
+    Возвращает количество загрузок сегодня для аккаунта.
+    Если platform задан — только по этой платформе (fix: раньше считалось суммарно).
+    """
     limit_path = acc_dir / "daily_limit.json"
     if not limit_path.exists():
         return 0
     data = json.loads(limit_path.read_text(encoding="utf-8"))
     today = date.today().isoformat()
+    if platform:
+        # Per-platform ключ: "uploaded_today_youtube", "uploaded_today_tiktok" и т.д.
+        return data.get(f"uploaded_today_{platform}", {}).get(today, 0)
+    # Обратная совместимость — суммарно по всем платформам
     return data.get("uploaded_today", {}).get(today, 0)
 
 
-def increment_upload_count(acc_dir: Path) -> None:
-    """Инкрементирует счётчик загрузок в daily_limit.json."""
+def increment_upload_count(acc_dir: Path, platform: Optional[str] = None) -> None:
+    """Инкрементирует счётчик загрузок в daily_limit.json (глобальный + per-platform)."""
     limit_path = acc_dir / "daily_limit.json"
     data = json.loads(limit_path.read_text(encoding="utf-8")) if limit_path.exists() else {}
     today = date.today().isoformat()
+    # Глобальный счётчик (для обратной совместимости)
     uploaded_today = data.setdefault("uploaded_today", {})
     uploaded_today[today] = uploaded_today.get(today, 0) + 1
+    # Per-platform счётчик
+    if platform:
+        plat_key = f"uploaded_today_{platform}"
+        plat_today = data.setdefault(plat_key, {})
+        plat_today[today] = plat_today.get(today, 0) + 1
     limit_path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
 
 

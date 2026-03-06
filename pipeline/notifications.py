@@ -2,6 +2,8 @@
 notifications.py – Telegram-уведомления и обработка CAPTCHA / 2FA.
 """
 
+import hashlib
+import threading
 import time
 import logging
 import requests
@@ -11,16 +13,55 @@ from pipeline.config import TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, CAPTCHA_WAIT_T
 
 logger = logging.getLogger(__name__)
 
+# ──────────────────────────────────────────────────────────────
+# Rate limiter: защита от спама при массовых ошибках
+# ──────────────────────────────────────────────────────────────
+_tg_lock            = threading.Lock()
+_tg_last_send_ts    = 0.0          # время последней отправки
+_tg_min_interval    = 2.0          # минимум 2 секунды между сообщениями
+_tg_dedup_cache: dict = {}         # hash → timestamp для дедупликации
+_tg_dedup_window    = 300          # одно и то же сообщение не чаще 5 мин
+
 
 # ──────────────────────────────────────────────────────────────
 # Telegram
 # ──────────────────────────────────────────────────────────────
 
 def send_telegram(message: str, parse_mode: str = "HTML") -> bool:
-    """Отправляет сообщение в Telegram. Возвращает True при успехе."""
+    """
+    Отправляет сообщение в Telegram с rate limiting.
+    - Не чаще 1 сообщения в 2 сек (лимит Telegram API ~30/сек для ботов)
+    - Дедупликация: одно и то же сообщение не чаще раза в 5 мин
+    """
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
         logger.warning("Telegram не настроен (TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID пустые).")
         return False
+
+    with _tg_lock:
+        global _tg_last_send_ts
+
+        # Дедупликация по первым 200 символам (ключевой смысл)
+        msg_hash = hashlib.md5(message[:200].encode()).hexdigest()
+        now = time.monotonic()
+        last_for_msg = _tg_dedup_cache.get(msg_hash, 0.0)
+        if now - last_for_msg < _tg_dedup_window:
+            logger.debug("Telegram: дубль сообщения пропущен (cooldown %ds)", _tg_dedup_window)
+            return True
+
+        # Rate limit: ждём если отправляли недавно
+        wait = _tg_min_interval - (now - _tg_last_send_ts)
+        if wait > 0:
+            time.sleep(wait)
+
+        _tg_last_send_ts = time.monotonic()
+        _tg_dedup_cache[msg_hash] = _tg_last_send_ts
+
+        # Чистим старые записи из кеша (старше 10 мин)
+        cutoff = _tg_last_send_ts - 600
+        expired = [k for k, v in _tg_dedup_cache.items() if v < cutoff]
+        for k in expired:
+            del _tg_dedup_cache[k]
+
     try:
         url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
         resp = requests.post(

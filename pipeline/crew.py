@@ -122,9 +122,9 @@ class ShortsProjectCrew:
         """Запустить всю систему."""
         logger.info("[CREW] Запуск системы...")
         self.gpu.start()
-        self.director.start()   # сначала DIRECTOR (watchdog)
-        self.commander.start()  # потом COMMANDER (интерфейс)
-        self.director.start_all()  # затем все остальные
+        self.commander.start()     # интерфейс первый (принимает команды)
+        self.director.start_all()  # запускаем всех агентов
+        self.director.start()      # watchdog стартует последним — реестр уже заполнен
 
         if self._notify:
             self._notify(

@@ -233,6 +233,11 @@ class Commander(BaseAgent):
 
     def _parse_command(self, command: str) -> Dict:
         """Разбирает команду через Ollama, возвращает структурированный dict."""
+        # Проверяем кешированный статус Ollama — избегаем 30-60с timeout на каждую команду
+        ollama_ok = self.memory.get("ollama_available")
+        if ollama_ok is False:
+            return self._fallback_parse(command)
+
         try:
             import ollama  # type: ignore
         except ImportError:
@@ -242,11 +247,16 @@ class Commander(BaseAgent):
         state = json.dumps(self.memory.summary(), ensure_ascii=False)
         prompt = _PARSE_PROMPT.format(command=command, state=state[:2000])
 
-        response = ollama.generate(
-            model="qwen2.5-vl:7b",
-            prompt=prompt,
-            options={"temperature": 0.1},
-        )
+        try:
+            response = ollama.generate(
+                model="qwen2.5-vl:7b",
+                prompt=prompt,
+                options={"temperature": 0.1},
+            )
+        except Exception as e:
+            logger.warning("[COMMANDER] Ollama недоступен: %s — переключаюсь на fallback", e)
+            self.memory.set("ollama_available", False)
+            return self._fallback_parse(command)
 
         raw = response.get("response", "{}")
         # Убираем возможные markdown-теги
@@ -321,7 +331,7 @@ class Commander(BaseAgent):
             lines = ["📊 Статус системы:"]
             for name, info in status.get("agents", {}).items():
                 emoji = {"running": "🟢", "idle": "⚪", "error": "🔴",
-                         "stopped": "⛔", "waiting": "🟡"}.get(info["status"], "❓")
+                         "stopped": "⛔", "waiting": "🟡"}.get(info["status"].lower().split(":")[0], "❓")
                 lines.append(f"  {emoji} {name}: {info['status']}")
             gpu = status.get("gpu", {})
             lines.append(f"\n🖥️ GPU: активных={len(gpu.get('active', {}))}, очередь={gpu.get('queue_size', 0)}")

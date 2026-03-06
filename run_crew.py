@@ -58,6 +58,11 @@ def telegram_polling_loop(crew: ShortsProjectCrew, token: str, chat_id: str) -> 
     """Фоновый поток: читает входящие сообщения и передаёт в COMMANDER."""
     import requests
 
+    # Whitelist отправителей — читается из .env: TELEGRAM_ALLOWED_USER_IDS=123456,789012
+    # Если не задан, разрешаем только пользователей из нашего chat_id (личный чат)
+    allowed_ids_raw = os.getenv("TELEGRAM_ALLOWED_USER_IDS", "")
+    allowed_user_ids = set(x.strip() for x in allowed_ids_raw.split(",") if x.strip())
+
     offset = 0
     logger.info("Telegram polling запущен (chat_id=%s)", chat_id)
 
@@ -72,13 +77,18 @@ def telegram_polling_loop(crew: ShortsProjectCrew, token: str, chat_id: str) -> 
             for upd in updates:
                 offset = upd["update_id"] + 1
                 msg = upd.get("message", {})
-                # Только наш chat_id
+                # Проверяем chat_id
                 if str(msg.get("chat", {}).get("id")) != str(chat_id):
+                    continue
+                # Проверяем отправителя (защита от чужих команд в группах)
+                sender_id = str(msg.get("from", {}).get("id", ""))
+                if allowed_user_ids and sender_id not in allowed_user_ids:
+                    logger.warning("Telegram: команда от неавторизованного user_id=%s — проигнорирована", sender_id)
                     continue
                 text = msg.get("text", "").strip()
                 if not text:
                     continue
-                logger.info("Telegram команда: %s", text)
+                logger.info("Telegram команда от user_id=%s: %s", sender_id, text)
                 result = crew.command(text)
                 crew._notify(result)
         except Exception as e:

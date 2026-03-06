@@ -87,7 +87,7 @@ class Scout(BaseAgent):
             logger.error("[SCOUT] Ошибка: %s", e)
             raise
         finally:
-            if self._status != AgentStatus.ERROR:
+            if self.status != AgentStatus.ERROR:
                 self._set_status(AgentStatus.IDLE)
 
     def _expand_keywords(self, keywords: List[str]) -> List[str]:

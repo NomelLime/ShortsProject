@@ -67,6 +67,11 @@ def _load_analytics() -> Dict:
         return {}
 
 
+def load_analytics() -> Dict:
+    """Публичный API для чтения analytics.json (обёртка над _load_analytics)."""
+    return _load_analytics()
+
+
 def _save_analytics(data: Dict) -> None:
     try:
         config.ANALYTICS_FILE.parent.mkdir(parents=True, exist_ok=True)

@@ -102,7 +102,7 @@ class Publisher(BaseAgent):
             self._set_status(AgentStatus.ERROR, str(e))
             raise
         finally:
-            if self._status not in (AgentStatus.ERROR,):
+            if self.status not in (AgentStatus.ERROR,):
                 self._set_status(AgentStatus.IDLE)
 
     # ------------------------------------------------------------------

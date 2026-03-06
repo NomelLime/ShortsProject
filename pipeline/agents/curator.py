@@ -80,6 +80,7 @@ class Curator(BaseAgent):
 
             accepted_this_cycle = 0
             rejected_this_cycle = 0
+            rejected_dir = preparing_dir.parent / "archive" / "rejected"
 
             for video in video_files:
                 ok, reason = self._evaluate(video, probe_video, is_duplicate)
@@ -90,6 +91,17 @@ class Curator(BaseAgent):
                     rejected_this_cycle += 1
                     self._rejected += 1
                     logger.debug("[CURATOR] Отклонён %s: %s", video.name, reason)
+                    # Перемещаем в archive/rejected/ — иначе бесконечный re-scan
+                    try:
+                        rejected_dir.mkdir(parents=True, exist_ok=True)
+                        dest = rejected_dir / video.name
+                        # Если файл с таким именем уже есть — добавляем суффикс
+                        if dest.exists():
+                            dest = rejected_dir / f"{video.stem}__{int(video.stat().st_mtime)}{video.suffix}"
+                        video.rename(dest)
+                        logger.info("[CURATOR] %s → archive/rejected/ (%s)", video.name, reason)
+                    except Exception as mv_err:
+                        logger.warning("[CURATOR] Не удалось переместить %s: %s", video.name, mv_err)
 
             if accepted_this_cycle or rejected_this_cycle:
                 logger.info(

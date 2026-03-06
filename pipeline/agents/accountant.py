@@ -75,7 +75,8 @@ class Accountant(BaseAgent):
                 stats[acc_name] = {}
 
                 for platform in platforms:
-                    uploads_today = get_uploads_today(acc_dir)
+                    # Fix: считаем загрузки по платформе, а не суммарно по аккаунту
+                    uploads_today = get_uploads_today(acc_dir, platform=platform)
 
                     # Приоритет: кастомный аккаунт → кастомный платформа
                     # → кастомный "all" → в config аккаунта → платформенный → глобальный

@@ -51,7 +51,9 @@ class Director(BaseAgent):
         self._agents: Dict[str, BaseAgent] = {}
         self._gpu = get_gpu_manager()
         self._restart_count: Dict[str, int] = {}
+        self._restart_count_reset_ts: float = time.monotonic()
         self._max_restarts = 3
+        self._RESTART_COUNT_RESET_SEC = 3600  # сбрасываем счётчики раз в час
 
     # ------------------------------------------------------------------
     # Управление реестром
@@ -167,6 +169,13 @@ class Director(BaseAgent):
                 break
 
     def _watchdog(self) -> None:
+        # 0. Сбрасываем счётчики перезапуска раз в час (чтобы временные сбои не блокировали навсегда)
+        if time.monotonic() - self._restart_count_reset_ts >= self._RESTART_COUNT_RESET_SEC:
+            if self._restart_count:
+                logger.info("[DIRECTOR] Сброс счётчиков перезапусков: %s", self._restart_count)
+                self._restart_count.clear()
+            self._restart_count_reset_ts = time.monotonic()
+
         # 1. Обрабатываем запросы на рестарт от SENTINEL
         self._process_sentinel_requests()
 
