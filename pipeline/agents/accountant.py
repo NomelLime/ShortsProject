@@ -42,6 +42,7 @@ class Accountant(BaseAgent):
     ) -> None:
         super().__init__("ACCOUNTANT", memory or get_memory(), notify)
         self._last_summary_date: Optional[date] = None
+        self._cycle_count = 0
 
     def run(self) -> None:
         logger.info("[ACCOUNTANT] Запущен, интервал=%ds", _CHECK_INTERVAL)
@@ -57,6 +58,8 @@ class Accountant(BaseAgent):
 
     def _check_limits(self) -> None:
         self._set_status(AgentStatus.RUNNING, "проверка лимитов")
+        self._cycle_count += 1
+        cycle = self._cycle_count
         try:
             from pipeline.utils import get_all_accounts, get_uploads_today
             from pipeline import config
@@ -128,6 +131,9 @@ class Accountant(BaseAgent):
                 "[ACCOUNTANT] Загрузок сегодня: %d, аккаунтов на лимите: %d/%d",
                 total_today, len(at_limit), len(accounts),
             )
+
+            # Пишем рекомендацию для GUARDIAN с оценкой риска
+            self._write_risk_recommendation(stats, at_limit, cycle)
 
         except Exception as e:
             logger.error("[ACCOUNTANT] Ошибка: %s", e)
@@ -257,3 +263,65 @@ class Accountant(BaseAgent):
     def get_custom_limits(self) -> Dict[str, int]:
         """Возвращает текущие кастомные лимиты (для COMMANDER/статуса)."""
         return self.memory.get("custom_limits", {})
+
+    # ------------------------------------------------------------------
+    # Рекомендация для GUARDIAN
+    # ------------------------------------------------------------------
+
+    def _write_risk_recommendation(
+        self,
+        stats: Dict,
+        at_limit: List[str],
+        cycle: int,
+    ) -> None:
+        """Формирует оценку риска по каждому аккаунту и пишет rec.accountant.guardian.
+
+        Описывает: загрузок сегодня / лимит, аккаунты на лимите,
+        аккаунты с высокой нагрузкой (≥80% лимита).
+        """
+        if not stats:
+            return
+
+        risk_lines: List[str] = []
+        high_risk:  List[str] = []
+
+        for acc_name, platforms in stats.items():
+            for platform, pdata in platforms.items():
+                uploads = pdata.get("uploads_today", 0)
+                limit   = pdata.get("limit", 1)
+                at_lim  = pdata.get("at_limit", False)
+
+                usage_pct = (uploads / limit * 100) if limit > 0 else 0
+                label     = f"{acc_name}.{platform}"
+
+                if at_lim:
+                    risk_lines.append(f"{label}: {uploads}/{limit} (ЛИМИТ)")
+                    high_risk.append(label)
+                elif usage_pct >= 80:
+                    risk_lines.append(f"{label}: {uploads}/{limit} ({usage_pct:.0f}%)")
+                    high_risk.append(label)
+
+        # Общий вывод
+        total_accounts = sum(len(p) for p in stats.values())
+        at_limit_count = len(at_limit)
+
+        if high_risk:
+            risk_summary = (
+                f"Высокая нагрузка на {len(high_risk)}/{total_accounts} аккаунт(ов): "
+                + "; ".join(risk_lines[:6])
+                + (f" и ещё {len(risk_lines) - 6}" if len(risk_lines) > 6 else "")
+                + f". На лимите: {at_limit_count}."
+            )
+        else:
+            risk_summary = (
+                f"Нагрузка в норме: {total_accounts} аккаунт(ов), "
+                f"на лимите: {at_limit_count}."
+            )
+
+        self.memory.write_recommendation(
+            from_agent="accountant",
+            to_agent="guardian",
+            content=risk_summary,
+            cycle=cycle,
+        )
+        logger.debug("[ACCOUNTANT] Риск-рекомендация для GUARDIAN: %s", risk_summary)

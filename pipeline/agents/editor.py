@@ -47,6 +47,8 @@ class Editor(BaseAgent):
         self._visionary = visionary
         self._narrator  = narrator
         self._processed = 0
+        # Кэш LLM-решений по фонам: {category: filename}, TTL = 1 цикл
+        self._bg_cache: Dict[str, str] = {}
 
     def run(self) -> None:
         logger.info("[EDITOR] Запущен, интервал=%ds", _SCAN_INTERVAL)
@@ -61,6 +63,8 @@ class Editor(BaseAgent):
 
     def _process_cycle(self) -> None:
         self._set_status(AgentStatus.RUNNING, "проверка очереди")
+        # Сбрасываем кэш фонов — он живёт только один цикл
+        self._bg_cache.clear()
         try:
             from pipeline import config
 
@@ -314,16 +318,17 @@ class Editor(BaseAgent):
 
     def select_background(self, topic: str = "") -> Optional[Path]:
         """
-        Умный выбор фона:
-          1. По теме (совпадение в имени файла)
-          2. Ротация get_unique_bg (без повторов)
-          3. AnimateDiff (Этап 5)
+        Умный выбор фона с LLM-контекстом:
+          1. Кэш по категории (TTL = 1 цикл)
+          2. LLM-решение: VISIONARY стиль + STRATEGIST рекомендация → Ollama выбирает файл
+          3. По теме (совпадение в имени файла)
+          4. Ротация get_unique_bg (без повторов)
+          5. Случайный
         """
         try:
             from pipeline import config
             from pipeline.utils import get_unique_bg
 
-            # Определяем папку с фонами
             bg_dir: Optional[Path] = None
             for candidate in [
                 getattr(config, "BG_VIDEO_DIR", None),
@@ -341,7 +346,25 @@ class Editor(BaseAgent):
             if not bg_files:
                 return None
 
-            # Поиск по теме
+            # Определяем категорию для кэша
+            category = self._extract_category(topic)
+
+            # 1. Кэш — если для этой категории уже есть решение в этом цикле
+            if category in self._bg_cache:
+                cached_name = self._bg_cache[category]
+                cached_path = bg_dir / cached_name
+                if cached_path.exists():
+                    logger.debug("[EDITOR] Фон из кэша (категория '%s'): %s", category, cached_name)
+                    return cached_path
+
+            # 2. LLM-решение (только если есть хоть одна рекомендация)
+            llm_choice = self._choose_bg_with_llm(topic, category, bg_files)
+            if llm_choice:
+                self._bg_cache[category] = llm_choice.name
+                logger.info("[EDITOR] Фон (LLM, категория '%s'): %s", category, llm_choice.name)
+                return llm_choice
+
+            # 3. Поиск по теме
             if topic:
                 topic_words = [w for w in topic.lower().split() if len(w) > 2]
                 matches = [
@@ -353,7 +376,7 @@ class Editor(BaseAgent):
                     logger.info("[EDITOR] Фон по теме '%s': %s", topic, chosen.name)
                     return chosen
 
-            # Ротация без повторов
+            # 4. Ротация без повторов
             try:
                 chosen = get_unique_bg(bg_dir)
                 if chosen:
@@ -362,7 +385,7 @@ class Editor(BaseAgent):
             except Exception:
                 pass
 
-            # Случайный
+            # 5. Случайный
             chosen = random.choice(bg_files)
             logger.info("[EDITOR] Фон (случайный): %s", chosen.name)
             return chosen
@@ -370,6 +393,104 @@ class Editor(BaseAgent):
         except Exception as e:
             logger.debug("[EDITOR] select_background: %s", e)
             return None
+
+    # ------------------------------------------------------------------
+    # LLM-выбор фона
+    # ------------------------------------------------------------------
+
+    def _choose_bg_with_llm(
+        self,
+        topic: str,
+        category: str,
+        bg_files: List[Path],
+    ) -> Optional[Path]:
+        """Спрашивает Ollama какой фон выбрать из доступных.
+
+        Читает рекомендации VISIONARY и STRATEGIST, строит промпт,
+        Ollama возвращает имя файла. Валидирует что имя из списка.
+        """
+        visionary_rec  = self.memory.read_recommendation("visionary", "editor")
+        strategist_rec = self.memory.read_recommendation("strategist", "editor")
+
+        if not visionary_rec and not strategist_rec:
+            # Нет контекста — не тратим GPU на Ollama
+            return None
+
+        file_names = [f.name for f in bg_files]
+        visionary_hint  = visionary_rec.get("content",  "нет данных") if visionary_rec  else "нет данных"
+        strategist_hint = strategist_rec.get("content", "нет данных") if strategist_rec else "нет данных"
+
+        prompt = (
+            f"Ты редактор видео. Выбери один фоновый файл для ролика.\n\n"
+            f"Тема видео: {topic or category or 'не указана'}\n"
+            f"VISIONARY рекомендует стиль: {visionary_hint}\n"
+            f"STRATEGIST рекомендует: {strategist_hint}\n\n"
+            f"Доступные файлы фонов:\n"
+            + "\n".join(f"- {name}" for name in file_names) +
+            "\n\nВерни ТОЛЬКО имя одного файла из списка выше, без пояснений."
+        )
+
+        self._set_status(AgentStatus.WAITING, "ожидание GPU для LLM (фон)")
+        try:
+            with self._gpu.acquire("EDITOR_BG", GPUPriority.LLM):
+                self._set_status(AgentStatus.RUNNING, "LLM выбор фона")
+                raw = self._call_ollama_with_fallback(
+                    prompt=prompt,
+                    fallback_value=None,
+                    context_description=f"выбор фона для категории '{category}'",
+                )
+        except Exception as exc:
+            logger.debug("[EDITOR] GPU недоступен для выбора фона: %s", exc)
+            return None
+
+        if raw is None:
+            return None
+
+        chosen_name = self._validate_bg_choice(raw.strip(), file_names)
+        if not chosen_name:
+            return None
+
+        # Ищем объект Path по имени файла
+        for f in bg_files:
+            if f.name == chosen_name:
+                return f
+        return None
+
+    @staticmethod
+    def _validate_bg_choice(raw: str, file_names: List[str]) -> Optional[str]:
+        """Проверяет что ответ Ollama является валидным именем файла из списка.
+
+        Защита от галлюцинаций: ищем точное совпадение, затем частичное.
+        """
+        # Точное совпадение
+        cleaned = raw.strip().strip('"\'').split("\n")[0].strip()
+        if cleaned in file_names:
+            return cleaned
+
+        # Частичное совпадение (Ollama мог вернуть имя без расширения)
+        cleaned_lower = cleaned.lower()
+        for name in file_names:
+            if name.lower() == cleaned_lower:
+                return name
+            # Имя без расширения
+            if Path(name).stem.lower() == cleaned_lower:
+                return name
+
+        logger.debug(
+            "[EDITOR] LLM выбрал несуществующий фон '%s' — fallback", cleaned
+        )
+        return None
+
+    @staticmethod
+    def _extract_category(topic: str) -> str:
+        """Определяет категорию из темы для ключа кэша.
+
+        Берём первое значимое слово (>3 символов) или 'default'.
+        """
+        if not topic:
+            return "default"
+        words = [w.lower() for w in topic.split() if len(w) > 3]
+        return words[0] if words else "default"
 
     def _pick_banner(self) -> Optional[Path]:
         """Случайный баннер из assets/banners/."""

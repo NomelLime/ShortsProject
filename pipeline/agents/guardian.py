@@ -31,6 +31,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from pipeline.agents.base_agent import BaseAgent, AgentStatus
+from pipeline.agents.gpu_manager import get_gpu_manager, GPUPriority
 from pipeline.agent_memory import AgentMemory, get_memory
 
 logger = logging.getLogger(__name__)
@@ -56,6 +57,7 @@ class Guardian(BaseAgent):
         notify: Any = None,
     ) -> None:
         super().__init__("GUARDIAN", memory or get_memory(), notify)
+        self._gpu                = get_gpu_manager()
         self._proxy_status: Dict[str, bool]  = {}   # "host:port" → healthy
         self._stale_sessions: List[Dict]      = []
         self._quarantined: Dict[str, List]    = {}  # acc_name → [platforms]
@@ -287,25 +289,111 @@ class Guardian(BaseAgent):
         """
         Возвращает рекомендованную паузу (сек) между загрузками аккаунта.
 
-        Антибан логика:
-          — базовая: 30–90 сек
-          — если у аккаунта были ошибки: увеличиваем паузу
-          — если аккаунт новый (0 загрузок): прогрев — дольше
+        Логика принятия решения (иерархия):
+          1. LLM-решение на основе рекомендаций ACCOUNTANT + STRATEGIST
+          2. Hardcoded антибан логика (fallback)
+
+        Диапазон: 30–600 сек. Значения вне диапазона → fallback.
+        """
+        llm_delay = self._get_llm_delay(acc_name)
+        if llm_delay is not None:
+            return llm_delay
+        return self._hardcoded_delay(acc_name)
+
+    def _get_llm_delay(self, acc_name: str) -> Optional[float]:
+        """Спрашивает Ollama какую паузу выставить для аккаунта.
+
+        Возвращает float если ответ в диапазоне 30–600, иначе None.
+        """
+        _DELAY_MIN = 30
+        _DELAY_MAX = 600
+
+        accountant_rec = self.memory.read_recommendation("accountant", "guardian")
+        strategist_rec = self.memory.read_recommendation("strategist", "guardian")
+
+        if not accountant_rec and not strategist_rec:
+            return None
+
+        # Текущий статус карантина аккаунта
+        quarantine_data = self.memory.get("quarantine_summary", {})
+        accounts_data   = quarantine_data.get("accounts", {})
+        in_quarantine   = acc_name in accounts_data
+
+        accountant_hint = accountant_rec.get("content", "нет данных") if accountant_rec else "нет данных"
+        strategist_hint = strategist_rec.get("content", "нет данных") if strategist_rec else "нет данных"
+
+        prompt = (
+            f"Ты антибан-менеджер. Определи паузу между загрузками для аккаунта.\n\n"
+            f"Аккаунт: {acc_name}\n"
+            f"В карантине: {'да' if in_quarantine else 'нет'}\n"
+            f"ACCOUNTANT (лимиты): {accountant_hint}\n"
+            f"STRATEGIST (стратегия): {strategist_hint}\n\n"
+            f"Верни ТОЛЬКО одно целое число — количество секунд паузы "
+            f"(от {_DELAY_MIN} до {_DELAY_MAX}). Без пояснений."
+        )
+
+        try:
+            with self._gpu.acquire("GUARDIAN_DELAY", GPUPriority.LLM):
+                raw = self._call_ollama_with_fallback(
+                    prompt=prompt,
+                    fallback_value=None,
+                    context_description=f"задержка загрузки для {acc_name}",
+                )
+        except Exception as exc:
+            logger.debug("[GUARDIAN] GPU недоступен для LLM-задержки: %s", exc)
+            return None
+
+        if raw is None:
+            return None
+
+        delay = self._parse_delay(raw, _DELAY_MIN, _DELAY_MAX)
+        if delay is not None:
+            logger.info(
+                "[GUARDIAN] LLM-задержка для %s: %.0f сек (диапазон %d–%d)",
+                acc_name, delay, _DELAY_MIN, _DELAY_MAX,
+            )
+        return delay
+
+    @staticmethod
+    def _parse_delay(raw: str, min_val: int, max_val: int) -> Optional[float]:
+        """Извлекает число из ответа Ollama и валидирует диапазон.
+
+        Защита: любое значение вне диапазона → None → fallback.
+        """
+        import re
+        numbers = re.findall(r"\b(\d+(?:\.\d+)?)\b", raw.strip())
+        if not numbers:
+            logger.debug("[GUARDIAN] Не удалось извлечь число из ответа Ollama: %r", raw[:80])
+            return None
+        try:
+            value = float(numbers[0])
+        except ValueError:
+            return None
+
+        if value < min_val or value > max_val:
+            logger.debug(
+                "[GUARDIAN] LLM вернул задержку %.0f вне диапазона [%d, %d] — fallback",
+                value, min_val, max_val,
+            )
+            return None
+
+        return value
+
+    def _hardcoded_delay(self, acc_name: str) -> float:
+        """Hardcoded антибан логика — fallback когда LLM недоступен.
+
+        Базовая: 30–90 сек.
+        При карантинной истории: 120–240 сек.
         """
         import random
-        base_delay = random.uniform(30, 90)
-
-        # Проверяем историю ошибок
         try:
             quarantine_data = self.memory.get("quarantine_summary", {})
             accounts_data   = quarantine_data.get("accounts", {})
             if acc_name in accounts_data:
-                # Есть карантинная история — увеличиваем паузу
-                base_delay = random.uniform(120, 240)
+                return random.uniform(120, 240)
         except Exception:
             pass
-
-        return base_delay
+        return random.uniform(30, 90)
 
     # ------------------------------------------------------------------
     # Утилиты

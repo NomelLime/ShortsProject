@@ -166,5 +166,95 @@ class BaseAgent(ABC):
         except Exception as e:
             self.logger.debug("[%s] Уведомление не отправлено: %s", self.name, e)
 
+    # ------------------------------------------------------------------
+    # LLM-коммуникация между агентами
+    # ------------------------------------------------------------------
+
+    def _build_llm_context(self, peer_agents: list) -> str:
+        """
+        Собирает рекомендации от peer_agents и возвращает строку для включения в промпт.
+
+        Иерархия: STRATEGIST первым (наивысший приоритет), остальные по порядку.
+        Если рекомендаций нет — возвращает пустую строку.
+
+        Пример вывода:
+            [КОНТЕКСТ ОТ АГЕНТОВ]
+            - STRATEGIST (цикл 3): Используй динамичные заголовки для Reels
+            - SCOUT (цикл 7): Ниша 'cooking shorts' +60% за последние 2 часа
+        """
+        if not self.memory:
+            return ""
+
+        all_recs = self.memory.read_all_recommendations_for(self.name)
+        if not all_recs:
+            return ""
+
+        # Фильтруем только запрошенных агентов
+        peer_lower = [p.lower() for p in peer_agents]
+        filtered = {
+            agent: rec
+            for agent, rec in all_recs.items()
+            if agent in peer_lower
+        }
+        if not filtered:
+            return ""
+
+        lines = ["[КОНТЕКСТ ОТ АГЕНТОВ]"]
+        for agent, rec in filtered.items():
+            cycle   = rec.get("cycle", "?")
+            content = rec.get("content", "").strip()
+            lines.append(f"- {agent.upper()} (цикл {cycle}): {content}")
+
+        return "\n".join(lines)
+
+    def _call_ollama_with_fallback(
+        self,
+        prompt: str,
+        fallback_value,
+        context_description: str,
+    ):
+        """
+        Вызывает Ollama с промптом. При недоступности или ошибке парсинга
+        возвращает fallback_value и логирует событие в AgentMemory.
+
+        Все LLM-вызовы агентов должны идти через этот метод (не напрямую).
+        GPU-lock (GPUManager) накладывается снаружи, где нужно.
+
+        Возвращает строку ответа или fallback_value.
+        """
+        from pipeline.ai import check_ollama, ollama_generate_with_timeout
+        from pipeline.config import OLLAMA_MODEL
+
+        def _fallback(reason: str):
+            msg = (
+                f"[{self.name}] решение принято без LLM совета: "
+                f"{context_description}, использован дефолт ({reason})"
+            )
+            self.logger.warning(msg)
+            if self.memory:
+                self.memory.log_event(
+                    self.name,
+                    "llm_fallback",
+                    {"reason": reason, "context": context_description},
+                )
+            return fallback_value
+
+        try:
+            if not check_ollama():
+                return _fallback("Ollama недоступен")
+        except Exception as exc:
+            return _fallback(f"check_ollama() ошибка: {exc}")
+
+        try:
+            response = ollama_generate_with_timeout(OLLAMA_MODEL, prompt)
+            text = response.get("response", "").strip()
+            if not text:
+                return _fallback("пустой ответ от Ollama")
+            return text
+        except TimeoutError:
+            return _fallback("Ollama timeout")
+        except Exception as exc:
+            return _fallback(f"Ollama ошибка: {exc}")
+
     def __repr__(self) -> str:
         return f"<Agent {self.name} [{self.status.value}]>"

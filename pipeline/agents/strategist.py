@@ -38,7 +38,10 @@ class Strategist(BaseAgent):
         interval_sec: int = _DEFAULT_INTERVAL,
     ) -> None:
         super().__init__("STRATEGIST", memory or get_memory(), notify)
-        self._interval = interval_sec
+        self._interval    = interval_sec
+        self._cycle_count = 0
+        from pipeline.agents.gpu_manager import get_gpu_manager
+        self._gpu = get_gpu_manager()
 
     def run(self) -> None:
         logger.info("[STRATEGIST] Запущен, интервал=%ds", self._interval)
@@ -55,8 +58,10 @@ class Strategist(BaseAgent):
 
     def _analysis_cycle(self) -> None:
         self._set_status(AgentStatus.RUNNING, "анализ аналитики")
+        self._cycle_count += 1
+        cycle = self._cycle_count
         try:
-            logger.info("[STRATEGIST] Запуск цикла анализа")
+            logger.info("[STRATEGIST] Запуск цикла анализа #%d", cycle)
 
             # 1. Собираем аналитику с платформ
             collected = self._collect_analytics()
@@ -71,6 +76,11 @@ class Strategist(BaseAgent):
             schedule_recs = self._analyse_schedule()
             if schedule_recs:
                 self._apply_schedule_recommendations(schedule_recs)
+
+            # 5. LLM-рекомендации для других агентов (новый блок)
+            self._generate_and_write_llm_recommendations(
+                collected, ab_results, schedule_recs, cycle
+            )
 
             # Сохраняем рекомендации в память
             recommendations = {
@@ -95,6 +105,148 @@ class Strategist(BaseAgent):
             logger.error("[STRATEGIST] Ошибка анализа: %s", e)
         finally:
             self._set_status(AgentStatus.IDLE)
+
+    # ------------------------------------------------------------------
+    # LLM-рекомендации для агентов
+    # ------------------------------------------------------------------
+
+    def _generate_and_write_llm_recommendations(
+        self,
+        collected: int,
+        ab_results: List[Dict],
+        schedule_recs: Dict,
+        cycle: int,
+    ) -> None:
+        """Формирует промпт на основе аналитики и данных SCOUT,
+        вызывает Ollama, записывает rec.strategist.* для 4 агентов."""
+
+        # Собираем данные для промпта
+        analytics_summary = self._build_analytics_summary(collected, ab_results, schedule_recs)
+        scout_data        = self._read_scout_data()
+
+        prompt = (
+            "Ты STRATEGIST — аналитик контентного пайплайна. "
+            "Проанализируй данные и дай краткие практичные рекомендации для каждого агента.\n\n"
+            f"АНАЛИТИКА (приоритет):\n{analytics_summary}\n\n"
+            f"ДАННЫЕ ОТ SCOUT:\n{scout_data}\n\n"
+            "Верни ТОЛЬКО валидный JSON без пояснений:\n"
+            "{\n"
+            '  "visionary": "рекомендация по стилю метаданных (заголовки, хэштеги, tone)",\n'
+            '  "scout": "рекомендация по направлению поиска (ниши, ключевые слова)",\n'
+            '  "editor": "рекомендация по стилю монтажа (фон, темп, формат)",\n'
+            '  "guardian": "рекомендация по агрессивности загрузки (осторожно/активно/пауза)"\n'
+            "}"
+        )
+
+        self._set_status(AgentStatus.WAITING, "ожидание GPU для LLM")
+        try:
+            from pipeline.agents.gpu_manager import GPUPriority
+            with self._gpu.acquire("STRATEGIST", GPUPriority.LLM):
+                self._set_status(AgentStatus.RUNNING, "LLM-рекомендации")
+                raw = self._call_ollama_with_fallback(
+                    prompt=prompt,
+                    fallback_value=None,
+                    context_description="генерация рекомендаций для агентов",
+                )
+        except Exception as exc:
+            logger.warning("[STRATEGIST] GPU/Ollama ошибка: %s", exc)
+            return
+
+        if raw is None:
+            # fallback уже залогирован внутри _call_ollama_with_fallback
+            return
+
+        # Парсим JSON — максимально защищённо
+        recs = self._parse_llm_json(raw)
+        if not recs:
+            return
+
+        # Записываем рекомендации в AgentMemory
+        written = []
+        for target_agent in ("visionary", "scout", "editor", "guardian"):
+            content = recs.get(target_agent, "").strip()
+            if not content:
+                continue
+            self.memory.write_recommendation(
+                from_agent="strategist",
+                to_agent=target_agent,
+                content=content,
+                cycle=cycle,
+            )
+            written.append(target_agent)
+
+        if written:
+            logger.info(
+                "[STRATEGIST] Рекомендации записаны для: %s (цикл %d)",
+                ", ".join(written), cycle,
+            )
+            self.memory.log_event(
+                "STRATEGIST", "llm_recommendations_written",
+                {"targets": written, "cycle": cycle},
+            )
+
+    def _build_analytics_summary(
+        self,
+        collected: int,
+        ab_results: List[Dict],
+        schedule_recs: Dict,
+    ) -> str:
+        """Собирает текстовое резюме аналитики для промпта."""
+        lines = [f"Собрано записей аналитики: {collected}"]
+
+        if ab_results:
+            lines.append(f"A/B результатов: {len(ab_results)}")
+            for r in ab_results[:3]:
+                winner  = r.get("winner_variant", "?")
+                ctr     = r.get("ctr_diff_pct", 0)
+                vid     = r.get("video_stem", "?")
+                lines.append(f"  - {vid}: победитель={winner}, CTR diff={ctr:.1f}%")
+        else:
+            lines.append("A/B результатов: нет данных")
+
+        if schedule_recs:
+            for platform, hours in schedule_recs.items():
+                hours_str = ", ".join(f"{h:02d}:00" for h in hours)
+                lines.append(f"Лучшее время для {platform}: {hours_str}")
+        else:
+            lines.append("Расписание: нет данных")
+
+        return "\n".join(lines)
+
+    def _read_scout_data(self) -> str:
+        """Читает рекомендацию SCOUT → STRATEGIST из AgentMemory."""
+        rec = self.memory.read_recommendation("scout", "strategist")
+        if not rec:
+            return "Нет данных от SCOUT"
+        content = rec.get("content", "").strip()
+        cycle   = rec.get("cycle", "?")
+        return f"(цикл {cycle}) {content}" if content else "Нет данных от SCOUT"
+
+    @staticmethod
+    def _parse_llm_json(raw: str) -> Optional[Dict[str, str]]:
+        """Извлекает JSON из ответа Ollama. Устойчив к markdown-обёрткам."""
+        import json, re
+        # Убираем markdown-блоки ```json ... ```
+        clean = re.sub(r"```(?:json)?", "", raw).strip().rstrip("`").strip()
+        # Ищем первый {...} блок
+        match = re.search(r"\{[^{}]*\}", clean, re.DOTALL)
+        if not match:
+            logger.warning("[STRATEGIST] JSON не найден в ответе Ollama: %s", raw[:200])
+            return None
+        try:
+            parsed = json.loads(match.group())
+        except json.JSONDecodeError as exc:
+            logger.warning("[STRATEGIST] Ошибка парсинга JSON: %s | raw=%s", exc, raw[:200])
+            return None
+        # Валидация: нужны хотя бы 2 из 4 ключей
+        expected = {"visionary", "scout", "editor", "guardian"}
+        found = expected & set(parsed.keys())
+        if len(found) < 2:
+            logger.warning(
+                "[STRATEGIST] JSON не содержит нужных ключей: %s", list(parsed.keys())
+            )
+            return None
+        return parsed
 
     # ------------------------------------------------------------------
     # Сбор аналитики

@@ -33,6 +33,9 @@ class Scout(BaseAgent):
         self._interval    = interval_sec
         self._gpu         = get_gpu_manager()
         self._total_found = 0
+        self._cycle_count = 0
+        # История циклов: [(cycle, keywords_used, urls_found)] для детекции трендов
+        self._cycle_history: list = []
 
     def run(self) -> None:
         logger.info("[SCOUT] Запущен, интервал=%ds", self._interval)
@@ -46,6 +49,8 @@ class Scout(BaseAgent):
 
     def _crawl_cycle(self) -> None:
         self._set_status(AgentStatus.RUNNING, "поиск URL")
+        self._cycle_count += 1
+        cycle = self._cycle_count
         try:
             from pipeline import config
             from pipeline.utils import load_keywords, merge_and_save_urls
@@ -75,6 +80,7 @@ class Scout(BaseAgent):
             saved = merge_and_save_urls(new_urls, config.URLS_FILE)
             self._total_found += saved
             logger.info("[SCOUT] Сохранено %d новых URL (сессия: %d)", saved, self._total_found)
+
             self.memory.log_event("SCOUT", "crawl_done", {
                 "found": len(new_urls), "saved_new": saved,
                 "total_session": self._total_found,
@@ -82,6 +88,9 @@ class Scout(BaseAgent):
             self.report({"last_saved": saved, "total_found": self._total_found})
             if saved > 0:
                 self._send(f"🔍 [SCOUT] Найдено {saved} новых URL (сессия: {self._total_found})")
+
+            # Записываем тренд для STRATEGIST если есть значимый результат
+            self._write_trend_recommendation(expanded, len(new_urls), saved, cycle)
 
         except Exception as e:
             logger.error("[SCOUT] Ошибка: %s", e)
@@ -125,3 +134,79 @@ class Scout(BaseAgent):
         except Exception as e:
             logger.warning("[SCOUT] Браузерный поиск не удался: %s", e)
             return []
+
+    # ------------------------------------------------------------------
+    # Детекция трендов и запись рекомендации для STRATEGIST
+    # ------------------------------------------------------------------
+
+    def _write_trend_recommendation(
+        self,
+        keywords: List[str],
+        urls_found: int,
+        urls_saved: int,
+        cycle: int,
+    ) -> None:
+        """Анализирует результаты цикла, при значимом тренде пишет
+        ``rec.scout.strategist`` в AgentMemory.
+
+        Записывает рекомендацию если:
+        - найдено ≥ 5 новых URL (минимальный сигнал), ИЛИ
+        - текущий цикл значительно превышает среднее предыдущих (рост ≥ 50%).
+        """
+        # Обновляем историю (храним последние 10 циклов)
+        self._cycle_history.append(urls_found)
+        if len(self._cycle_history) > 10:
+            self._cycle_history.pop(0)
+
+        # Проверяем порог и рост
+        is_significant = urls_found >= 5
+        growth_pct     = 0.0
+
+        if len(self._cycle_history) >= 2:
+            prev_avg = sum(self._cycle_history[:-1]) / len(self._cycle_history[:-1])
+            if prev_avg > 0:
+                growth_pct = (urls_found - prev_avg) / prev_avg * 100
+                if growth_pct >= 50:
+                    is_significant = True
+
+        if not is_significant:
+            logger.debug(
+                "[SCOUT] Тренд не значимый (found=%d, growth=%.1f%%) — пропускаю запись",
+                urls_found, growth_pct,
+            )
+            return
+
+        # Определяем топ-нишу (самое часто встречаемое ключевое слово)
+        top_niche = self._detect_top_niche(keywords)
+
+        # Формируем содержательное описание
+        growth_str = f" (+{growth_pct:.0f}% к среднему)" if growth_pct >= 50 else ""
+        content = (
+            f"Цикл {cycle}: найдено {urls_found} URL{growth_str}. "
+            f"Сохранено новых: {urls_saved}. "
+            f"Топ-ниша: '{top_niche}'. "
+            f"Всего ключевых слов в поиске: {len(keywords)}."
+        )
+
+        self.memory.write_recommendation(
+            from_agent="scout",
+            to_agent="strategist",
+            content=content,
+            cycle=cycle,
+        )
+        logger.info("[SCOUT] Тренд записан для STRATEGIST: %s", content)
+
+    @staticmethod
+    def _detect_top_niche(keywords: List[str]) -> str:
+        """Определяет топ-нишу как самое короткое (общее) ключевое слово.
+
+        Логика: короткие слова — это базовые категории (cooking, travel),
+        длинные — конкретные запросы. Берём первое из отсортированных по длине.
+        """
+        if not keywords:
+            return "unknown"
+        cleaned = [kw.strip().lower() for kw in keywords if kw.strip()]
+        if not cleaned:
+            return "unknown"
+        # Сортируем по длине — короткие = более общие категории
+        return sorted(cleaned, key=len)[0]
