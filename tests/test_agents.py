@@ -201,7 +201,7 @@ class TestAgentMemory:
         """set_agent_status → get_all_agent_statuses содержит статус."""
         mem = make_memory(tmp_path)
         mem.register_agent("SCOUT")
-        mem.set_agent_status("SCOUT", "RUNNING", "crawling")
+        mem.set_agent_status("SCOUT", "RUNNING: crawling")
 
         statuses = mem.get_all_agent_statuses()
         assert "SCOUT" in statuses

@@ -125,9 +125,8 @@ class Publisher(BaseAgent):
             acc_dir   = Path(acc["dir"])
             platforms = acc.get("platforms", [])
 
-            uploads_today = get_uploads_today(acc_dir)
-
             for platform in platforms:
+                uploads_today = get_uploads_today(acc_dir, platform=platform)
                 # Проверка Guardian (карантин)
                 if self._guardian:
                     safe, reason = self._guardian.is_account_safe(acc_name, platform)
@@ -271,7 +270,7 @@ class Publisher(BaseAgent):
 
             # Загружаем видео из очереди
             for item in queue:
-                uploads_today = get_uploads_today(acc_dir)
+                uploads_today = get_uploads_today(acc_dir, platform=platform)
                 if uploads_today >= daily_limit:
                     logger.info("[PUBLISHER] %s/%s лимит (%d/%d)",
                                 acc_name, platform, uploads_today, daily_limit)
@@ -296,7 +295,7 @@ class Publisher(BaseAgent):
 
                 if video_url is not None:
                     mark_uploaded(item)
-                    increment_upload_count(acc_dir)
+                    increment_upload_count(acc_dir, platform=platform)
                     register_upload(
                         video_stem=Path(video_path).stem,
                         platform=platform,

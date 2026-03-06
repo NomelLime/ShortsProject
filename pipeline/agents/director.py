@@ -177,26 +177,28 @@ class Director(BaseAgent):
             self._restart_count_reset_ts = time.monotonic()
 
         # 1. Обрабатываем запросы на рестарт от SENTINEL
-        self._process_sentinel_requests()
+        just_restarted = self._process_sentinel_requests()
 
         # 2. Собственный watchdog: агенты в ERROR без участия SENTINEL
         for name, agent in self._agents.items():
-            if agent.status == AgentStatus.ERROR:
+            if agent.status == AgentStatus.ERROR and name not in just_restarted:
                 logger.warning(
                     "[DIRECTOR] Агент %s в статусе ERROR — пробую перезапустить", name
                 )
                 self.restart_agent(name)
 
-    def _process_sentinel_requests(self) -> None:
+    def _process_sentinel_requests(self) -> set:
         """
         Читает список AgentMemory["sentinel_restart_requests"] и перезапускает
         каждого агента из списка. После обработки очищает список.
 
         SENTINEL пишет в этот ключ имена агентов, которые были в ERROR > 2 мин.
+        Возвращает set имён агентов, которые были обработаны (для предотвращения
+        двойного рестарта в основном watchdog цикле).
         """
         requests: list = self.memory.get("sentinel_restart_requests", [])
         if not requests:
-            return
+            return set()
 
         processed = []
         for agent_name in requests:
@@ -226,3 +228,5 @@ class Director(BaseAgent):
             # Удаляем обработанные запросы
             remaining = [r for r in requests if r not in processed]
             self.memory.set("sentinel_restart_requests", remaining)
+
+        return set(processed)

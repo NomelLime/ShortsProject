@@ -16,6 +16,7 @@ import json
 import logging
 import threading
 import time
+from collections import deque
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
@@ -96,7 +97,7 @@ class Commander(BaseAgent):
         super().__init__("COMMANDER", memory or get_memory(), notify)
         self.director      = director
         self.auto_confirm  = auto_confirm
-        self._command_queue: List[str]    = []
+        self._command_queue: deque = deque()
         self._history: List[CommandResult] = []
         self._pending_confirm: Optional[Dict] = None
         self._queue_lock   = threading.Lock()
@@ -189,7 +190,7 @@ class Commander(BaseAgent):
         while not self.should_stop:
             with self._queue_lock:
                 if self._command_queue:
-                    cmd = self._command_queue.pop(0)
+                    cmd = self._command_queue.popleft()
                 else:
                     cmd = None
             if cmd:
@@ -263,10 +264,22 @@ class Commander(BaseAgent):
         raw = raw.strip().lstrip("```json").lstrip("```").rstrip("```").strip()
 
         try:
-            return json.loads(raw)
+            parsed = json.loads(raw)
         except json.JSONDecodeError:
             logger.warning("[COMMANDER] Ollama вернул не-JSON: %s", raw[:200])
             return self._fallback_parse(command)
+
+        # Валидация — не доверяем LLM-ответу напрямую
+        VALID_INTENTS = {"start", "stop", "config", "query", "add_accounts",
+                         "set_limits", "set_content", "restart", "status", "custom"}
+        VALID_TARGETS = {"SCOUT", "CURATOR", "VISIONARY", "NARRATOR", "EDITOR",
+                         "STRATEGIST", "GUARDIAN", "PUBLISHER", "ACCOUNTANT",
+                         "SENTINEL", "DIRECTOR"}
+        if parsed.get("intent") not in VALID_INTENTS:
+            parsed["intent"] = "custom"
+        parsed["targets"] = [t for t in parsed.get("targets", []) if t in VALID_TARGETS]
+        parsed["requires_confirmation"] = bool(parsed.get("requires_confirmation", False))
+        return parsed
 
     def _fallback_parse(self, command: str) -> Dict:
         """Простой парсер без LLM для базовых команд."""
@@ -397,8 +410,9 @@ class Commander(BaseAgent):
         status = self.director.full_status()
         lines = ["📊 *Статус ShortsProject*\n"]
         for name, info in status.get("agents", {}).items():
+            raw_status = info.get("status", "")
             emoji = {"running": "🟢", "idle": "⚪", "error": "🔴",
-                     "stopped": "⛔", "waiting": "🟡"}.get(info.get("status", ""), "❓")
+                     "stopped": "⛔", "waiting": "🟡"}.get(raw_status.lower().split(":")[0], "❓")
             uptime = info.get("uptime")
             uptime_str = f" (работает {int(uptime)}с)" if uptime else ""
             lines.append(f"{emoji} {name}{uptime_str}")

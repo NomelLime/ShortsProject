@@ -90,10 +90,11 @@ class AgentMemory:
                 self._agents[agent_name] = "IDLE"
                 self._save()
 
-    def set_agent_status(self, agent_name: str, status: str, detail: str = "") -> None:
+    def set_agent_status(self, agent_name: str, status: str) -> None:
+        """Обновляет статус агента в памяти (не сохраняет на диск — статусы транзиентны).
+        KV-операции через set() по-прежнему персистятся при необходимости."""
         with self._lock:
-            self._agents[agent_name] = status if not detail else f"{status}: {detail}"
-            self._save()
+            self._agents[agent_name] = status
 
     def set_agent_report(self, agent_name: str, data: Dict[str, Any]) -> None:
         """Сохраняет произвольный отчёт агента."""
@@ -173,8 +174,14 @@ class AgentMemory:
                 os.close(fd)
                 os.replace(tmp, str(self._persist_path))
             except Exception:
-                os.close(fd)
-                os.unlink(tmp)
+                try:
+                    os.close(fd)
+                except Exception:
+                    pass
+                try:
+                    os.unlink(tmp)
+                except Exception:
+                    pass
                 raise
         except Exception as exc:
             logger.warning("AgentMemory: не удалось сохранить на диск: %s", exc)
