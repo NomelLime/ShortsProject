@@ -187,7 +187,8 @@ class Narrator(BaseAgent):
         except Exception as e:
             logger.error("[NARRATOR] Ошибка TTS: %s", e)
             self._set_status(AgentStatus.ERROR, str(e))
-            self._set_status(AgentStatus.IDLE)  # восстанавливаемся
+            # Не сбрасываем в IDLE — SENTINEL должен видеть ERROR
+            # EDITOR обрабатывает None как graceful degradation (TTS пропускается)
             return None
 
     def is_ready(self) -> bool:

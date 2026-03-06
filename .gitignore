@@ -1,2 +1,46 @@
+# Секреты и окружение
 .env
-pipeline/**/__pycache__
+*.env.*
+
+# Данные аккаунтов (прокси, cookies, сессии — НИКОГДА в репо)
+accounts/
+*.cookies
+cookies_*.txt
+browser_profile/
+
+# Рабочие данные (analytics, quarantine, memory — меняются в runtime)
+data/
+
+# Временные файлы обработки
+temp/
+*.log
+logs/
+
+# TTS модели (530MB — не коммитить)
+assets/tts/*.onnx
+assets/tts/*.bin
+
+# Python cache (все уровни)
+__pycache__/
+pipeline/**/__pycache__/
+scripts/**/__pycache__/
+tests/**/__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+
+# Virtual environments
+venv/
+.venv/
+env/
+
+# Pytest
+.pytest_cache/
+*.pytest_ini
+
+# Выходные файлы
+output/
+outputs/
+downloads/
+processed/

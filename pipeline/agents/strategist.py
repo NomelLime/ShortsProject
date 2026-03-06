@@ -236,7 +236,7 @@ class Strategist(BaseAgent):
         Возвращает рекомендованные часы для каждой платформы.
         """
         try:
-            from pipeline.analytics import _load_analytics
+            from pipeline.analytics import load_analytics as _load_analytics
             data = _load_analytics()
             uploads = data.get("uploads", {})
 

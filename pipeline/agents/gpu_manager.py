@@ -86,6 +86,10 @@ class GPUResourceManager:
         """Запускает фоновый диспетчер очереди."""
         if not self._running:
             self._running = True
+            # Пересоздаём поток — threading.Thread нельзя запустить повторно после stop()
+            self._dispatcher_thread = threading.Thread(
+                target=self._dispatcher, daemon=True, name="gpu-dispatcher"
+            )
             self._dispatcher_thread.start()
             logger.info("[GPUManager] Запущен (max_concurrent=%d)", self._max)
 
@@ -106,7 +110,9 @@ class GPUResourceManager:
         logger.debug("[GPUManager] [%s] Ожидаем GPU (приоритет %d)...", consumer, priority)
 
         # Ждём пока диспетчер разрешит нашей задаче выполниться
-        task.event.wait()
+        task.event.wait(timeout=360)
+        if not task.event.is_set():
+            raise TimeoutError(f"[GPUManager] GPU не получен за 360с для '{consumer}'")
 
         start_time = time.monotonic()
         with self._lock:
