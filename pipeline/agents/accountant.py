@@ -157,7 +157,7 @@ class Accountant(BaseAgent):
                         or custom.get("all")
                         or config.DAILY_UPLOAD_LIMIT
                     )
-                    return get_uploads_today(Path(acc["dir"])) >= limit
+                    return get_uploads_today(Path(acc["dir"]), platform=platform) >= limit
         except Exception as e:
             logger.warning("[ACCOUNTANT] is_limit_reached fallback: %s", e)
         return False
