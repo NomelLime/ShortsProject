@@ -200,6 +200,72 @@ class AgentMemory:
         except Exception as exc:
             logger.warning("AgentMemory: не удалось загрузить с диска: %s", exc)
 
+    # ── Рекомендации между агентами ─────────────────────────────────────────
+
+    def write_recommendation(
+        self,
+        from_agent: str,
+        to_agent: str,
+        content: str,
+        cycle: int,
+    ) -> None:
+        """Записывает рекомендацию от одного агента другому.
+
+        Ключ: ``rec.<from_agent>.<to_agent>``
+        Значение: ``{"content": ..., "created_at": ..., "cycle": ...}``
+        """
+        key = f"rec.{from_agent.lower()}.{to_agent.lower()}"
+        value = {
+            "content":    content,
+            "created_at": datetime.now().timestamp(),
+            "cycle":      cycle,
+        }
+        with self._lock:
+            self._kv[key] = value
+            self._save()
+        logger.debug("AgentMemory: рекомендация %s → %s записана (цикл %d)", from_agent, to_agent, cycle)
+
+    def read_recommendation(self, from_agent: str, to_agent: str) -> Optional[Dict]:
+        """Читает рекомендацию от конкретного агента.
+
+        Возвращает dict с ключами ``content``, ``created_at``, ``cycle``
+        или ``None`` если записи нет.
+        """
+        key = f"rec.{from_agent.lower()}.{to_agent.lower()}"
+        with self._lock:
+            return self._kv.get(key)
+
+    def read_all_recommendations_for(self, to_agent: str) -> Dict[str, Dict]:
+        """Возвращает все рекомендации адресованные агенту ``to_agent``.
+
+        Возвращает словарь вида ``{from_agent: recommendation_dict}``.
+        Ключи отсортированы: «strategist» всегда первым (наивысший приоритет).
+        """
+        prefix = f"rec."
+        suffix = f".{to_agent.lower()}"
+        result: Dict[str, Dict] = {}
+        with self._lock:
+            for key, value in self._kv.items():
+                if key.startswith(prefix) and key.endswith(suffix):
+                    # key = "rec.<from>.<to>" → извлекаем <from>
+                    middle = key[len(prefix):-len(suffix)]
+                    result[middle] = value
+
+        # Сортировка: strategist первым, остальные по алфавиту
+        def _sort_key(agent_name: str) -> tuple:
+            return (0 if agent_name == "strategist" else 1, agent_name)
+
+        return dict(sorted(result.items(), key=lambda item: _sort_key(item[0])))
+
+    def clear_recommendation(self, from_agent: str, to_agent: str) -> None:
+        """Удаляет конкретную рекомендацию из памяти."""
+        key = f"rec.{from_agent.lower()}.{to_agent.lower()}"
+        with self._lock:
+            if key in self._kv:
+                del self._kv[key]
+                self._save()
+                logger.debug("AgentMemory: рекомендация %s → %s удалена", from_agent, to_agent)
+
     def reset(self) -> None:
         """Полный сброс памяти (для тестов или ручного рестарта)."""
         with self._lock:
