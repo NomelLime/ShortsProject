@@ -21,6 +21,26 @@ from pipeline.agent_memory import AgentMemory, get_memory
 logger = logging.getLogger(__name__)
 
 
+def _sanitize_llm_input(text: str, max_len: int = 300) -> str:
+    """Санитизирует строку из внешних источников перед включением в LLM-промпт.
+
+    Защита от prompt injection: заголовки YouTube/TikTok → SCOUT → STRATEGIST
+    → VISIONARY → generate_video_metadata. Убирает управляющие конструкции.
+    """
+    import re
+    if not text or not isinstance(text, str):
+        return ""
+    text = re.sub(r"[\r\n\t]+", " ", text)
+    text = re.sub(r"[`*#<>{}|\[\]\\]", "", text)
+    text = re.sub(
+        r"\b(ignore|forget|disregard|override|bypass|jailbreak|pretend|roleplay)\b\s+\S+",
+        "[filtered]",
+        text,
+        flags=re.IGNORECASE,
+    )
+    return text.strip()[:max_len]
+
+
 class Visionary(BaseAgent):
     """
     Генерирует AI-метаданные для видео.
@@ -136,14 +156,20 @@ class Visionary(BaseAgent):
     # ------------------------------------------------------------------
 
     @staticmethod
+    @staticmethod
     def _detect_conflict(
         strategist_rec: Optional[Dict],
         scout_rec: Optional[Dict],
     ) -> bool:
-        """Возвращает True если обе рекомендации существуют и расходятся.
+        """Возвращает True если обе рекомендации существуют и сильно расходятся.
 
         Алгоритм: токенизируем оба текста, считаем overlap значимых слов.
-        Если пересечение < 30% от объединения — считаем конфликтом.
+        Порог: overlap < 10% считается конфликтом.
+
+        Ранее порог был 30% — STRATEGIST и SCOUT пишут о разных вещах
+        (тренды vs стратегия), поэтому overlap почти всегда < 30%,
+        что включало A/B режим практически каждый раз (удвоение GPU).
+        Теперь A/B режим включается только при действительно нулевом пересечении.
         """
         if not strategist_rec or not scout_rec:
             return False
@@ -151,7 +177,6 @@ class Visionary(BaseAgent):
         def _tokens(text: str) -> set:
             import re
             words = re.findall(r"\b[a-zа-яё]{3,}\b", text.lower())
-            # Стоп-слова (слишком общие для сравнения)
             stop = {
                 "для", "это", "при", "или", "что", "как", "все", "есть",
                 "use", "the", "for", "and", "with", "this", "that", "more",
@@ -168,7 +193,8 @@ class Visionary(BaseAgent):
         union        = tokens_s | tokens_c
         overlap      = len(intersection) / len(union)
 
-        is_conflict = overlap < 0.30
+        # Порог снижен с 30% до 10%: агенты разного контекста, overlap естественно низкий
+        is_conflict = overlap < 0.10
         logger.debug(
             "[VISIONARY] Overlap STRATEGIST vs SCOUT: %.0f%% → конфликт=%s",
             overlap * 100, is_conflict,
@@ -188,9 +214,29 @@ class Visionary(BaseAgent):
 
         Это позволяет инжектировать контекст в промпт generate_video_metadata
         без модификации pipeline/ai.py.
+
+        Фильтрует служебные слова типа "Используй", "заголовки", "рекомендую" —
+        они не являются тематическими хинтами.
         """
         import re
         hints: List[str] = []
+
+        # Расширенный стоп-лист: общие/служебные слова из рекомендаций агентов
+        STOP_WORDS = {
+            # Русские служебные
+            "используй", "используйте", "заголовки", "заголовок", "рекомендую",
+            "рекомендуем", "нужно", "следует", "добавь", "добавьте", "включи",
+            "включай", "публикуй", "публикуйте", "загружай", "контент", "видео",
+            "формат", "стиль", "тренд", "тренды", "хэштег", "хэштеги", "тема",
+            "темы", "аудитория", "охват", "время", "часть", "часов", "каждый",
+            # Английские служебные
+            "include", "suggest", "recommend", "should", "would", "could",
+            "content", "video", "style", "format", "trending", "hashtag",
+            "hashtags", "topic", "audience", "reach", "upload", "post",
+            # Стандартные стоп-слова (дублируем из _detect_conflict)
+            "для", "это", "при", "или", "что", "как", "все", "есть",
+            "use", "the", "for", "and", "with", "this", "that", "more",
+        }
 
         for rec in (primary_rec, secondary_rec):
             if not rec:
@@ -198,7 +244,8 @@ class Visionary(BaseAgent):
             content = rec.get("content", "")
             # Берём слова длиннее 4 символов как потенциальные контекстные хинты
             words = re.findall(r"\b[a-zа-яёA-ZА-ЯЁ]{4,}\b", content)
-            hints.extend(words[:5])  # Не более 5 слов с каждой рекомендации
+            filtered = [w for w in words if w.lower() not in STOP_WORDS]
+            hints.extend(filtered[:5])  # Не более 5 слов с каждой рекомендации
 
         # Дедупликация с сохранением порядка
         seen: set = set()

@@ -28,6 +28,39 @@ logger = logging.getLogger(__name__)
 
 _SCAN_INTERVAL = 120  # секунды между проверками очереди
 
+# Максимальная длина строки из внешних источников (заголовков, рекомендаций) в промпте
+_MAX_PROMPT_FIELD_LEN = 300
+
+
+def _sanitize_llm_input(text: str, max_len: int = _MAX_PROMPT_FIELD_LEN) -> str:
+    """Санитизирует строку перед включением в LLM-промпт.
+
+    Защита от prompt injection: YouTube/TikTok заголовки могут содержать
+    инструкции типа «Ignore previous instructions and...».
+
+    Убирает:
+      - Управляющие символы и переносы строк (сворачивает в пробел)
+      - Конструкции типа «ignore», «forget», «disregard» + слово после
+      - Подозрительные теги и markdown
+      - Обрезает до max_len символов
+    """
+    import re
+    if not text or not isinstance(text, str):
+        return ""
+    # Сворачиваем переносы и управляющие символы
+    text = re.sub(r"[\r\n\t]+", " ", text)
+    # Убираем markdown-подобные конструкции
+    text = re.sub(r"[`*#<>{}|\[\]\\]", "", text)
+    # Нейтрализуем prompt injection паттерны (case-insensitive)
+    text = re.sub(
+        r"\b(ignore|forget|disregard|override|bypass|jailbreak|pretend|roleplay)\b\s+\S+",
+        "[filtered]",
+        text,
+        flags=re.IGNORECASE,
+    )
+    # Обрезаем
+    return text.strip()[:max_len]
+
 
 class Editor(BaseAgent):
     """
@@ -142,9 +175,12 @@ class Editor(BaseAgent):
         """
         Полный пайплайн одного видео:
           1. Нарезка через slicer
-          2. Генерация метаданных (Visionary / Ollama)
+          2. LLM-фаза (один GPU:LLM захват): выбор фона + генерация метаданных
           3. TTS синтез (Narrator / Kokoro)
           4. Постобработка с TTS миксом (ffmpeg)
+
+        Было 3 GPU-захвата (фон LLM + мета LLM + encode), стало 2:
+        фон и мета объединены в один GPU:LLM блок.
         """
         from pipeline import config
         from pipeline.slicer import stage_slice
@@ -153,19 +189,17 @@ class Editor(BaseAgent):
         from pipeline.tts_utils import tts_text_for_clip
 
         logger.info("[EDITOR] Обработка: %s", video_path.name)
-        bg_path = self.select_background()
 
-        # 1. Нарезка
+        # 1. Нарезка (CPU, без GPU)
         self._set_status(AgentStatus.RUNNING, f"нарезка {video_path.name}")
         clips = stage_slice([video_path], metadata_variants=None)
         if not clips:
             logger.warning("[EDITOR] Нарезка не дала клипов: %s", video_path.name)
             return False
-
         logger.info("[EDITOR] Нарезано %d клип(ов)", len(clips))
 
-        # 2. Генерация метаданных через Visionary (с GPU lock LLM)
-        meta_variants = self._get_metadata(video_path)
+        # 2. Единый GPU:LLM блок — фон + метаданные (было два отдельных захвата)
+        bg_path, meta_variants = self._get_bg_and_metadata(video_path)
 
         # 3. TTS синтез — один файл на видео (озвучиваем hook_text)
         tts_paths = self._generate_tts_batch(
@@ -204,6 +238,42 @@ class Editor(BaseAgent):
         logger.warning("[EDITOR] Постобработка не дала результатов для %s", video_path.name)
         return False
 
+    def _get_bg_and_metadata(
+        self,
+        video_path: Path,
+    ) -> Tuple[Optional[Path], List[Dict]]:
+        """Выбирает фон и генерирует метаданные в рамках одного GPU:LLM захвата.
+
+        Ранее это были два отдельных GPU acquire (EDITOR_BG + EDITOR_META/VISIONARY),
+        что создавало 3 последовательных захвата на видео. Теперь — 2.
+        """
+        from pipeline import config
+
+        # Сначала пробуем фон из кеша без GPU (быстро)
+        bg_path = self._select_background_no_llm(video_path)
+
+        # Если кеш пуст или нужна LLM — захватываем GPU один раз для обеих задач
+        needs_llm_bg   = bg_path is None
+        needs_llm_meta = True  # мета всегда нужны
+
+        if needs_llm_bg or needs_llm_meta:
+            self._set_status(AgentStatus.WAITING, "ожидание GPU (LLM: фон+мета)")
+            try:
+                with self._gpu.acquire("EDITOR_LLM", GPUPriority.LLM):
+                    self._set_status(AgentStatus.RUNNING, f"LLM: фон+мета {video_path.name}")
+                    if needs_llm_bg:
+                        bg_path = self._choose_bg_with_llm_no_acquire(video_path)
+                    meta_variants = self._get_metadata_no_acquire(video_path)
+            except Exception as exc:
+                logger.warning("[EDITOR] GPU:LLM недоступен: %s — используем fallback", exc)
+                if needs_llm_bg:
+                    bg_path = self.select_background()
+                meta_variants = [{}]
+        else:
+            meta_variants = self._get_metadata_no_acquire(video_path)
+
+        return bg_path, meta_variants
+
     # ------------------------------------------------------------------
     # Генерация метаданных
     # ------------------------------------------------------------------
@@ -241,6 +311,169 @@ class Editor(BaseAgent):
     # ------------------------------------------------------------------
     # TTS синтез
     # ------------------------------------------------------------------
+
+    def _get_metadata_no_acquire(self, video_path: Path) -> List[Dict]:
+        """Генерирует метаданные БЕЗ захвата GPU (вызывать внутри existing GPU lock).
+
+        Использовать только внутри `with self._gpu.acquire(...)` блока.
+        """
+        from pipeline import config
+        if self._visionary is not None:
+            try:
+                variants = self._visionary.generate_metadata_no_acquire(
+                    video_path,
+                    num_variants=getattr(config, "AI_NUM_VARIANTS", 2),
+                )
+                if variants:
+                    logger.info("[EDITOR] Метаданные от VISIONARY (no-acquire): %d вариант(ов)", len(variants))
+                    return variants
+            except (AttributeError, Exception) as e:
+                logger.debug("[EDITOR] VISIONARY.generate_metadata_no_acquire: %s — direct fallback", e)
+
+        try:
+            from pipeline.ai import generate_video_metadata
+            variants = generate_video_metadata(
+                video_path,
+                num_variants=getattr(config, "AI_NUM_VARIANTS", 2),
+            )
+            logger.info("[EDITOR] Метаданные (direct, no-acquire): %d вариант(ов)", len(variants))
+            return variants
+        except Exception as e:
+            logger.warning("[EDITOR] generate_metadata не удался: %s — пустые мета", e)
+            return [{}]
+
+    def _select_background_no_llm(self, video_path: Path) -> Optional[Path]:
+        """Возвращает фон из кеша или по теме/ротации — БЕЗ вызова LLM.
+
+        Возвращает None если решение требует LLM-вызова.
+        """
+        try:
+            from pipeline import config
+            from pipeline.utils import get_unique_bg
+
+            bg_dir: Optional[Path] = None
+            for candidate in [
+                getattr(config, "BG_VIDEO_DIR", None),
+                Path(config.BASE_DIR) / "assets" / "backgrounds",
+                Path(config.BASE_DIR) / "assets" / "bg_videos",
+            ]:
+                if candidate and Path(candidate).exists():
+                    bg_dir = Path(candidate)
+                    break
+
+            if not bg_dir:
+                return None
+
+            bg_files = list(bg_dir.glob("*.mp4")) + list(bg_dir.glob("*.mov"))
+            if not bg_files:
+                return None
+
+            topic = video_path.stem
+            category = self._extract_category(topic)
+
+            # 1. Кеш
+            if category in self._bg_cache:
+                cached_name = self._bg_cache[category]
+                cached_path = bg_dir / cached_name
+                if cached_path.exists():
+                    logger.debug("[EDITOR] Фон из кеша (no-LLM): %s", cached_name)
+                    return cached_path
+
+            # 2. По теме — без LLM
+            if topic:
+                topic_words = [w for w in topic.lower().split() if len(w) > 2]
+                matches = [f for f in bg_files if any(w in f.stem.lower() for w in topic_words)]
+                if matches:
+                    chosen = random.choice(matches)
+                    self._bg_cache[category] = chosen.name
+                    logger.info("[EDITOR] Фон по теме (no-LLM): %s", chosen.name)
+                    return chosen
+
+            # Нет совпадений и кеша — нужен LLM
+            return None
+
+        except Exception:
+            return None
+
+    def _choose_bg_with_llm_no_acquire(self, video_path: Path) -> Optional[Path]:
+        """LLM-выбор фона БЕЗ захвата GPU (вызывать внутри existing GPU lock).
+
+        Использовать только внутри `with self._gpu.acquire(...)` блока.
+        """
+        try:
+            from pipeline import config
+            from pipeline.utils import get_unique_bg
+
+            bg_dir: Optional[Path] = None
+            for candidate in [
+                getattr(config, "BG_VIDEO_DIR", None),
+                Path(config.BASE_DIR) / "assets" / "backgrounds",
+                Path(config.BASE_DIR) / "assets" / "bg_videos",
+            ]:
+                if candidate and Path(candidate).exists():
+                    bg_dir = Path(candidate)
+                    break
+
+            if not bg_dir:
+                return None
+
+            bg_files = list(bg_dir.glob("*.mp4")) + list(bg_dir.glob("*.mov"))
+            if not bg_files:
+                return None
+
+            topic    = video_path.stem
+            category = self._extract_category(topic)
+            # Ограничиваем до 20 файлов — промпт не должен содержать 200+ имён
+            file_names = [f.name for f in bg_files[:20]]
+
+            visionary_rec  = self.memory.read_recommendation("visionary", "editor")
+            strategist_rec = self.memory.read_recommendation("strategist", "editor")
+            if not visionary_rec and not strategist_rec:
+                # Fallback — ротация без LLM
+                try:
+                    chosen = get_unique_bg(bg_dir)
+                    if chosen:
+                        return chosen
+                except Exception:
+                    pass
+                return random.choice(bg_files)
+
+            visionary_hint  = visionary_rec.get("content",  "нет данных") if visionary_rec  else "нет данных"
+            strategist_hint = strategist_rec.get("content", "нет данных") if strategist_rec else "нет данных"
+
+            prompt = (
+                f"Ты редактор видео. Выбери один фоновый файл для ролика.\n\n"
+                f"Тема видео: {topic or category or 'не указана'}\n"
+                f"VISIONARY рекомендует стиль: {_sanitize_llm_input(visionary_hint)}\n"
+                f"STRATEGIST рекомендует: {_sanitize_llm_input(strategist_hint)}\n\n"
+                f"Доступные файлы фонов (показаны первые {len(file_names)}):\n"
+                + "\n".join(f"- {name}" for name in file_names)
+                + "\n\nВерни ТОЛЬКО имя одного файла из списка выше, без пояснений."
+            )
+
+            raw = self._call_ollama_with_fallback(
+                prompt=prompt,
+                fallback_value=None,
+                context_description=f"выбор фона для категории '{category}'",
+            )
+
+            if raw is None:
+                return None
+
+            chosen_name = self._validate_bg_choice(raw.strip(), file_names)
+            if not chosen_name:
+                return None
+
+            self._bg_cache[category] = chosen_name
+            logger.info("[EDITOR] Фон (LLM, no-acquire): %s", chosen_name)
+            for f in bg_files:
+                if f.name == chosen_name:
+                    return f
+            return None
+
+        except Exception as e:
+            logger.debug("[EDITOR] _choose_bg_with_llm_no_acquire: %s", e)
+            return None
 
     def _generate_tts_batch(
         self,
@@ -416,16 +649,16 @@ class Editor(BaseAgent):
             # Нет контекста — не тратим GPU на Ollama
             return None
 
-        file_names = [f.name for f in bg_files]
+        file_names = [f.name for f in bg_files[:20]]  # не более 20 — промпт не должен содержать 200+ имён
         visionary_hint  = visionary_rec.get("content",  "нет данных") if visionary_rec  else "нет данных"
         strategist_hint = strategist_rec.get("content", "нет данных") if strategist_rec else "нет данных"
 
         prompt = (
             f"Ты редактор видео. Выбери один фоновый файл для ролика.\n\n"
             f"Тема видео: {topic or category or 'не указана'}\n"
-            f"VISIONARY рекомендует стиль: {visionary_hint}\n"
-            f"STRATEGIST рекомендует: {strategist_hint}\n\n"
-            f"Доступные файлы фонов:\n"
+            f"VISIONARY рекомендует стиль: {_sanitize_llm_input(visionary_hint)}\n"
+            f"STRATEGIST рекомендует: {_sanitize_llm_input(strategist_hint)}\n\n"
+            f"Доступные файлы фонов (показаны первые {len(file_names)}):\n"
             + "\n".join(f"- {name}" for name in file_names) +
             "\n\nВерни ТОЛЬКО имя одного файла из списка выше, без пояснений."
         )
