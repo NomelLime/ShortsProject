@@ -209,10 +209,13 @@ class AgentMemory:
         content: str,
         cycle: int,
     ) -> None:
-        """Записывает рекомендацию от одного агента другому.
+        """Записывает рекомендацию от одного агента другому (только в памяти).
 
         Ключ: ``rec.<from_agent>.<to_agent>``
         Значение: ``{"content": ..., "created_at": ..., "cycle": ...}``
+
+        Не сохраняет на диск при каждом вызове — рекомендации транзиентны
+        и меняются в каждом цикле. Персистирование происходит через set().
         """
         key = f"rec.{from_agent.lower()}.{to_agent.lower()}"
         value = {
@@ -222,7 +225,6 @@ class AgentMemory:
         }
         with self._lock:
             self._kv[key] = value
-            self._save()
         logger.debug("AgentMemory: рекомендация %s → %s записана (цикл %d)", from_agent, to_agent, cycle)
 
     def read_recommendation(self, from_agent: str, to_agent: str) -> Optional[Dict]:

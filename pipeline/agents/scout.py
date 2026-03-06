@@ -198,15 +198,35 @@ class Scout(BaseAgent):
 
     @staticmethod
     def _detect_top_niche(keywords: List[str]) -> str:
-        """Определяет топ-нишу как самое короткое (общее) ключевое слово.
+        """Определяет топ-нишу по частоте встречаемости ключевых слов.
 
-        Логика: короткие слова — это базовые категории (cooking, travel),
-        длинные — конкретные запросы. Берём первое из отсортированных по длине.
+        Ранее брало кратчайшее слово — "AI" побеждало "cooking", "travel"
+        и другие реальные категории. Теперь выбираем нишу по частоте:
+        слово, которое встречается в наибольшем количестве ключевых фраз,
+        является доминирующей темой.
+        При равенстве предпочитаем более длинное слово (более специфичное).
         """
         if not keywords:
             return "unknown"
         cleaned = [kw.strip().lower() for kw in keywords if kw.strip()]
         if not cleaned:
             return "unknown"
-        # Сортируем по длине — короткие = более общие категории
-        return sorted(cleaned, key=len)[0]
+
+        # Считаем частоту каждого отдельного слова во всех ключевых фразах
+        from collections import Counter
+        word_freq: Counter = Counter()
+        for phrase in cleaned:
+            # Слова длиннее 3 символов — исключаем артикли и предлоги
+            words = [w for w in phrase.split() if len(w) > 3]
+            for w in words:
+                word_freq[w] += 1
+
+        if not word_freq:
+            # Если все слова короткие — берём самую частую фразу целиком
+            phrase_freq: Counter = Counter(cleaned)
+            return phrase_freq.most_common(1)[0][0]
+
+        # Топ по частоте; при равенстве — длиннее (специфичнее)
+        top_word = max(word_freq.keys(), key=lambda w: (word_freq[w], len(w)))
+        logger.debug("[SCOUT] top_niche='%s' (freq=%d из %d фраз)", top_word, word_freq[top_word], len(cleaned))
+        return top_word

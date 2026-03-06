@@ -36,6 +36,26 @@ from pipeline.agent_memory import AgentMemory, get_memory
 
 logger = logging.getLogger(__name__)
 
+
+def _sanitize_llm_input(text: str, max_len: int = 300) -> str:
+    """Санитизирует строку из AgentMemory перед включением в LLM-промпт.
+
+    Рекомендации могут содержать данные от SCOUT (YouTube заголовки) →
+    STRATEGIST → GUARDIAN. Prompt injection нейтрализуется здесь.
+    """
+    import re
+    if not text or not isinstance(text, str):
+        return ""
+    text = re.sub(r"[\r\n\t]+", " ", text)
+    text = re.sub(r"[`*#<>{}|\[\]\\]", "", text)
+    text = re.sub(
+        r"\b(ignore|forget|disregard|override|bypass|jailbreak|pretend|roleplay)\b\s+\S+",
+        "[filtered]",
+        text,
+        flags=re.IGNORECASE,
+    )
+    return text.strip()[:max_len]
+
 _PROXY_CHECK_INTERVAL   = 300   # 5 минут
 _SESSION_CHECK_INTERVAL = 3600  # 1 час
 
@@ -63,6 +83,10 @@ class Guardian(BaseAgent):
         self._quarantined: Dict[str, List]    = {}  # acc_name → [platforms]
         self._last_proxy_check  = 0.0
         self._last_session_check = 0.0
+        # Кеш LLM-задержки: acc_name → (delay_sec, computed_at monotonic)
+        # TTL = 30 мин — иначе каждая загрузка захватывает GPU и шлёт промпт
+        self._delay_cache: Dict[str, Tuple[float, float]] = {}
+        self._DELAY_CACHE_TTL = 1800  # 30 минут
 
     # ------------------------------------------------------------------
     # run() — фоновый цикл проверок
@@ -290,15 +314,32 @@ class Guardian(BaseAgent):
         Возвращает рекомендованную паузу (сек) между загрузками аккаунта.
 
         Логика принятия решения (иерархия):
-          1. LLM-решение на основе рекомендаций ACCOUNTANT + STRATEGIST
-          2. Hardcoded антибан логика (fallback)
+          1. Кеш (TTL 30 мин) — LLM не вызывается на каждую загрузку
+          2. LLM-решение на основе рекомендаций ACCOUNTANT + STRATEGIST
+          3. Hardcoded антибан логика (fallback)
 
         Диапазон: 30–600 сек. Значения вне диапазона → fallback.
         """
+        now = time.monotonic()
+        cached = self._delay_cache.get(acc_name)
+        if cached is not None:
+            delay_val, cached_at = cached
+            if now - cached_at < self._DELAY_CACHE_TTL:
+                logger.debug(
+                    "[GUARDIAN] Задержка для %s из кеша: %.0f сек (осталось %.0f сек)",
+                    acc_name, delay_val, self._DELAY_CACHE_TTL - (now - cached_at),
+                )
+                return delay_val
+
         llm_delay = self._get_llm_delay(acc_name)
         if llm_delay is not None:
+            self._delay_cache[acc_name] = (llm_delay, now)
             return llm_delay
-        return self._hardcoded_delay(acc_name)
+
+        fallback = self._hardcoded_delay(acc_name)
+        # Кешируем и fallback — чтобы не ходить в LLM при каждой загрузке даже когда Ollama недоступен
+        self._delay_cache[acc_name] = (fallback, now)
+        return fallback
 
     def _get_llm_delay(self, acc_name: str) -> Optional[float]:
         """Спрашивает Ollama какую паузу выставить для аккаунта.
@@ -326,8 +367,8 @@ class Guardian(BaseAgent):
             f"Ты антибан-менеджер. Определи паузу между загрузками для аккаунта.\n\n"
             f"Аккаунт: {acc_name}\n"
             f"В карантине: {'да' if in_quarantine else 'нет'}\n"
-            f"ACCOUNTANT (лимиты): {accountant_hint}\n"
-            f"STRATEGIST (стратегия): {strategist_hint}\n\n"
+            f"ACCOUNTANT (лимиты): {_sanitize_llm_input(accountant_hint)}\n"
+            f"STRATEGIST (стратегия): {_sanitize_llm_input(strategist_hint)}\n\n"
             f"Верни ТОЛЬКО одно целое число — количество секунд паузы "
             f"(от {_DELAY_MIN} до {_DELAY_MAX}). Без пояснений."
         )
