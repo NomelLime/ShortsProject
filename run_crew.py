@@ -168,13 +168,18 @@ def main() -> None:
         return
 
     # Telegram polling поток
-    if tg_token and tg_chat_id and not args.no_telegram:
+    # SP_DISABLE_TELEGRAM_POLLING=true → Orchestrator единственный принимает команды
+    _polling_disabled = os.getenv("SP_DISABLE_TELEGRAM_POLLING", "false").lower() == "true"
+    if tg_token and tg_chat_id and not args.no_telegram and not _polling_disabled:
         t = threading.Thread(
             target=telegram_polling_loop,
             args=(crew, tg_token, tg_chat_id),
             daemon=True,
         )
         t.start()
+    elif _polling_disabled:
+        logger.info("SP Telegram polling отключён (SP_DISABLE_TELEGRAM_POLLING=true)"
+                    " — команды принимает Orchestrator")
 
     # CLI или daemon
     if args.daemon:

@@ -1,8 +1,18 @@
 """
 notifications.py – Telegram-уведомления и обработка CAPTCHA / 2FA.
+
+Режимы отправки:
+  SP_TELEGRAM_CRITICAL_ONLY=false (по умолчанию) — отправляются все уведомления
+  SP_TELEGRAM_CRITICAL_ONLY=true  — только критические (CAPTCHA, 2FA, Sentinel-алерты)
+                                     Устанавливается когда Orchestrator берёт на себя
+                                     стратегические уведомления.
+
+Критические вызовы: send_telegram_alert() — всегда отправляется.
+Обычные вызовы:     send_telegram()       — фильтруется при CRITICAL_ONLY=true.
 """
 
 import hashlib
+import os
 import threading
 import time
 import logging
@@ -10,6 +20,10 @@ import requests
 from rebrowser_playwright.sync_api import Page
 
 from pipeline.config import TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, CAPTCHA_WAIT_TIMEOUT_SEC
+
+# Если True — отправляем только сообщения с critical=True (CAPTCHA, системные алерты).
+# Orchestrator читает аналитику и шлёт стратегические уведомления сам.
+_CRITICAL_ONLY: bool = os.getenv("SP_TELEGRAM_CRITICAL_ONLY", "false").lower() == "true"
 
 logger = logging.getLogger(__name__)
 
@@ -27,15 +41,24 @@ _tg_dedup_window    = 300          # одно и то же сообщение н
 # Telegram
 # ──────────────────────────────────────────────────────────────
 
-def send_telegram(message: str, parse_mode: str = "HTML") -> bool:
+def send_telegram(message: str, parse_mode: str = "HTML", critical: bool = False) -> bool:
     """
     Отправляет сообщение в Telegram с rate limiting.
     - Не чаще 1 сообщения в 2 сек (лимит Telegram API ~30/сек для ботов)
     - Дедупликация: одно и то же сообщение не чаще раза в 5 мин
+
+    Args:
+        critical: если True — отправляется всегда (даже при SP_TELEGRAM_CRITICAL_ONLY=true).
+                  Используется для CAPTCHA, 2FA, системных алертов Sentinel.
     """
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
         logger.warning("Telegram не настроен (TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID пустые).")
         return False
+
+    # Фильтр: при CRITICAL_ONLY пропускаем некритичные (аналитика, расписание, репосты)
+    if _CRITICAL_ONLY and not critical:
+        logger.debug("Telegram: пропущено (SP_TELEGRAM_CRITICAL_ONLY=true, critical=False)")
+        return True  # не ошибка — Orchestrator возьмёт эти данные напрямую
 
     with _tg_lock:
         global _tg_last_send_ts
@@ -79,8 +102,12 @@ def send_telegram(message: str, parse_mode: str = "HTML") -> bool:
 
 
 def send_telegram_alert(message: str, parse_mode: str = "HTML") -> bool:
-    """Отправляет предупреждение (аналог send_telegram, для совместимости)."""
-    return send_telegram(message, parse_mode)
+    """
+    Отправляет критическое предупреждение.
+    Всегда доставляется — игнорирует SP_TELEGRAM_CRITICAL_ONLY.
+    Используй для: CAPTCHA, 2FA, системных алертов, краша агентов.
+    """
+    return send_telegram(message, parse_mode, critical=True)
 
 
 # ──────────────────────────────────────────────────────────────
