@@ -35,7 +35,7 @@ from typing import Dict, List
 
 from pipeline import config, utils
 from pipeline.browser import launch_browser, close_browser
-from pipeline.activity import run_activity
+from pipeline.activity_vl import run_activity_vl
 
 logger = logging.getLogger(__name__)
 
@@ -110,7 +110,7 @@ class _AccountActivityJob:
         try:
             pw, context = launch_browser(acc_cfg, profile_dir)
             try:
-                run_activity(context, platform, {})
+                run_activity_vl(context, platform, acc_cfg)
             finally:
                 close_browser(pw, context)
             logger.info("[scheduler] Активность завершена: [%s][%s]", acc_name, platform)
