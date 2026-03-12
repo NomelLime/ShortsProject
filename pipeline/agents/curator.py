@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from pipeline.agents.base_agent import BaseAgent, AgentStatus
+from pipeline.agents.gpu_manager import get_gpu_manager, GPUPriority
 from pipeline.agent_memory import AgentMemory, get_memory
 
 logger = logging.getLogger(__name__)
@@ -47,6 +48,7 @@ class Curator(BaseAgent):
         self._interval  = scan_interval
         self._accepted  = 0
         self._rejected  = 0
+        self._gpu       = get_gpu_manager()
 
     def run(self) -> None:
         logger.info("[CURATOR] Запущен, интервал=%ds", self._interval)
@@ -149,6 +151,18 @@ class Curator(BaseAgent):
                 return False, "дубликат (perceptual hash)"
         except Exception as e:
             logger.debug("[CURATOR] hash check failed for %s: %s", video.name, e)
+
+        # 5. VL качество контента (только новые видео — результат кешируется)
+        try:
+            from pipeline import config as _cfg
+            if getattr(_cfg, "CURATOR_VL_QUALITY_CHECK", False):
+                from pipeline.ai import vl_quality_check_video
+                with self._gpu.acquire("CURATOR_VL", GPUPriority.LLM):
+                    passed, reason = vl_quality_check_video(video)
+                if not passed:
+                    return False, f"VL: {reason}"
+        except Exception as e:
+            logger.debug("[CURATOR] VL пропущен для %s: %s", video.name, e)
 
         return True, ""
 

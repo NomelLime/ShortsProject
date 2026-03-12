@@ -108,11 +108,19 @@ MAX_WORKERS = os.cpu_count() or 2
 # ----------------------------------------------------------------------
 # AI
 # ----------------------------------------------------------------------
-OLLAMA_MODEL    = 'qwen2.5-vl:7b'
-YOLO_MODEL_PT   = 'yolo11x.pt'
+OLLAMA_MODEL    = 'qwen2.5-vl:7b'   # VL-модель: видит реальные кадры видео
 AI_ENABLED      = True
 OLLAMA_TIMEOUT  = 60
-AI_NUM_FRAMES   = 6      # увеличено: кадры для YOLO + метаданных + точек нарезки
+AI_NUM_FRAMES   = 6      # кадры для VL-анализа метаданных и точек нарезки
+
+# VL-фильтрация контента (CURATOR + SCOUT)
+# CURATOR: проверяет качество видео перед обработкой (только новые — кеш по sha256)
+# SCOUT:   оценивает thumbnail YouTube-видео до скачивания
+CURATOR_VL_QUALITY_CHECK  = os.getenv("CURATOR_VL_CHECK",   "1") == "1"
+SCOUT_VL_THUMBNAIL_FILTER = os.getenv("SCOUT_VL_FILTER",    "1") == "1"
+SCOUT_VL_MIN_SCORE        = int(os.getenv("SCOUT_VL_MIN_SCORE",  "7"))   # 1-10
+SCOUT_VL_MAX_PER_CYCLE    = int(os.getenv("SCOUT_VL_MAX_CYCLE",  "20"))  # макс. проверок за цикл
+VL_CACHE_FILE             = BASE_DIR / "data" / "vl_cache.json"
 
 # ----------------------------------------------------------------------
 # Дедупликация видео (perceptual hash + Hamming distance)

@@ -5,10 +5,7 @@ numpy
 tqdm
 
 # AI
-ultralytics
 ollama
-torch
-torchvision
 
 # Скачивание и поиск
 yt-dlp

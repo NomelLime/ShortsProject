@@ -1,14 +1,10 @@
 # ai.py
-# FIX #4: все импорты перенесены в начало файла (PEP 8).
-#         Добавлены json, re, threading (были пропущены).
-#         save_json импортируется из utils.
 import concurrent.futures
+import hashlib
 import json
 import logging
-import random
 import re
 import subprocess
-import tempfile
 import threading
 import time
 from pathlib import Path
@@ -17,33 +13,64 @@ from typing import Dict, List, Optional, Tuple
 import cv2
 import ollama
 import requests
-from ultralytics import YOLO
 
 from pipeline.config import (
-    OLLAMA_MODEL, YOLO_MODEL_PT, AI_NUM_FRAMES,
+    OLLAMA_MODEL, AI_NUM_FRAMES,
     AI_NUM_VARIANTS, OLLAMA_TIMEOUT, HASHTAGS_FILE,
     OVERLAY_DEFAULT_DURATION,
     OLLAMA_AUTOSTART, OLLAMA_AUTOSTART_WAIT_SEC,
     CLIP_MIN_LEN, CLIP_MAX_LEN,
+    VL_CACHE_FILE,
 )
 from pipeline.utils import save_json
 
 logger = logging.getLogger(__name__)
 
-# FIX #18 (ai): double-checked locking — безопасная ленивая инициализация YOLO
-_yolo_model: Optional[YOLO] = None
-_yolo_lock = threading.Lock()
+# ─────────────────────────────────────────────────────────────────────────────
+# VL-кеш (CURATOR + SCOUT)
+# Файл: data/vl_cache.json  |  Ключи: sha256 (видео) или "yt_{video_id}"
+# ─────────────────────────────────────────────────────────────────────────────
+
+_VL_CACHE_LOCK = threading.Lock()
 
 
-def load_yolo() -> YOLO:
-    """Загружает модель YOLO (глобально, с кэшированием и thread-safe блокировкой)."""
-    global _yolo_model
-    if _yolo_model is None:
-        with _yolo_lock:
-            if _yolo_model is None:   # double-checked locking
-                logger.info("Загрузка YOLO модели...")
-                _yolo_model = YOLO(YOLO_MODEL_PT)
-    return _yolo_model
+def _file_hash(path: Path) -> str:
+    """SHA-256 первых 8 KB файла — быстрый уникальный идентификатор."""
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        h.update(f.read(8192))
+    return h.hexdigest()
+
+
+def _vl_cache_get(key: str) -> Optional[Dict]:
+    """Читает запись из VL-кеша. Возвращает None если нет."""
+    try:
+        with _VL_CACHE_LOCK:
+            if not VL_CACHE_FILE.exists():
+                return None
+            return json.loads(VL_CACHE_FILE.read_text(encoding="utf-8")).get(key)
+    except Exception:
+        return None
+
+
+def _vl_cache_set(key: str, value: Dict) -> None:
+    """Атомарно записывает запись в VL-кеш."""
+    try:
+        with _VL_CACHE_LOCK:
+            VL_CACHE_FILE.parent.mkdir(parents=True, exist_ok=True)
+            cache: Dict = {}
+            if VL_CACHE_FILE.exists():
+                try:
+                    cache = json.loads(VL_CACHE_FILE.read_text(encoding="utf-8"))
+                except Exception:
+                    pass
+            cache[key] = value
+            VL_CACHE_FILE.write_text(
+                json.dumps(cache, ensure_ascii=False, indent=None),
+                encoding="utf-8",
+            )
+    except Exception as e:
+        logger.warning("VL cache write error: %s", e)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -70,7 +97,7 @@ def _try_start_ollama() -> None:
 
 def check_ollama() -> bool:
     """
-    Проверяет доступность Ollama и модели.
+    Проверяет доступность Ollama и VL-модели.
     При недоступности — пытается запустить автоматически (OLLAMA_AUTOSTART).
     """
     def _probe() -> bool:
@@ -110,14 +137,13 @@ def load_trending_hashtags() -> List[str]:
 # Извлечение кадров
 # ─────────────────────────────────────────────────────────────────────────────
 
-def extract_frames(video_path: Path, num_frames: int = AI_NUM_FRAMES) -> List[str]:
-    """Извлекает равномерно распределённые кадры из видео."""
+def extract_frames(video_path: Path, num_frames: int = AI_NUM_FRAMES) -> List[bytes]:
+    """Извлекает равномерно распределённые кадры из видео (raw JPEG bytes для VL-модели)."""
     cap = cv2.VideoCapture(str(video_path))
     if not cap.isOpened():
         raise ValueError(f"Не удалось открыть видео: {video_path}")
 
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-    fps = cap.get(cv2.CAP_PROP_FPS)
 
     step = max(1, total_frames // num_frames)
     frames = []
@@ -128,45 +154,34 @@ def extract_frames(video_path: Path, num_frames: int = AI_NUM_FRAMES) -> List[st
         if not ret:
             break
         _, buf = cv2.imencode('.jpg', frame)
-        frames.append(buf.tobytes().hex())
+        frames.append(buf.tobytes())
     cap.release()
     return frames
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# YOLO-детекция
+# Генерация через Ollama VL
 # ─────────────────────────────────────────────────────────────────────────────
 
-def run_yolo_on_frames(frames: List[str]) -> List[List[str]]:
-    """Запускает YOLO на кадрах параллельно."""
-    model = load_yolo()
+def ollama_generate_with_timeout(
+    model: str,
+    prompt: str,
+    images: Optional[List[bytes]] = None,
+    timeout: int = OLLAMA_TIMEOUT,
+) -> Dict:
+    """Генерирует ответ Ollama VL-модели с таймаутом.
+
+    Args:
+        model:   название модели (напр. 'qwen2.5-vl:7b')
+        prompt:  текстовый промпт
+        images:  список JPEG-байт кадров для VL-анализа (опционально)
+        timeout: таймаут в секундах
+    """
+    kwargs: Dict = dict(model=model, prompt=prompt)
+    if images:
+        kwargs["images"] = images
     with concurrent.futures.ThreadPoolExecutor() as executor:
-        futures = [executor.submit(_detect_single_frame, model, f) for f in frames]
-        results = [f.result() for f in concurrent.futures.as_completed(futures)]
-    return results
-
-
-def _detect_single_frame(model: YOLO, frame_hex: str) -> List[str]:
-    frame_bytes = bytes.fromhex(frame_hex)
-    results = model(frame_bytes, verbose=False)
-    detections = []
-    for r in results:
-        for box in r.boxes:
-            cls = int(box.cls)
-            conf = float(box.conf)
-            if conf > 0.5:
-                detections.append(f"{model.names[cls]} ({conf:.2f})")
-    return list(set(detections))
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Генерация метаданных через Ollama
-# ─────────────────────────────────────────────────────────────────────────────
-
-def ollama_generate_with_timeout(model: str, prompt: str, timeout: int = OLLAMA_TIMEOUT) -> Dict:
-    """Генерирует ответ Ollama с таймаутом."""
-    with concurrent.futures.ThreadPoolExecutor() as executor:
-        future = executor.submit(ollama.generate, model=model, prompt=prompt)
+        future = executor.submit(ollama.generate, **kwargs)
         try:
             return future.result(timeout=timeout)
         except concurrent.futures.TimeoutError:
@@ -178,7 +193,7 @@ def generate_video_metadata(
     trending_hashtags: Optional[List[str]] = None,
     num_variants: int = AI_NUM_VARIANTS,
 ) -> List[Dict]:
-    """Генерирует несколько вариантов метаданных через Ollama + YOLO."""
+    """Генерирует метаданные для видео через Ollama VL — модель видит реальные кадры."""
     cache_path = video_path.with_suffix('.ai_cache.json')
     if cache_path.exists():
         try:
@@ -192,31 +207,35 @@ def generate_video_metadata(
 
     try:
         frames = extract_frames(video_path)
-        yolo_per_frame = run_yolo_on_frames(frames)
 
         hashtag_hint = ""
         if trending_hashtags:
-            hashtag_hint = f"Trending hashtags to consider: {', '.join(trending_hashtags[:10])}\n"
+            hashtag_hint = f"Контекст и ключевые темы: {', '.join(trending_hashtags[:10])}\n"
 
         prompt = (
-            f"Analyze this video based on {len(frames)} frames and YOLO detections.\n"
-            f"Frames descriptions: {', '.join([f'Frame {i+1}: objects {d}' for i, d in enumerate(yolo_per_frame)])}\n"
+            f"Ты анализируешь вертикальное короткое видео (YouTube Shorts / TikTok / Reels).\n"
+            f"Тебе показаны {len(frames)} равномерно распределённых кадров из видео.\n"
             f"{hashtag_hint}"
-            f"Generate {num_variants} variants of metadata for viral Shorts video:\n"
-            "- title: Catchy title (under 60 chars)\n"
-            "- description: Engaging description with emojis (under 150 chars)\n"
-            "- tags: 5-10 trending tags\n"
-            "- thumbnail_idea: Description for thumbnail\n"
-            "- hook_text: Opening text overlay (short phrase)\n"
-            "- best_segment: Start time of best 3-10s segment\n"
-            "- overlays: List of timed text overlays [{text, start, duration}]\n"
-            "- loop_prompt: End prompt to loop video\n"
-            "Output as JSON list of dicts. Return ONLY valid JSON, no markdown."
+            f"Создай {num_variants} варианта метаданных для вирального Shorts.\n\n"
+            "Требования к hook_text: интрига, вопрос или неожиданный факт — 3–7 слов.\n"
+            "Требования к title: цепляет с первых слов, без 'смотри как' и 'это видео'.\n\n"
+            "Ответ — ТОЛЬКО валидный JSON-массив (без markdown, без пояснений):\n"
+            '[\n'
+            '  {\n'
+            '    "title": "заголовок до 60 символов",\n'
+            '    "description": "описание с эмодзи до 150 символов",\n'
+            '    "tags": ["тег1", "тег2"],\n'
+            '    "thumbnail_idea": "идея для превью",\n'
+            '    "hook_text": "текст первые 3 сек (3-7 слов)",\n'
+            '    "best_segment": <секунды или null>,\n'
+            '    "overlays": [{"text": "...", "start": 0, "duration": 2}],\n'
+            '    "loop_prompt": "фраза для петли"\n'
+            '  }\n'
+            ']'
         )
 
-        response = ollama_generate_with_timeout(OLLAMA_MODEL, prompt)
+        response = ollama_generate_with_timeout(OLLAMA_MODEL, prompt, images=frames)
         raw = response["response"].strip()
-        # Убираем возможные markdown-заборы
         raw = re.sub(r"^```(?:json)?\s*", "", raw)
         raw = re.sub(r"\s*```$", "", raw)
         variants = json.loads(raw)
@@ -231,23 +250,35 @@ def generate_video_metadata(
 def generate_cut_points(
     video_path: Path,
     duration: float,
-    yolo_per_frame: List[List[str]],
     num_frames: int = AI_NUM_FRAMES,
     silences: Optional[List[float]] = None,
 ) -> List[float]:
-    """Запрашивает у AI точки нарезки видео."""
+    """Определяет точки нарезки видео через VL-модель — модель видит кадры."""
     silences_str = (
-        f"Silence pauses at seconds: {', '.join(f'{s:.1f}' for s in silences)}"
+        f"\nТихие паузы (секунды): {', '.join(f'{s:.1f}' for s in silences)}"
         if silences else ""
     )
+
+    try:
+        frames = extract_frames(video_path, num_frames)
+    except Exception as e:
+        logger.warning("Не удалось извлечь кадры для cut points: %s", e)
+        frames = []
+
     prompt = (
-        f"Suggest cut points for {duration:.1f}s video into {CLIP_MIN_LEN}-{CLIP_MAX_LEN}s clips.\n"
-        f"Frames: {', '.join([f'Frame {i+1}: {d}' for i, d in enumerate(yolo_per_frame)])}\n"
-        f"{silences_str}\n"
-        "Prefer cuts during silences to avoid mid-sentence. "
-        "Output ONLY a list of timestamps in seconds, one per line."
+        f"Видео длительностью {duration:.1f} секунд.\n"
+        f"Тебе показаны {len(frames)} равномерно распределённых кадров.\n"
+        f"Нужно нарезать на клипы по {CLIP_MIN_LEN:.0f}–{CLIP_MAX_LEN:.0f} секунд.{silences_str}\n"
+        "Найди лучшие точки реза: смена сцены, логический переход, завершение действия.\n"
+        "Предпочитай резать в тихих паузах (если есть).\n"
+        "Ответ: ТОЛЬКО числа секунд, по одному на строке. Никакого другого текста."
     )
-    response = ollama_generate_with_timeout(OLLAMA_MODEL, prompt)
+
+    response = ollama_generate_with_timeout(
+        OLLAMA_MODEL,
+        prompt,
+        images=frames if frames else None,
+    )
     return _parse_timestamps(response["response"])
 
 
@@ -270,3 +301,109 @@ def _fallback_meta(video_path: Path, num_variants: int) -> List[Dict]:
         "loop_prompt":    "",
     }
     return [base] * num_variants
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# VL-фильтрация контента
+# ─────────────────────────────────────────────────────────────────────────────
+
+def vl_quality_check_video(
+    video_path: Path,
+    num_frames: int = 4,
+) -> Tuple[bool, str]:
+    """
+    CURATOR: VL-оценка качества видео перед обработкой.
+
+    Результат кешируется по SHA-256 первых 8 KB файла — повторный вызов
+    для того же видео бесплатен (без GPU).
+
+    Returns:
+        (True, "ok")          — видео пригодно
+        (False, "причина")    — отбраковано
+        (True, "vl_error")    — ошибка VL, пропускаем (default PASS)
+    """
+    file_hash = _file_hash(video_path)
+    cached = _vl_cache_get(file_hash)
+    if cached is not None:
+        return cached["result"] == "PASS", cached["reason"]
+
+    try:
+        frames = extract_frames(video_path, num_frames)
+    except Exception as e:
+        logger.warning("[VL-CURATOR] Не удалось извлечь кадры из %s: %s", video_path.name, e)
+        return True, "extract_failed"
+
+    prompt = (
+        "Оцени пригодность этого видео для публикации как Shorts/Reels.\n"
+        "Отбракуй (REJECT) если: статичное изображение выдаётся за видео, "
+        "скучный скринкаст без действия, только слайды с текстом, "
+        "сильное размытие на всех кадрах, зациклённый 2-3 секундный клип.\n"
+        "Всё остальное — одобряй (PASS).\n"
+        "Ответ: ТОЛЬКО 'PASS' или 'REJECT' и одно слово-причина через пробел."
+    )
+
+    try:
+        response = ollama_generate_with_timeout(OLLAMA_MODEL, prompt, images=frames)
+        raw     = response["response"].strip().upper()
+        passed  = raw.startswith("PASS")
+        parts   = raw.split()
+        reason  = parts[1].lower() if len(parts) > 1 else ("ok" if passed else "low_quality")
+        _vl_cache_set(file_hash, {"result": "PASS" if passed else "REJECT", "reason": reason})
+        logger.debug("[VL-CURATOR] %s → %s (%s)", video_path.name, "PASS" if passed else "REJECT", reason)
+        return passed, reason
+    except Exception as e:
+        logger.warning("[VL-CURATOR] Ошибка для %s: %s — default PASS", video_path.name, e)
+        return True, "vl_error"
+
+
+def vl_score_thumbnail(video_url: str) -> Optional[int]:
+    """
+    SCOUT: Оценивает thumbnail YouTube-видео через VL (1–10).
+
+    Для не-YouTube URL возвращает None (URL добавляется без фильтрации).
+    Результат кешируется по video_id — повторный поиск по тому же видео
+    не тратит GPU.
+
+    Returns:
+        int 1–10  — оценка контента
+        None      — не YouTube или ошибка fetch
+    """
+    match = re.search(r"(?:v=|youtu\.be/)([a-zA-Z0-9_-]{11})", video_url)
+    if not match:
+        return None
+
+    video_id  = match.group(1)
+    cache_key = f"yt_{video_id}"
+
+    cached = _vl_cache_get(cache_key)
+    if cached is not None:
+        return cached.get("score")
+
+    thumbnail_url = f"https://img.youtube.com/vi/{video_id}/hqdefault.jpg"
+    try:
+        resp = requests.get(thumbnail_url, timeout=10)
+        if resp.status_code != 200:
+            return None
+        img_bytes = resp.content
+    except Exception as e:
+        logger.warning("[VL-SCOUT] Не удалось загрузить thumbnail %s: %s", video_id, e)
+        return None
+
+    prompt = (
+        "Оцени превью видео для отбора контента для Shorts/Reels.\n"
+        "Повышай оценку за: динамичность, эмоции, интересное действие, качество.\n"
+        "Снижай оценку за: скучный статичный контент, скринкасты, слайды, размытие.\n"
+        "Ответ: ТОЛЬКО целое число от 1 до 10."
+    )
+
+    try:
+        response = ollama_generate_with_timeout(OLLAMA_MODEL, prompt, images=[img_bytes])
+        raw      = response["response"].strip()
+        numbers  = re.findall(r"\b(\d+)\b", raw)
+        score    = max(1, min(10, int(numbers[0]))) if numbers else 5
+        _vl_cache_set(cache_key, {"score": score})
+        logger.debug("[VL-SCOUT] %s → score=%d", video_id, score)
+        return score
+    except Exception as e:
+        logger.warning("[VL-SCOUT] Ошибка оценки thumbnail %s: %s", video_id, e)
+        return None

@@ -77,6 +77,9 @@ class Scout(BaseAgent):
                 logger.info("[SCOUT] Новых URL не найдено")
                 return
 
+            # VL thumbnail pre-filter: отклоняем мусор до скачивания
+            new_urls = self._vl_filter_urls(new_urls)
+
             saved = merge_and_save_urls(new_urls, config.URLS_FILE)
             self._total_found += saved
             logger.info("[SCOUT] Сохранено %d новых URL (сессия: %d)", saved, self._total_found)
@@ -134,6 +137,67 @@ class Scout(BaseAgent):
         except Exception as e:
             logger.warning("[SCOUT] Браузерный поиск не удался: %s", e)
             return []
+
+    # ------------------------------------------------------------------
+    # VL thumbnail pre-filter
+    # ------------------------------------------------------------------
+
+    def _vl_filter_urls(self, urls: List[str]) -> List[str]:
+        """
+        VL-оценка thumbnail для YouTube-видео перед добавлением в очередь.
+
+        - Только YouTube URL (остальные проходят без проверки)
+        - Лимит SCOUT_VL_MAX_PER_CYCLE проверок за цикл (остаток добавляется)
+        - Результаты кешируются в vl_cache.json — повторный поиск бесплатен
+        - При отключённом флаге или ошибке — все URL проходят
+        """
+        try:
+            from pipeline import config as _cfg
+            if not getattr(_cfg, "SCOUT_VL_THUMBNAIL_FILTER", False):
+                return urls
+
+            from pipeline.ai import vl_score_thumbnail
+            min_score  = getattr(_cfg, "SCOUT_VL_MIN_SCORE", 7)
+            max_checks = getattr(_cfg, "SCOUT_VL_MAX_PER_CYCLE", 20)
+
+            filtered: List[str] = []
+            checked = 0
+
+            self._set_status(AgentStatus.RUNNING, f"VL thumbnail фильтр ({len(urls)} URL)")
+            self._set_status(AgentStatus.WAITING, "ожидание GPU для VL")
+
+            with self._gpu.acquire("SCOUT_VL", GPUPriority.LLM):
+                self._set_status(AgentStatus.RUNNING, "VL thumbnail фильтрация")
+                for i, url in enumerate(urls):
+                    if checked >= max_checks:
+                        # Лимит достигнут — остаток добавляем без проверки
+                        filtered.extend(urls[i:])
+                        break
+                    score = vl_score_thumbnail(url)
+                    if score is None:
+                        # Не YouTube или ошибка — пропускаем
+                        filtered.append(url)
+                        continue
+                    checked += 1
+                    if score >= min_score:
+                        filtered.append(url)
+                    else:
+                        logger.info("[SCOUT] VL отклонил (score=%d): %s", score, url[:70])
+
+            rejected = len(urls) - len(filtered)
+            logger.info(
+                "[SCOUT] VL filter: %d/%d прошли, %d отклонено (проверено %d)",
+                len(filtered), len(urls), rejected, checked,
+            )
+            self.memory.log_event("SCOUT", "vl_filter_done", {
+                "total": len(urls), "passed": len(filtered),
+                "rejected": rejected, "checked": checked,
+            })
+            return filtered
+
+        except Exception as e:
+            logger.warning("[SCOUT] VL filter error — все URL пройдут: %s", e)
+            return urls
 
     # ------------------------------------------------------------------
     # Детекция трендов и запись рекомендации для STRATEGIST

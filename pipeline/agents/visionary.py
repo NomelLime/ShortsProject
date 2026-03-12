@@ -77,7 +77,7 @@ class Visionary(BaseAgent):
         ab_variant: Optional[str] = None,
     ) -> List[Dict]:
         """
-        Генерирует метаданные для видео через Ollama + YOLO.
+        Генерирует метаданные для видео через Ollama VL (модель видит реальные кадры).
 
         Перед генерацией читает рекомендации STRATEGIST и SCOUT из AgentMemory.
         При конфликте между ними активирует A/B режим: часть вариантов

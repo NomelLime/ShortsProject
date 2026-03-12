@@ -5,8 +5,8 @@
 Изменения:
   - Точки нарезки определяются ТОЛЬКО через AI (Ollama + визуальный анализ).
     silencedetect and scenedetect deleted.
-  - AI получает кадры видео + YOLO-детекции по каждому кадру (из metadata_variants),
-    что позволяет учитывать содержание при выборе точек нарезки.
+  - AI (VL-модель) получает реальные кадры видео и определяет точки нарезки
+    на основе визуального содержания: смена сцены, переходы, паузы.
   - При недоступности AI — равномерная нарезка каждые CLIP_MAX_LEN секунд.
 """
 
@@ -118,8 +118,6 @@ def slice_long_video(video_path: Path, clip_dir: Path,
     ai_cuts = generate_cut_points(
         video_path=video_path,
         duration=dur,
-        yolo_per_frame=metadata.get("yolo_per_frame", []),
-        num_frames=AI_NUM_FRAMES,
         silences=silences,
     )
     logger.info("   AI точки: %s", ", ".join(f"{c:.1f}" for c in ai_cuts) if ai_cuts else "нет → равномерно")
