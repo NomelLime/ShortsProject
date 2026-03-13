@@ -47,6 +47,7 @@ from pipeline.utils import human_sleep
 from pipeline.notifications import send_telegram_alert, check_and_handle_captcha
 from pipeline.ai import ollama_generate_with_timeout
 from pipeline.shared_gpu_lock import acquire_gpu_lock
+from pipeline.niche import detect_and_cache_niche
 
 logger = logging.getLogger(__name__)
 
@@ -389,18 +390,20 @@ def _random_scroll(page: Page, scrolls: int = None) -> None:
 def run_activity_vl(
     context: BrowserContext,
     platform: str,
-    account_cfg: Dict[str, Any],
+    account: Dict[str, Any],
 ) -> None:
     """
     VL-powered activity simulation. Drop-in replacement for run_activity().
 
-    account_cfg is the full account config dict from config.json.
-    Reads account_cfg["niche"] (or "topic" / "channel_topic") to steer
-    content selection. Defaults to "general content" if not set.
+    account — полный объект из get_all_accounts(): {name, dir, config, platforms}.
+    Читает account["config"]["niche"] для выбора контента.
+    Если ниша не задана — определяет автоматически через niche.py (B → C).
 
-    Add to account config.json to enable niche targeting:
+    Добавьте в config.json для явного задания ниши:
         "niche": "fitness and gym workouts"
     """
+    account_cfg = account["config"]
+
     urls = PLATFORM_URLS.get(platform, {})
     feed_url = (
         urls.get("shorts")
@@ -412,12 +415,9 @@ def run_activity_vl(
         logger.warning("[VL-Activity][%s] No feed_url configured — skipping", platform)
         return
 
-    account_niche = (
-        account_cfg.get("niche")
-        or account_cfg.get("topic")
-        or account_cfg.get("channel_topic")
-        or "general content"
-    )
+    # Авто-определение ниши если не задана (B → C → "general content")
+    # detect_and_cache_niche сохраняет результат в config.json["niche"]
+    account_niche = detect_and_cache_niche(account)
 
     duration = random.randint(ACTIVITY_DURATION_MIN_SEC, ACTIVITY_DURATION_MAX_SEC)
     logger.info(

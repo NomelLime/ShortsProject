@@ -4,8 +4,11 @@ browser.py – Инициализация браузера с поддержко
 """
 
 import logging
+import time
+import urllib.request
+import json as _json
 from pathlib import Path
-from typing import List
+from typing import List, Optional
 from rebrowser_playwright.sync_api import sync_playwright, BrowserContext, Playwright
 from playwright_stealth import Stealth
 
@@ -13,6 +16,67 @@ from pipeline import config as cfg
 from pipeline import utils
 
 logger = logging.getLogger(__name__)
+
+# Кэш GEO-проверок: "host:port" → "US" — не ходим в ip-api.com повторно
+_geo_cache: dict = {}
+
+
+def _get_proxy_country(proxy: dict, timeout: int = 8) -> Optional[str]:
+    """
+    Определяет страну прокси через ip-api.com.
+    Возвращает двухбуквенный countryCode (напр. "US") или None при ошибке.
+    Результат кэшируется в памяти на время сессии.
+    """
+    key = f"{proxy.get('host')}:{proxy.get('port')}"
+    if key in _geo_cache:
+        return _geo_cache[key]
+
+    host = proxy.get("host", "")
+    port = proxy.get("port", 8080)
+    username = proxy.get("username", "")
+    password = proxy.get("password", "")
+
+    proxy_url = f"http://{host}:{port}"
+    proxy_handler = urllib.request.ProxyHandler({"http": proxy_url, "https": proxy_url})
+
+    if username:
+        password_mgr = urllib.request.HTTPPasswordMgrWithDefaultRealm()
+        password_mgr.add_password(None, proxy_url, username, password)
+        auth_handler = urllib.request.ProxyBasicAuthHandler(password_mgr)
+        opener = urllib.request.build_opener(proxy_handler, auth_handler)
+    else:
+        opener = urllib.request.build_opener(proxy_handler)
+
+    try:
+        # Шаг 1: получаем внешний IP через прокси
+        req_ip = urllib.request.Request(
+            "http://httpbin.org/ip",
+            headers={"User-Agent": "Mozilla/5.0"},
+        )
+        with opener.open(req_ip, timeout=timeout) as resp:
+            ip_data = _json.loads(resp.read().decode())
+            external_ip = ip_data.get("origin", "").split(",")[0].strip()
+
+        if not external_ip:
+            return None
+
+        # Шаг 2: определяем страну по IP (ip-api.com — 1500 req/min, бесплатно)
+        geo_req = urllib.request.Request(
+            f"http://ip-api.com/json/{external_ip}?fields=countryCode",
+            headers={"User-Agent": "Mozilla/5.0"},
+        )
+        with urllib.request.urlopen(geo_req, timeout=timeout) as resp:
+            geo_data = _json.loads(resp.read().decode())
+            country = geo_data.get("countryCode", "").upper()
+
+        if country:
+            _geo_cache[key] = country
+            logger.debug("[proxy-geo] %s → IP %s → %s", key, external_ip, country)
+        return country or None
+
+    except Exception as e:
+        logger.debug("[proxy-geo] GEO-проверка не удалась для %s: %s", key, e)
+        return None
 
 
 def _build_proxy_config(proxy: dict) -> dict | None:
@@ -61,17 +125,37 @@ def resolve_working_proxy(account_cfg: dict) -> dict | None:
     if not candidates:
         return None  # прокси не настроен вообще
 
+    required_country = (account_cfg.get("country") or "").upper().strip()
+
     for proxy in candidates:
         label = f"{proxy.get('host')}:{proxy.get('port')}"
         logger.debug("[proxy] Проверяем %s...", label)
-        if utils.check_proxy_health(proxy):
-            logger.info("[proxy] Рабочий прокси: %s", label)
-            account_cfg["_active_proxy"] = proxy
-            return proxy
-        else:
+        if not utils.check_proxy_health(proxy):
             logger.warning("[proxy] Недоступен: %s — пробуем следующий...", label)
+            continue
 
-    logger.error("[proxy] Все прокси (%d) недоступны для аккаунта.", len(candidates))
+        # GEO-проверка: если для аккаунта задана страна — прокси должен совпадать
+        if required_country:
+            proxy_country = _get_proxy_country(proxy)
+            if proxy_country and proxy_country != required_country:
+                logger.warning(
+                    "[proxy] GEO-несоответствие: прокси %s → %s, аккаунт требует %s — пропускаем",
+                    label, proxy_country, required_country,
+                )
+                continue
+            if proxy_country:
+                logger.info("[proxy] GEO OK: %s → %s", label, proxy_country)
+            else:
+                logger.debug("[proxy] GEO не определён для %s — принимаем", label)
+
+        logger.info("[proxy] Рабочий прокси: %s", label)
+        account_cfg["_active_proxy"] = proxy
+        return proxy
+
+    logger.error(
+        "[proxy] Нет подходящего прокси для аккаунта (страна: %s, кандидатов: %d).",
+        required_country or "любая", len(candidates),
+    )
     return None
 
 

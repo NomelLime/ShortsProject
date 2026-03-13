@@ -136,7 +136,16 @@ def build_config() -> tuple[str, dict]:
     )
     print(f"  ✓ Выбрано: {', '.join(platforms)}")
 
-    # 3. Прокси
+    # 3. Страна аккаунта (используется для GEO-валидации прокси)
+    print()
+    country_raw = _ask("Страна аккаунта (двухбуквенный код ISO, напр: US, DE, GB)", default="").upper().strip()
+    country = country_raw if len(country_raw) == 2 and country_raw.isalpha() else ""
+    if country:
+        print(f"  ✓ Страна: {country}")
+    else:
+        print("  ✓ Страна не задана (GEO-проверка прокси отключена)")
+
+    # 4. Прокси
     print()
     proxy = _collect_proxy()
     if proxy:
@@ -144,7 +153,7 @@ def build_config() -> tuple[str, dict]:
     else:
         print("  ✓ Прокси не используется")
 
-    # 4. User-Agent (опционально)
+    # 5. User-Agent (опционально)
     print()
     custom_ua = _ask_bool("Задать кастомный User-Agent?", default=False)
     if custom_ua:
@@ -167,6 +176,8 @@ def build_config() -> tuple[str, dict]:
         "platforms": platforms,
         "user_agent": ua,
     }
+    if country:
+        cfg["country"] = country
     if proxy:
         cfg["proxy"] = proxy
 

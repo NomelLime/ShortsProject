@@ -188,6 +188,15 @@ ACTIVITY_SCHEDULER_ENABLED      = True
 ACTIVITY_SCHEDULER_INTERVAL_MIN = int(os.getenv("ACTIVITY_INTERVAL_MIN", "90"))   # раз в 90 мин на аккаунт
 ACTIVITY_SCHEDULER_JITTER_SEC   = int(os.getenv("ACTIVITY_JITTER_SEC",   "300"))  # ±5 мин разброс
 
+# Окно активности (местное время): job-ы не стартуют вне этого диапазона
+# Учитывает таймзону аккаунтов — платформы не засчитывают мёртвые ночные часы
+ACTIVITY_HOURS_START    = int(os.getenv("ACTIVITY_HOURS_START", "8"))   # с 08:00
+ACTIVITY_HOURS_END      = int(os.getenv("ACTIVITY_HOURS_END",   "23"))  # до 23:00
+
+# Максимум одновременных VL-сессий активности (ограничивает нагрузку на GPU)
+# При превышении — job переносится на +10 мин вместо блокировки потока
+ACTIVITY_VL_CONCURRENCY = int(os.getenv("ACTIVITY_VL_CONCURRENCY", "2"))
+
 # AI-расширение ключевых слов
 AI_KEYWORD_EXPANSION        = True   # расширять keywords через Ollama перед поиском
 AI_KEYWORD_EXPANSION_COUNT  = 5      # сколько новых запросов генерировать на 1 keyword

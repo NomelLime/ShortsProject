@@ -30,6 +30,7 @@ from __future__ import annotations
 import logging
 import random
 import threading
+from datetime import datetime
 from pathlib import Path
 from typing import Dict, List
 
@@ -38,6 +39,22 @@ from pipeline.browser import launch_browser, close_browser
 from pipeline.activity_vl import run_activity_vl
 
 logger = logging.getLogger(__name__)
+
+# Семафор: ограничивает число одновременных VL-сессий
+# При превышении — job переносится на +10 мин вместо блокировки потока
+_vl_semaphore = threading.Semaphore(config.ACTIVITY_VL_CONCURRENCY)
+
+# Задержка переноса при занятом GPU-семафоре (сек)
+_GPU_BUSY_RESCHEDULE_SEC = 600  # 10 мин
+
+
+def _in_activity_window() -> bool:
+    """
+    Проверяет, попадает ли текущее время в разрешённое окно активности.
+    Использует локальное время машины (аккаунты привязаны к той же ТЗ что и сервер).
+    """
+    hour = datetime.now().hour
+    return config.ACTIVITY_HOURS_START <= hour < config.ACTIVITY_HOURS_END
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -99,18 +116,46 @@ class _AccountActivityJob:
             self._timer.start()
 
     def _run(self) -> None:
-        acc_name  = self._account["name"]
-        platform  = self._platform
-        acc_cfg   = self._account["config"]
-        acc_dir   = self._account["dir"]
+        acc_name    = self._account["name"]
+        platform    = self._platform
+        acc_cfg     = self._account["config"]
+        acc_dir     = self._account["dir"]
         profile_dir = acc_dir / "browser_profile"
 
-        logger.info("[scheduler] Запуск активности: [%s][%s]", acc_name, platform)
+        # Проверка временно́го окна: не работаем ночью
+        if not _in_activity_window():
+            next_hour = config.ACTIVITY_HOURS_START
+            now = datetime.now()
+            # Задержка до начала следующего активного окна
+            minutes_to_window = ((next_hour - now.hour) % 24) * 60 - now.minute
+            delay = max(60, minutes_to_window * 60)
+            logger.info(
+                "[scheduler] [%s][%s] Вне окна активности (%02d:00–%02d:00) — "
+                "перенос на %.0f мин",
+                acc_name, platform,
+                config.ACTIVITY_HOURS_START, config.ACTIVITY_HOURS_END,
+                delay / 60,
+            )
+            self._schedule(delay)
+            return
 
+        # Проверка VL-семафора: не блокируем поток, переносим если все слоты заняты
+        acquired = _vl_semaphore.acquire(blocking=False)
+        if not acquired:
+            logger.info(
+                "[scheduler] [%s][%s] VL слоты заняты (%d конкурентных сессий) — "
+                "перенос на %d мин",
+                acc_name, platform,
+                config.ACTIVITY_VL_CONCURRENCY, _GPU_BUSY_RESCHEDULE_SEC // 60,
+            )
+            self._schedule(_GPU_BUSY_RESCHEDULE_SEC)
+            return
+
+        logger.info("[scheduler] Запуск активности: [%s][%s]", acc_name, platform)
         try:
             pw, context = launch_browser(acc_cfg, profile_dir)
             try:
-                run_activity_vl(context, platform, acc_cfg)
+                run_activity_vl(context, platform, self._account)
             finally:
                 close_browser(pw, context)
             logger.info("[scheduler] Активность завершена: [%s][%s]", acc_name, platform)
@@ -124,6 +169,8 @@ class _AccountActivityJob:
                 "[scheduler] Ошибка активности [%s][%s]: %s",
                 acc_name, platform, exc,
             )
+        finally:
+            _vl_semaphore.release()
 
         # Планируем следующий запуск
         next_delay = self._next_delay()
