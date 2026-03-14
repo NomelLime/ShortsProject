@@ -6,7 +6,7 @@ https://github.com/NomelLime/ShortsProject
 
 # ShortsProject — Status
 
-**Дата последнего обновления:** 13.03.2026
+**Дата последнего обновления:** 14.03.2026
 **Ветка:** `main`  
 **Репозиторий:** `NomelLime/ShortsProject` (private)
 
