@@ -35,7 +35,8 @@ def _load_tracking() -> Dict[str, Dict[str, bool]]:
         return {}
     try:
         return json.loads(config.UPLOAD_TRACKING_FILE.read_text(encoding="utf-8"))
-    except Exception:
+    except (json.JSONDecodeError, OSError) as e:
+        logger.warning("Не удалось загрузить upload_tracking.json: %s", e)
         return {}
 
 

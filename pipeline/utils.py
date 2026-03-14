@@ -162,7 +162,8 @@ def _load_bg_usage() -> Dict:
         return {}
     try:
         return json.loads(_BG_USAGE_FILE.read_text(encoding="utf-8"))
-    except Exception:
+    except (json.JSONDecodeError, OSError) as e:
+        logger.debug("bg_usage.json read error: %s", e)
         return {}
 
 
@@ -417,7 +418,8 @@ def load_json(path: Path) -> Optional[Dict]:
     """Загружает JSON из файла, возвращает None при ошибке."""
     try:
         return json.loads(path.read_text(encoding="utf-8"))
-    except Exception:
+    except (FileNotFoundError, json.JSONDecodeError, OSError) as e:
+        logger.debug("load_json error for %s: %s", path, e)
         return None
 
 
@@ -546,7 +548,8 @@ def load_hashes() -> List[str]:
     if HASH_DB.exists():
         try:
             return json.loads(HASH_DB.read_text(encoding="utf-8"))
-        except Exception:
+        except (json.JSONDecodeError, OSError) as e:
+            logger.debug("load_hashes error: %s", e)
             return []
     return []
 

@@ -49,12 +49,15 @@ def _vl_cache_get(key: str) -> Optional[Dict]:
             if not VL_CACHE_FILE.exists():
                 return None
             return json.loads(VL_CACHE_FILE.read_text(encoding="utf-8")).get(key)
-    except Exception:
+    except (FileNotFoundError, json.JSONDecodeError, OSError) as e:
+        logger.debug("VL cache read error: %s", e)
         return None
 
 
 def _vl_cache_set(key: str, value: Dict) -> None:
-    """Атомарно записывает запись в VL-кеш."""
+    """Атомарно записывает запись в VL-кеш (tempfile + os.replace)."""
+    import os
+    import tempfile
     try:
         with _VL_CACHE_LOCK:
             VL_CACHE_FILE.parent.mkdir(parents=True, exist_ok=True)
@@ -62,13 +65,23 @@ def _vl_cache_set(key: str, value: Dict) -> None:
             if VL_CACHE_FILE.exists():
                 try:
                     cache = json.loads(VL_CACHE_FILE.read_text(encoding="utf-8"))
-                except Exception:
+                except (json.JSONDecodeError, OSError):
                     pass
             cache[key] = value
-            VL_CACHE_FILE.write_text(
-                json.dumps(cache, ensure_ascii=False, indent=None),
-                encoding="utf-8",
+            # Атомарная запись: пишем во временный файл, затем os.replace
+            fd, tmp_path = tempfile.mkstemp(
+                dir=str(VL_CACHE_FILE.parent), suffix=".tmp"
             )
+            try:
+                with os.fdopen(fd, "w", encoding="utf-8") as tmp_f:
+                    json.dump(cache, tmp_f, ensure_ascii=False)
+                os.replace(tmp_path, str(VL_CACHE_FILE))
+            except Exception:
+                try:
+                    os.unlink(tmp_path)
+                except OSError:
+                    pass
+                raise
     except Exception as e:
         logger.warning("VL cache write error: %s", e)
 

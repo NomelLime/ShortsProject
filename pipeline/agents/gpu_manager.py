@@ -77,7 +77,7 @@ class GPUResourceManager:
         self._max       = max_concurrent
         self._semaphore = threading.Semaphore(max_concurrent)
         self._lock      = threading.Lock()
-        self._task_queue: queue.PriorityQueue = queue.PriorityQueue()
+        self._task_queue: queue.PriorityQueue = queue.PriorityQueue(maxsize=100)
         self._active: Dict[str, float] = {}   # consumer → start_time
         self._seq       = 0
         self._stats: Dict[str, Dict] = {}
