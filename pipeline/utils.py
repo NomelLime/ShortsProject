@@ -241,11 +241,8 @@ def check_proxy_health(proxy_cfg: dict, timeout: int = 10) -> bool:
     username = proxy_cfg.get("username", "")
     password = proxy_cfg.get("password", "")
 
-    if username:
-        proxy_url = f"http://{username}:{password}@{host}:{port}"
-    else:
-        proxy_url = f"http://{host}:{port}"
-
+    # URL без учётных данных — не встраиваем пароль в строку URL
+    proxy_url = f"http://{host}:{port}"
     proxy_handler = urllib.request.ProxyHandler({"http": proxy_url, "https": proxy_url})
 
     if username:
@@ -305,7 +302,7 @@ def get_all_accounts() -> List[Dict]:
     if not root.exists():
         return accounts
     for acc_dir in root.iterdir():
-        if acc_dir.is_dir():
+        if acc_dir.is_dir() and not acc_dir.is_symlink():
             cfg_path = acc_dir / "config.json"
             if cfg_path.exists():
                 acc_cfg = json.loads(cfg_path.read_text(encoding="utf-8"))
@@ -349,9 +346,15 @@ def get_uploads_today(acc_dir: Path, platform: Optional[str] = None) -> int:
     today = date.today().isoformat()
     if platform:
         # Per-platform ключ: "uploaded_today_youtube", "uploaded_today_tiktok" и т.д.
-        return data.get(f"uploaded_today_{platform}", {}).get(today, 0)
+        val = data.get(f"uploaded_today_{platform}")
+        if not isinstance(val, dict):
+            return 0
+        return val.get(today, 0)
     # Обратная совместимость — суммарно по всем платформам
-    return data.get("uploaded_today", {}).get(today, 0)
+    val = data.get("uploaded_today")
+    if not isinstance(val, dict):
+        return 0
+    return val.get(today, 0)
 
 
 def increment_upload_count(acc_dir: Path, platform: Optional[str] = None) -> None:

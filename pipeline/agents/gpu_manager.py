@@ -50,6 +50,9 @@ class GPUPriority:
     ENCODE    = 4   # ffmpeg (CPU+GPU)
 
 
+_GPU_TASK_MAX_RETRIES = 3   # максимум повторных попыток получить слот GPU
+
+
 @dataclass(order=True)
 class _GPUTask:
     """Задача в очереди GPU. Сортируется по приоритету."""
@@ -57,6 +60,7 @@ class _GPUTask:
     seq:       int = field(compare=False)   # порядок добавления (FIFO внутри приоритета)
     consumer:  str = field(compare=False)
     event:     threading.Event = field(compare=False, default_factory=threading.Event)
+    retries:   int = field(compare=False, default=0)
 
 
 class GPUResourceManager:
@@ -173,8 +177,17 @@ class GPUResourceManager:
             # Ждём свободного слота
             acquired = self._semaphore.acquire(timeout=300)
             if not acquired:
+                task.retries += 1
+                if task.retries >= _GPU_TASK_MAX_RETRIES:
+                    logger.error(
+                        "[GPUManager] Задача [%s] отменена после %d попыток — GPU не освобождается",
+                        task.consumer, task.retries,
+                    )
+                    # event остаётся неустановленным → consumer получит TimeoutError
+                    continue
                 logger.warning(
-                    "[GPUManager] Timeout ожидания слота для [%s]", task.consumer
+                    "[GPUManager] Timeout ожидания слота для [%s] (попытка %d/%d)",
+                    task.consumer, task.retries, _GPU_TASK_MAX_RETRIES,
                 )
                 # Возвращаем задачу в очередь
                 self._task_queue.put(task)

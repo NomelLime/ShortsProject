@@ -33,7 +33,8 @@ def _load_distributed_tracking() -> dict:
         return {}
     try:
         return json.loads(DISTRIBUTED_TRACKING_FILE.read_text(encoding="utf-8"))
-    except Exception:
+    except Exception as exc:
+        logger.warning("[distributor] Не удалось прочитать tracking файл, сбрасываем: %s", exc)
         return {}
 
 
@@ -62,8 +63,8 @@ def _get_active_platforms() -> set:
                 if isinstance(platforms, str):
                     platforms = [platforms]
                 active.update(platforms)
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.warning("[distributor] Не удалось прочитать конфиг аккаунта %s: %s", acc_dir.name, exc)
     return active or set(config.ALL_PLATFORMS)
 
 

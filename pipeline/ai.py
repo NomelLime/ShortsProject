@@ -95,11 +95,22 @@ def _try_start_ollama() -> None:
         logger.warning("Не удалось запустить Ollama: %s", exc)
 
 
+_check_ollama_cache: dict = {"result": None, "ts": 0.0}
+_CHECK_OLLAMA_TTL = 60.0   # повторная проверка не чаще раза в минуту
+_check_ollama_lock = threading.Lock()
+
+
 def check_ollama() -> bool:
     """
     Проверяет доступность Ollama и VL-модели.
+    Результат кешируется на 60 сек — защита от спама при параллельных агентах.
     При недоступности — пытается запустить автоматически (OLLAMA_AUTOSTART).
     """
+    with _check_ollama_lock:
+        now = time.monotonic()
+        if _check_ollama_cache["result"] is not None and (now - _check_ollama_cache["ts"]) < _CHECK_OLLAMA_TTL:
+            return _check_ollama_cache["result"]
+
     def _probe() -> bool:
         try:
             response = requests.get("http://localhost:11434/api/tags", timeout=5)
@@ -112,10 +123,15 @@ def check_ollama() -> bool:
         except Exception:
             return False
 
-    if _probe():
-        return True
-    _try_start_ollama()
-    return _probe()
+    result = _probe()
+    if not result:
+        _try_start_ollama()
+        result = _probe()
+
+    with _check_ollama_lock:
+        _check_ollama_cache["result"] = result
+        _check_ollama_cache["ts"]     = time.monotonic()
+    return result
 
 
 # ─────────────────────────────────────────────────────────────────────────────

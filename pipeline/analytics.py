@@ -63,7 +63,8 @@ def _load_analytics() -> Dict:
         return {}
     try:
         return json.loads(config.ANALYTICS_FILE.read_text(encoding="utf-8"))
-    except Exception:
+    except Exception as exc:
+        logger.warning("[analytics] Не удалось прочитать analytics.json, сбрасываем: %s", exc)
         return {}
 
 
