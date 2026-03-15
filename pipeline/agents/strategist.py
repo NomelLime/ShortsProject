@@ -69,6 +69,12 @@ class Strategist(BaseAgent):
             # 2. A/B анализ
             ab_results = self._analyse_ab()
 
+            # 2б. A/B тест миниатюр
+            thumb_results = self._analyse_thumbnails()
+
+            # 2в. Детектор серийного контента
+            self._detect_serial_candidates()
+
             # 3. Кандидаты на репост
             repost_count = self._process_reposts()
 
@@ -212,6 +218,38 @@ class Strategist(BaseAgent):
             lines.append("Расписание: нет данных")
 
         return "\n".join(lines)
+
+    def _detect_serial_candidates(self) -> None:
+        """Запускает детектор серийного контента и уведомляет при находках."""
+        try:
+            from pipeline.serial_detector import detect_serial_candidates
+            candidates = detect_serial_candidates()
+            if candidates:
+                top = candidates[:3]
+                top_str = ", ".join(
+                    f"«{c['title'][:25]}» (ER={c['engagement_rate']:.2f})"
+                    for c in top
+                )
+                self._send(f"📺 [STRATEGIST] Серийные кандидаты: {top_str}")
+                logger.info("[STRATEGIST] Serial candidates: %d видео", len(candidates))
+        except Exception as exc:
+            logger.warning("[STRATEGIST] Ошибка serial detector: %s", exc)
+
+    def _analyse_thumbnails(self) -> list:
+        """Сравнивает CTR thumbnail-вариантов и выбирает победителей."""
+        try:
+            from pipeline.agents.thumbnail_tester import compare_thumbnail_results
+            results = compare_thumbnail_results()
+            if results:
+                for r in results:
+                    self._send(
+                        f"🖼 [STRATEGIST] Thumbnail winner {r['stem']}: "
+                        f"вариант {r['winner']} ({r['reason']})"
+                    )
+            return results
+        except Exception as exc:
+            logger.warning("[STRATEGIST] Ошибка thumbnail A/B: %s", exc)
+            return []
 
     def _read_scout_data(self) -> str:
         """Читает рекомендацию SCOUT → STRATEGIST из AgentMemory."""

@@ -132,6 +132,10 @@ class Narrator(BaseAgent):
         """
         Синтезирует речь из текста.
 
+        Порядок приоритетов:
+          1. Voice Cloning (если VOICE_CLONE_ENABLED=True) → voice_cloner.clone_voice()
+          2. Kokoro ONNX (локальный TTS) — fallback
+
         Args:
             text:        текст для озвучки (до 500 символов оптимально)
             output_path: путь для сохранения .wav файла
@@ -141,6 +145,19 @@ class Narrator(BaseAgent):
         Returns:
             Path к .wav файлу или None при ошибке
         """
+        # ── 1. Попытка через Voice Cloning ───────────────────────────────
+        try:
+            from pipeline import config as cfg
+            if getattr(cfg, "VOICE_CLONE_ENABLED", False):
+                from pipeline.voice_cloner import clone_voice
+                result = clone_voice(text, Path(output_path), lang=lang, speed=speed)
+                if result is not None:
+                    return result
+                logger.info("[NARRATOR] Voice Cloning не дал результат — переключаемся на Kokoro")
+        except Exception as _vc_exc:
+            logger.warning("[NARRATOR] Voice Cloning ошибка: %s — переключаемся на Kokoro", _vc_exc)
+
+        # ── 2. Kokoro ONNX fallback ───────────────────────────────────────
         if not self._ready:
             self._init_model()
         if not self._ready:

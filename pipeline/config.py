@@ -359,3 +359,42 @@ TTS_TEMP_DIR       = BASE_DIR / "data" / "tts_temp"
 # ----------------------------------------------------------------------
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID   = os.getenv("TELEGRAM_CHAT_ID", "")
+
+# ----------------------------------------------------------------------
+# TrendScout — Агент мониторинга трендов (Этап 6)
+# ----------------------------------------------------------------------
+TREND_SCOUT_ENABLED    = os.getenv("TREND_SCOUT_ENABLED",  "1") == "1"
+TREND_SCOUT_INTERVAL_H = int(os.getenv("TREND_SCOUT_INTERVAL_H", "2"))   # часов
+TREND_SCOUT_THRESHOLD  = int(os.getenv("TREND_SCOUT_THRESHOLD",  "2"))   # min score
+TREND_SCOUT_TOP_N      = int(os.getenv("TREND_SCOUT_TOP_N",      "30"))  # топ N
+TREND_SCOUT_GEO        = os.getenv("TREND_SCOUT_GEO", "")                # "" = глобально
+TREND_SCOUT_SOURCES    = os.getenv("TREND_SCOUT_SOURCES", "google,yt,tiktok")
+
+# ----------------------------------------------------------------------
+# Субтитры + перевод (Этап 8)
+# ----------------------------------------------------------------------
+SUBTITLE_ENABLED       = os.getenv("SUBTITLE_ENABLED",    "0") == "1"
+SUBTITLE_LANGUAGES     = os.getenv("SUBTITLE_LANGUAGES",  "ru")          # ru,en,es,pt
+WHISPER_MODEL_SIZE     = os.getenv("WHISPER_MODEL_SIZE",  "base")        # tiny/base/small/medium/large
+SUBTITLE_STYLE         = os.getenv("SUBTITLE_STYLE",      "bottom_white") # bottom_white | top_yellow
+
+# ----------------------------------------------------------------------
+# Voice cloning — OpenVoice v2 (Этап 14)
+# ----------------------------------------------------------------------
+VOICE_CLONE_ENABLED    = os.getenv("VOICE_CLONE_ENABLED", "0") == "1"
+VOICE_CLONE_MODEL      = os.getenv("VOICE_CLONE_MODEL",   "openvoice")   # openvoice | rvc
+VOICE_CLONE_REF_AUDIO  = os.getenv("VOICE_CLONE_REF_AUDIO", "")          # путь к ref audio файлу
+
+# ----------------------------------------------------------------------
+# A/B тестирование миниатюр (Этап 7)
+# ----------------------------------------------------------------------
+THUMBNAIL_AB_ENABLED   = os.getenv("THUMBNAIL_AB_ENABLED",  "0") == "1"
+THUMBNAIL_AB_VARIANTS  = int(os.getenv("THUMBNAIL_AB_VARIANTS", "2"))    # 2 или 3
+
+# ----------------------------------------------------------------------
+# Серийный контент (Этап 15)
+# ----------------------------------------------------------------------
+SERIAL_ENABLED     = os.getenv("SERIAL_ENABLED",     "0") == "1"
+SERIAL_MIN_VIEWS   = int(os.getenv("SERIAL_MIN_VIEWS",   "500"))
+SERIAL_MIN_HISTORY = int(os.getenv("SERIAL_MIN_HISTORY", "30"))   # минимум видео для анализа
+SERIAL_TOP_PCT     = int(os.getenv("SERIAL_TOP_PCT",     "25"))   # топ N% по engagement_rate

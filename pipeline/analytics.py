@@ -106,14 +106,18 @@ def register_upload(
         "uploads": {},
     })
 
+    # sub_id для кросс-проектной аналитики с PreLend (формат: sp_{stem})
+    prelend_sub_id = f"sp_{video_stem}"
+
     entry["uploads"][platform] = {
-        "url":          video_url,
-        "uploaded_at":  datetime.now().isoformat(timespec="seconds"),
-        "collected_at": None,
-        "views":        None,
-        "likes":        None,
-        "comments":     None,
-        "ab_variant":   ab_variant,
+        "url":              video_url,
+        "uploaded_at":      datetime.now().isoformat(timespec="seconds"),
+        "collected_at":     None,
+        "views":            None,
+        "likes":            None,
+        "comments":         None,
+        "ab_variant":       ab_variant,
+        "prelend_sub_id":   prelend_sub_id,
     }
 
     _save_analytics(data)

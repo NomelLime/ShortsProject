@@ -61,6 +61,18 @@ class Scout(BaseAgent):
                 logger.info("[SCOUT] Override-ключевые слова: %s", keywords[:5])
             else:
                 keywords = load_keywords()
+                # Приоритизация через TrendScout: перемещаем трендовые слова вперёд
+                trend_scores: dict = self.memory.get("trend_scores") or {}
+                if trend_scores:
+                    threshold = getattr(config, "TREND_SCOUT_THRESHOLD", 2)
+                    trending = [k for k, v in trend_scores.items() if v >= threshold]
+                    # Добавляем трендовые ключевые слова которых нет в базовом списке
+                    kw_set = {k.lower() for k in keywords}
+                    extra = [t for t in trending if t.lower() not in kw_set]
+                    # Объединяем: trending first, остальные в конце
+                    keywords = extra[:10] + keywords
+                    if extra:
+                        logger.info("[SCOUT] TrendScout добавил %d трендовых ключевых слов", len(extra[:10]))
 
             if not keywords:
                 logger.warning("[SCOUT] Нет ключевых слов — пропускаю цикл")
