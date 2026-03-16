@@ -39,8 +39,6 @@ from __future__ import annotations
 
 import json
 import logging
-import random
-import time
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Dict, List, Optional
@@ -191,7 +189,14 @@ def _collect_youtube_stats(page: Page, video_url: str) -> Optional[Dict]:
 
     try:
         page.goto(studio_url, wait_until="domcontentloaded", timeout=30_000)
-        time.sleep(random.uniform(3, 5))
+        try:
+            page.wait_for_selector(
+                "#primary-metric, [class*='metric-value'], ytcp-ve",
+                timeout=9_000,
+            )
+        except Exception:
+            logger.warning("[analytics][youtube] Таймаут ожидания метрик на странице %s", studio_url)
+            return None
     except Exception as exc:
         logger.warning("[analytics][youtube] Не удалось открыть страницу: %s", exc)
         return None
@@ -245,7 +250,14 @@ def _collect_tiktok_stats(page: Page, video_url: str) -> Optional[Dict]:
     logger.info("[analytics][tiktok] Собираем статистику: %s", video_url)
     try:
         page.goto(video_url, wait_until="domcontentloaded", timeout=30_000)
-        time.sleep(random.uniform(3, 5))
+        try:
+            page.wait_for_selector(
+                "[data-e2e='video-views'], strong[data-e2e='browse-video-play-count'], [class*='video-count']",
+                timeout=9_000,
+            )
+        except Exception:
+            logger.warning("[analytics][tiktok] Таймаут ожидания метрик для %s", video_url)
+            return None
     except Exception as exc:
         logger.warning("[analytics][tiktok] Не удалось открыть страницу: %s", exc)
         return None
@@ -292,7 +304,14 @@ def _collect_instagram_stats(page: Page, video_url: str) -> Optional[Dict]:
 
     try:
         page.goto(video_url, wait_until="domcontentloaded", timeout=30_000)
-        time.sleep(random.uniform(3, 5))
+        try:
+            page.wait_for_selector(
+                "span[class*='view'], [aria-label*='view'], span:has-text('views')",
+                timeout=9_000,
+            )
+        except Exception:
+            logger.warning("[analytics][instagram] Таймаут ожидания метрик для %s", video_url)
+            return None
     except Exception as exc:
         logger.warning("[analytics][instagram] Не удалось открыть страницу: %s", exc)
         return None
@@ -447,8 +466,6 @@ def collect_pending_analytics(dry_run: bool = False) -> int:
                 if stats is None:
                     logger.warning("[analytics][%s] Не удалось собрать данные для %s", platform, stem)
                     continue
-
-                # Сохраняем в analytics.json
                 if stem in data and platform in data[stem].get("uploads", {}):
                     data[stem]["uploads"][platform].update({
                         "collected_at": datetime.now().isoformat(timespec="seconds"),
@@ -463,8 +480,6 @@ def collect_pending_analytics(dry_run: bool = False) -> int:
                         platform, stem,
                         stats.get("views"), stats.get("likes"), stats.get("comments"),
                     )
-
-                time.sleep(random.uniform(3, 7))
 
         finally:
             close_browser(pw, context)
