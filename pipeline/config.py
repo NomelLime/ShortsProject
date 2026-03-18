@@ -29,6 +29,7 @@ HASHTAGS_FILE = ASSETS_DIR / 'trending_hashtags.txt'
 KEYWORDS_FILE        = BASE_DIR / "data" / "keywords.txt"
 URLS_FILE            = BASE_DIR / "data" / "urls.txt"
 FAILED_URLS_FILE     = BASE_DIR / "data" / "failed_urls.txt"
+UPLOAD_RETRY_QUEUE   = BASE_DIR / "data" / "upload_retry_queue.json"
 DOWNLOAD_CHECKPOINT  = BASE_DIR / "data" / "download_checkpoint.json"   # чекпоинт скачивания
 DAILY_LIMIT_FILE     = BASE_DIR / "data" / "daily_limit.json"
 UPLOAD_TRACKING_FILE  = BASE_DIR / "data" / "upload_tracking.json"

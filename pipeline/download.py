@@ -285,6 +285,68 @@ def _print_summary(stats: DownloadStats) -> None:
     log.info("═════════════")
 
 
+def retry_failed(
+    max_retries: int = 3,
+    proxy: Optional[str] = None,
+) -> DownloadStats:
+    """
+    Повторно скачивает URLs из FAILED_URLS_FILE с экспоненциальным backoff.
+
+    После успешного скачивания URL удаляется из файла.
+    Если файл пуст после retry — удаляется.
+    Возвращает статистику попыток.
+    """
+    if not cfg.FAILED_URLS_FILE.exists():
+        log.info("[retry] Нет файла failed URLs (%s) — нечего ретраить", cfg.FAILED_URLS_FILE)
+        return DownloadStats()
+
+    failed_urls = [
+        u.strip() for u in cfg.FAILED_URLS_FILE.read_text(encoding="utf-8").splitlines()
+        if u.strip()
+    ]
+    if not failed_urls:
+        cfg.FAILED_URLS_FILE.unlink(missing_ok=True)
+        return DownloadStats()
+
+    log.info("[retry] Ретрай %d URL(s) из %s", len(failed_urls), cfg.FAILED_URLS_FILE)
+    stats      = DownloadStats()
+    still_failed: list[str] = []
+
+    for url in failed_urls:
+        success = False
+        for attempt in range(1, max_retries + 1):
+            if attempt > 1:
+                backoff = min(2 ** attempt, 60)   # 2, 4, 8 … max 60 сек
+                log.info("[retry] Ожидание %ds перед попыткой %d/%d: %s",
+                         backoff, attempt, max_retries, url[:80])
+                import time as _time
+                _time.sleep(backoff)
+
+            result = download_single(url, proxy, checkpoint=None)
+            stats.record(result)
+
+            if result.status is DownloadStatus.OK:
+                log.info("[retry] ✅ Успешно (попытка %d): %s", attempt, url[:80])
+                success = True
+                break
+            log.warning("[retry] ❌ Попытка %d/%d failed: %s — %s",
+                        attempt, max_retries, url[:80], result.error or "")
+
+        if not success:
+            still_failed.append(url)
+
+    # Перезаписываем файл — только оставшиеся неудачи
+    if still_failed:
+        cfg.FAILED_URLS_FILE.write_text("\n".join(still_failed) + "\n", encoding="utf-8")
+        log.info("[retry] Всё ещё не скачано: %d URL(s)", len(still_failed))
+    else:
+        cfg.FAILED_URLS_FILE.unlink(missing_ok=True)
+        log.info("[retry] Все URL успешно скачаны — файл удалён")
+
+    log.info("[retry] Итог: %d/%d восстановлено", stats.ok, len(failed_urls))
+    return stats
+
+
 def main() -> None:
     workers = int(os.environ.get("DOWNLOAD_WORKERS", cfg.MAX_WORKERS))
     proxy   = os.environ.get("PROXY") or None
