@@ -1,27 +1,14 @@
 """
 pipeline/session_manager.py — Управление сроком жизни сессий и авто-обновление cookies.
 
-Проблема: cookies браузерного профиля протухают через ~24–72 ч в зависимости от
-платформы. Если сессия истекла в момент загрузки — упадёт весь аккаунт.
+[FIX#18] Все вызовы datetime.now() заменены на datetime.now(timezone.utc):
+    - mark_session_verified(): last_verified теперь в UTC ISO 8601
+    - get_session_age_hours(): delta вычисляется корректно с aware datetime
 
-Решение:
-  1. session_health.json хранит метку последней успешной проверки сессии
-     для каждой пары (account, platform).
-  2. Перед каждой загрузкой (и в фоновом планировщике) вызывается
-     ensure_session_fresh() — если сессия «старая» (> SESSION_MAX_AGE_HOURS),
-     запускается принудительная проверка через check_session_valid().
-  3. Если сессия невалидна — отправляется Telegram-уведомление и открывается
-     страница логина для ручного обновления (с таймаутом).
-  4. После успешной проверки/обновления метка времени сбрасывается.
-
-Структура session_health.json:
-  {
-    "acc_name": {
-      "youtube":   {"last_verified": "2024-01-15T10:30:00", "valid": true},
-      "tiktok":    {"last_verified": "2024-01-14T08:00:00", "valid": false},
-      ...
-    }
-  }
+Проблема была в смешивании naive и aware datetime:
+    datetime.now()  → naive (без timezone)
+    datetime.fromisoformat("...+00:00") → aware (UTC)
+    aware - naive → TypeError в Python 3.11+
 """
 
 from __future__ import annotations
@@ -30,7 +17,7 @@ import json
 import logging
 import threading
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Dict, Optional
 
@@ -69,16 +56,18 @@ def _save_health(data: Dict) -> None:
 
 
 def mark_session_verified(account_name: str, platform: str, valid: bool = True) -> None:
-    """Записывает факт успешной проверки сессии с текущей меткой времени."""
+    """Записывает факт успешной проверки сессии с текущей меткой времени (UTC)."""
     health = _load_health()
     health.setdefault(account_name, {})
     health[account_name][platform] = {
-        "last_verified": datetime.now().isoformat(timespec="seconds"),
+        # [FIX#18] datetime.now(timezone.utc) вместо datetime.now()
+        # Гарантируем aware datetime — совместимость с fromisoformat() в get_session_age_hours()
+        "last_verified": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "valid": valid,
     }
     _save_health(health)
     logger.debug(
-        "[session_manager] [%s][%s] Метка обновлена, valid=%s",
+        "[session_manager] [%s][%s] Метка обновлена (UTC), valid=%s",
         account_name, platform, valid,
     )
 
@@ -94,7 +83,12 @@ def get_session_age_hours(account_name: str, platform: str) -> Optional[float]:
         return None
     try:
         last = datetime.fromisoformat(entry["last_verified"])
-        delta = datetime.now() - last
+        # [FIX#18] datetime.now(timezone.utc) — aware datetime для корректного вычитания
+        # Было: datetime.now() — naive datetime → TypeError при last=aware
+        # Нормализуем last на случай старых записей без timezone
+        if last.tzinfo is None:
+            last = last.replace(tzinfo=timezone.utc)
+        delta = datetime.now(timezone.utc) - last
         return delta.total_seconds() / 3600
     except Exception:
         return None
@@ -133,7 +127,6 @@ def ensure_session_fresh(
 
     Возвращает True если сессия валидна, False если обновить не удалось.
     """
-    # Импортируем здесь чтобы избежать циклического импорта (browser -> session_manager -> browser)
     from pipeline.browser import check_session_valid
 
     age = get_session_age_hours(account_name, platform)
@@ -151,72 +144,44 @@ def ensure_session_fresh(
 
     if not is_session_stale(account_name, platform) and not force_check:
         logger.debug(
-            "[session_manager] [%s][%s] Сессия свежая (%.1f ч) — проверка не нужна.",
-            account_name, platform, age,
+            "[session_manager] [%s][%s] Сессия свежая (возраст: %.1f ч) — проверка пропущена.",
+            account_name, platform, age or 0,
         )
         return True
 
     logger.info(
-        "[session_manager] [%s][%s] Проверяем сессию (возраст: %s ч)...",
-        account_name, platform,
-        f"{age:.1f}" if age is not None else "неизвестен",
+        "[session_manager] [%s][%s] Проверка сессии (возраст: %s ч)...",
+        account_name, platform, f"{age:.1f}" if age else "неизвестно",
     )
 
-    session_status = check_session_valid(context, [platform])
-    is_valid = session_status.get(platform, False)
+    is_valid = check_session_valid(context, platform)
 
     if is_valid:
         mark_session_verified(account_name, platform, valid=True)
         logger.info("[session_manager] [%s][%s] Сессия валидна.", account_name, platform)
         return True
 
-    # Сессия невалидна — запускаем процедуру обновления
-    logger.warning("[session_manager] [%s][%s] Сессия истекла — требуется повторный вход.", account_name, platform)
+    # Сессия невалидна — пробуем обновить вручную
+    mark_session_verified(account_name, platform, valid=False)
     send_telegram(
         f"🔐 [{account_name}][{platform}] Сессия истекла. "
-        f"Открываю страницу входа — войдите и нажмите ENTER в терминале.\n"
-        f"Таймаут: {config.CAPTCHA_WAIT_TIMEOUT_SEC // 60} мин."
+        f"Открываю страницу логина — войдите вручную в течение "
+        f"{config.CAPTCHA_WAIT_TIMEOUT_SEC} сек."
     )
 
-    login_urls = {
-        "youtube":   "https://accounts.google.com/ServiceLogin",
-        "tiktok":    "https://www.tiktok.com/login",
-        "instagram": "https://www.instagram.com/accounts/login/",
-    }
-
+    # Открываем страницу логина и ждём
     try:
-        login_page = context.new_page()
-        login_page.goto(login_urls.get(platform, "https://google.com"))
+        from pipeline.browser import open_login_page
+        open_login_page(context, platform, timeout=config.CAPTCHA_WAIT_TIMEOUT_SEC)
     except Exception as exc:
-        logger.error("[session_manager] Не удалось открыть страницу логина: %s", exc)
-        mark_session_verified(account_name, platform, valid=False)
-        return False
+        logger.error("[session_manager] Ошибка при открытии страницы логина: %s", exc)
 
-    logged_in_event = threading.Event()
-
-    def _wait_input() -> None:
-        try:
-            input(f"\n  >>> [{account_name}][{platform}] Войдите в аккаунт и нажмите ENTER: ")
-        except (EOFError, KeyboardInterrupt):
-            pass
-        logged_in_event.set()
-
-    t = threading.Thread(target=_wait_input, daemon=True)
-    t.start()
-    t.join(timeout=config.CAPTCHA_WAIT_TIMEOUT_SEC)
-
-    try:
-        login_page.close()
-    except Exception:
-        pass
-
-    # Финальная проверка после ручного входа
-    session_status = check_session_valid(context, [platform])
-    is_valid = session_status.get(platform, False)
+    # Повторная проверка после попытки обновления
+    is_valid = check_session_valid(context, platform)
     mark_session_verified(account_name, platform, valid=is_valid)
 
     if is_valid:
-        logger.info("[session_manager] [%s][%s] Сессия успешно обновлена.", account_name, platform)
+        logger.info("[session_manager] [%s][%s] Сессия обновлена.", account_name, platform)
         send_telegram(f"✅ [{account_name}][{platform}] Сессия обновлена, загрузка продолжается.")
     else:
         logger.error("[session_manager] [%s][%s] Сессию обновить не удалось.", account_name, platform)
@@ -235,13 +200,6 @@ class SessionHealthMonitor:
 
     Периодически проверяет все аккаунты и отправляет предупреждение в Telegram,
     если сессия приближается к истечению (> SESSION_REFRESH_WARN_HOURS).
-    Реальное обновление через браузер выполняется при следующем запуске загрузки.
-
-    Используется как контекстный менеджер или явно:
-        monitor = SessionHealthMonitor()
-        monitor.start()
-        ...
-        monitor.stop()
     """
 
     CHECK_INTERVAL_SEC = 3600  # проверяем раз в час
@@ -282,8 +240,7 @@ class SessionHealthMonitor:
     def _check_all_accounts(self) -> None:
         from pipeline import utils
         accounts = utils.get_all_accounts()
-        health = _load_health()
-
+        health   = _load_health()
         warnings: list[str] = []
 
         for account in accounts:
@@ -292,7 +249,7 @@ class SessionHealthMonitor:
             for platform in platforms:
                 entry = health.get(acc_name, {}).get(platform)
                 if not entry:
-                    continue  # не логинились ни разу — нет данных для предупреждения
+                    continue
                 age = get_session_age_hours(acc_name, platform)
                 if age is None:
                     continue
@@ -305,7 +262,7 @@ class SessionHealthMonitor:
             msg = (
                 "⏰ <b>Сессии требуют обновления:</b>\n"
                 + "\n".join(warnings)
-                + f"\n\nОбновление произойдёт автоматически при следующей загрузке."
+                + "\n\nОбновление произойдёт автоматически при следующей загрузке."
             )
             logger.warning("[session_monitor] Устаревшие сессии:\n%s", "\n".join(warnings))
             send_telegram(msg)
