@@ -3,6 +3,7 @@ import concurrent.futures
 import hashlib
 import json
 import logging
+from pipeline import config
 import re
 import subprocess
 import threading
@@ -241,10 +242,27 @@ def generate_video_metadata(
         if trending_hashtags:
             hashtag_hint = f"Контекст и ключевые темы: {', '.join(trending_hashtags[:10])}\n"
 
+        # Whisper-транскрипция аудио (ФИЧА 2) — улучшает релевантность метаданных
+        transcript_hint = ""
+        if config.META_WHISPER_ENABLED:
+            try:
+                from pipeline.transcript import transcribe_for_metadata
+                transcript = transcribe_for_metadata(
+                    video_path,
+                    model_size=config.META_WHISPER_MODEL,
+                    max_duration_sec=config.META_WHISPER_MAX_SEC,
+                    language=config.META_WHISPER_LANGUAGE,
+                )
+                if transcript:
+                    transcript_hint = f"Транскрипт речи из видео: \"{transcript}\"\n"
+            except Exception as _te:
+                logger.warning("Транскрипция для meta не удалась: %s", _te)
+
         prompt = (
             f"Ты анализируешь вертикальное короткое видео (YouTube Shorts / TikTok / Reels).\n"
             f"Тебе показаны {len(frames)} равномерно распределённых кадров из видео.\n"
             f"{hashtag_hint}"
+            f"{transcript_hint}"
             f"Создай {num_variants} варианта метаданных для вирального Shorts.\n\n"
             "Требования к hook_text: интрига, вопрос или неожиданный факт — 3–7 слов.\n"
             "Требования к title: цепляет с первых слов, без 'смотри как' и 'это видео'.\n\n"
