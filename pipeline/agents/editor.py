@@ -225,6 +225,15 @@ class Editor(BaseAgent):
         # 2. Единый GPU:LLM блок — фон + метаданные (было два отдельных захвата)
         bg_path, meta_variants = self._get_bg_and_metadata(video_path)
 
+        # 2а. Инжектируем visual_filter из account config.json в каждый вариант мета.
+        # Это позволяет Orchestrator Zone 2 менять фильтр через config.json аккаунта.
+        # Если meta уже содержит visual_filter (из LLM) — не перезаписываем.
+        _acc_visual_filter = self._get_account_visual_filter(video_path)
+        if _acc_visual_filter and _acc_visual_filter != "none":
+            for _mv in meta_variants:
+                if not _mv.get("visual_filter"):
+                    _mv["visual_filter"] = _acc_visual_filter
+
         # 3. TTS синтез — один файл на видео (озвучиваем hook_text)
         tts_paths = self._generate_tts_batch(
             clips=clips,
@@ -765,6 +774,55 @@ class Editor(BaseAgent):
             return "default"
         words = [w.lower() for w in topic.split() if len(w) > 3]
         return words[0] if words else "default"
+
+    def _get_account_visual_filter(self, video_path: Path) -> str:
+        """
+        Читает visual_filter из config.json аккаунта, которому принадлежит видео.
+
+        Orchestrator Zone 2 записывает фильтр в account config.json.
+        Editor читает его здесь и передаёт в meta_variants для postprocessor.
+
+        Логика поиска аккаунта: video_path находится в PREPARING_DIR,
+        откуда его взял CURATOR из директории аккаунта. Ищем аккаунт,
+        чей output/prepared-контент соответствует имени файла.
+
+        Returns:
+            Имя фильтра (str) или "" если не найден / не задан.
+        """
+        from pipeline import config as _cfg
+        import json as _json
+
+        try:
+            accounts_root = _cfg.SP_ACCOUNTS_DIR
+            if not accounts_root.exists():
+                return ""
+
+            # Ищем среди всех аккаунтов тот, у кого задан visual_filter
+            # Если аккаунт один — берём его. Если несколько — пытаемся сопоставить по пути.
+            matching_filter = ""
+            for acc_dir in sorted(accounts_root.iterdir()):
+                if not acc_dir.is_dir():
+                    continue
+                cfg_path = acc_dir / "config.json"
+                if not cfg_path.exists():
+                    continue
+                try:
+                    acc_cfg = _json.loads(cfg_path.read_text(encoding="utf-8"))
+                    vf = acc_cfg.get("visual_filter", "")
+                    if vf and vf != "none":
+                        # Если видео из директории этого аккаунта — точное совпадение
+                        if str(video_path).startswith(str(acc_dir)):
+                            return vf
+                        # Иначе запоминаем как кандидата
+                        matching_filter = vf
+                except Exception:
+                    continue
+
+            return matching_filter
+
+        except Exception as exc:
+            logger.debug("[EDITOR] _get_account_visual_filter ошибка: %s", exc)
+            return ""
 
     def _pick_banner(self) -> Optional[Path]:
         """Случайный баннер из assets/banners/."""
