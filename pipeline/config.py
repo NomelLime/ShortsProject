@@ -399,3 +399,40 @@ SERIAL_ENABLED     = os.getenv("SERIAL_ENABLED",     "0") == "1"
 SERIAL_MIN_VIEWS   = int(os.getenv("SERIAL_MIN_VIEWS",   "500"))
 SERIAL_MIN_HISTORY = int(os.getenv("SERIAL_MIN_HISTORY", "30"))   # минимум видео для анализа
 SERIAL_TOP_PCT     = int(os.getenv("SERIAL_TOP_PCT",     "25"))   # топ N% по engagement_rate
+
+# ----------------------------------------------------------------------
+# Размытый фон для вертикального формата (Сессия 11 — ФИЧА 1)
+# Если нет фонового видео (bg_path=None) — заполнять размытым видео вместо чёрных полос.
+# Порядок приоритетов: bg_path (видео-фон) > BLURRED_BG > чёрные полосы
+# ----------------------------------------------------------------------
+BLURRED_BG_ENABLED  = os.getenv("BLURRED_BG_ENABLED", "true").lower() == "true"
+BLURRED_BG_SIGMA    = int(os.getenv("BLURRED_BG_SIGMA", "40"))      # сила размытия (boxblur)
+BLURRED_BG_DARKEN   = float(os.getenv("BLURRED_BG_DARKEN", "0.6"))  # затемнение 0.0–1.0 (1.0 = без затемнения)
+
+# ----------------------------------------------------------------------
+# Библиотека видеофильтров (Сессия 11 — ФИЧА 3)
+# Визуальный фильтр применяется после масштабирования, перед баннером.
+# Значение "none" = без фильтра. Список: см. pipeline/video_filters.py
+# ----------------------------------------------------------------------
+VIDEO_FILTER_ENABLED = os.getenv("VIDEO_FILTER_ENABLED", "false").lower() == "true"
+VIDEO_FILTER_DEFAULT = os.getenv("VIDEO_FILTER_DEFAULT", "none")   # фильтр по умолчанию
+VIDEO_FILTER_RANDOM  = os.getenv("VIDEO_FILTER_RANDOM", "false").lower() == "true"  # случайный для каждого видео
+
+# ----------------------------------------------------------------------
+# Hook-зум в первые N секунд (Сессия 11 — ФИЧА 5)
+# Плавное Ken Burns zoom-in в начале клипа для повышения retention.
+# ----------------------------------------------------------------------
+HOOK_ZOOM_ENABLED   = os.getenv("HOOK_ZOOM_ENABLED", "false").lower() == "true"
+HOOK_ZOOM_DURATION  = float(os.getenv("HOOK_ZOOM_DURATION", "2.0"))   # секунды
+HOOK_ZOOM_START     = float(os.getenv("HOOK_ZOOM_START", "1.0"))       # начальный зум (1.0 = нет)
+HOOK_ZOOM_END       = float(os.getenv("HOOK_ZOOM_END", "1.15"))        # конечный зум (1.15 = +15%)
+
+# ----------------------------------------------------------------------
+# Whisper-транскрипция для AI-метаданных (Сессия 11 — ФИЧА 2)
+# Транскрипт речи из видео включается в LLM-промпт → лучший title/tags.
+# Использует faster-whisper (уже в requirements.txt для subtitler.py).
+# ----------------------------------------------------------------------
+META_WHISPER_ENABLED  = os.getenv("META_WHISPER_ENABLED", "false").lower() == "true"
+META_WHISPER_MODEL    = os.getenv("META_WHISPER_MODEL", "base")   # tiny/base/small/medium
+META_WHISPER_MAX_SEC  = int(os.getenv("META_WHISPER_MAX_SEC", "120"))  # макс. длина для транскрипции
+META_WHISPER_LANGUAGE = os.getenv("META_WHISPER_LANGUAGE", "")    # "" = автодетект
