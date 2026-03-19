@@ -25,6 +25,9 @@ from pipeline.config import (
     LOOP_PROMPT_DURATION,
     OVERLAY_DEFAULT_DURATION, OVERLAY_POSITION,
     TTS_VOLUME, TTS_VOICE_OVER_MIX,
+    BLURRED_BG_ENABLED, BLURRED_BG_SIGMA, BLURRED_BG_DARKEN,
+    VIDEO_FILTER_ENABLED, VIDEO_FILTER_DEFAULT, VIDEO_FILTER_RANDOM,
+    HOOK_ZOOM_ENABLED, HOOK_ZOOM_DURATION, HOOK_ZOOM_START, HOOK_ZOOM_END,
 )
 from pipeline.utils import probe_video
 
@@ -130,8 +133,16 @@ def _build_filter_complex(
         )
         overlay_x = "0"
         overlay_y = "0"
+        _portrait_shape = True  # маркер для blurred_bg
 
     # ── Фон ─────────────────────────────────────────────────────────────────
+    # Приоритет: bg_path (видео-фон) > BLURRED_BG_ENABLED (размытие) > чёрные полосы
+    _use_blurred = (
+        not has_bg
+        and BLURRED_BG_ENABLED
+        and locals().get("_portrait_shape", False)  # только portrait_center
+    )
+
     if has_bg:
         filters.append(
             f"[{bg_idx}:v]scale={OUTPUT_W}:{OUTPUT_H}:force_original_aspect_ratio=increase,"
@@ -140,11 +151,59 @@ def _build_filter_complex(
         filters.append(
             f"[bg][vmask]overlay={overlay_x}:{overlay_y}:format=auto[vbase]"
         )
+    elif _use_blurred:
+        # Размытый фон: split источника → fg (масштабируется внутрь) + bg (размытый)
+        # eq brightness: 0.0 = без изменений, отрицательное = темнее
+        darken_adj = BLURRED_BG_DARKEN - 1.0  # 0.6 → -0.4
+        filters.append(
+            f"[0:v]split[_fg_src][_bg_src];"
+            f"[_bg_src]scale={OUTPUT_W}:{OUTPUT_H}:force_original_aspect_ratio=increase,"
+            f"crop={OUTPUT_W}:{OUTPUT_H},"
+            f"boxblur={BLURRED_BG_SIGMA}:{BLURRED_BG_SIGMA},"
+            f"eq=brightness={darken_adj:.2f},setsar=1[bg_blur];"
+            f"[_fg_src]scale={OUTPUT_W}:{video_area_h}:force_original_aspect_ratio=decrease,"
+            f"format=yuva420p[fg_for_blur]"
+        )
+        filters.append(
+            f"[bg_blur][fg_for_blur]overlay=(W-w)/2:(H-h)/2:format=auto[vbase]"
+        )
     else:
         filters.append(f"color=black:{OUTPUT_W}x{OUTPUT_H}:r={OUTPUT_FPS}[bg_black]")
         filters.append(f"[bg_black][vmask]overlay={overlay_x}:{overlay_y}:format=auto[vbase]")
 
     current = "[vbase]"
+
+    # ── Визуальный фильтр (ФИЧА 3) ───────────────────────────────────────────
+    # Порядок: после фона, перед баннером/текстом.
+    # Фильтр берётся из meta["visual_filter"], затем из VIDEO_FILTER_DEFAULT.
+    if VIDEO_FILTER_ENABLED or meta.get("visual_filter"):
+        from pipeline.video_filters import get_filter, get_random_filter
+        filter_name = meta.get("visual_filter") or VIDEO_FILTER_DEFAULT
+        if VIDEO_FILTER_RANDOM and (not filter_name or filter_name == "none"):
+            filter_name = get_random_filter()
+        filter_str = get_filter(filter_name)
+        if filter_str:
+            filters.append(f"{current}{filter_str}[vfiltered]")
+            current = "[vfiltered]"
+
+    # ── Hook-zoom в первые N секунд (ФИЧА 5) ─────────────────────────────────
+    # Ken Burns zoom-in: от HOOK_ZOOM_START до HOOK_ZOOM_END за HOOK_ZOOM_DURATION сек.
+    # Не применяется к коротким видео (< HOOK_ZOOM_DURATION * 2).
+    if HOOK_ZOOM_ENABLED and duration > HOOK_ZOOM_DURATION * 2:
+        zoom_frames = int(HOOK_ZOOM_DURATION * OUTPUT_FPS)
+        z_start = HOOK_ZOOM_START
+        z_end   = HOOK_ZOOM_END
+        zoom_expr = (
+            f"if(lt(on,{zoom_frames}),"
+            f"{z_start:.3f}+({z_end:.3f}-{z_start:.3f})*on/{zoom_frames},"
+            f"{z_end:.3f})"
+        )
+        filters.append(
+            f"{current}zoompan=z='{zoom_expr}'"
+            f":x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)'"
+            f":d=1:s={OUTPUT_W}x{OUTPUT_H}:fps={OUTPUT_FPS}[vzoomed]"
+        )
+        current = "[vzoomed]"
 
     # ── Баннер ───────────────────────────────────────────────────────────────
     if has_banner and banner_h_px > 0:
