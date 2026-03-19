@@ -671,3 +671,46 @@ META_WHISPER_ENABLED=false
 
 - **Тесты activity_vl**: `_sanitize_comment`, `_validate_vl_result` — ✅ добавлены в сессии Code Review v3
 - **Тесты новых модулей**: `niche.py`, `serial_detector.py`, `scheduler.py` — написать при следующем рефакторинге
+
+---
+
+### Сессия 12 (19.03.2026) — Антидетект: fingerprint, платформенные стратегии, GEO
+
+**Новые файлы:**
+
+| Файл | Описание |
+|------|----------|
+| `pipeline/fingerprint/__init__.py` | Пакет. `ensure_fingerprint`, `generate_fingerprint`, `get_geo_params` |
+| `pipeline/fingerprint/geo.py` | GEO-справочник: 55+ стран → timezone/locale/languages |
+| `pipeline/fingerprint/devices.py` | Банк устройств: 16 мобильных + 10 десктопных экранов |
+| `pipeline/fingerprint/generator.py` | Генератор fingerprint: seed → воспроизводимый профиль. `ensure_fingerprint()` — ленивая инициализация per-platform |
+| `pipeline/fingerprint/injector.py` | JS-инъекции: navigator, screen, Canvas noise, WebGL, AudioContext, Fonts |
+| `pipeline/stealth/canvas_noise.js` | Canvas toDataURL/toBlob/getImageData noise (mulberry32 PRNG, seed из fp) |
+| `pipeline/contexts/base.py` | `BasePlatformContext` — абстрактный интерфейс |
+| `pipeline/contexts/youtube.py` | YouTube: десктоп, Studio-оптимизированный |
+| `pipeline/contexts/tiktok.py` | TikTok: мобильный + touch events + Sensor API stubs |
+| `pipeline/contexts/instagram.py` | Instagram: мобильный, Reels-приоритет |
+| `tests/test_fingerprint.py` | 18 тестов: поля, мобиль/десктоп, GEO, seed, идемпотентность |
+| `tests/test_geo.py` | 9 тестов: все страны, дефолт, case-insensitive, copy |
+| `tests/test_contexts.py` | 18 тестов: is_mobile, has_touch, WebGL пулы, viewport |
+
+**Изменения:**
+
+| Файл | Изменение |
+|------|-----------|
+| `pipeline/browser.py` | Рефакторинг: диспетчер → платформенная стратегия. `launch_browser(acc_cfg, profile_dir, platform="")` — обратно совместимо |
+| `pipeline/uploader.py` | `launch_browser(..., platform=platform)` |
+| `pipeline/analytics.py` | `launch_browser(..., platform=platform)` |
+| `pipeline/agents/guardian.py` | `_fingerprint_check()`: GEO-согласованность timezone раз в час |
+
+**Принцип работы:**
+```
+1. launch_browser(acc_cfg, profile_dir, platform="tiktok")
+2.   → ensure_fingerprint(acc_cfg, "tiktok", country="BR")
+3.   → TikTokContext.build_launch_kwargs(fp) → {is_mobile=True, has_touch=True, ...}
+4.   → TikTokContext.post_launch() → stealth + injector.apply_fingerprint()
+5.   → JS-инъекции: Canvas noise (seed=fp_seed), WebGL Adreno 740, ...
+6.   → Сохраняем fp в config.json (per-platform, per-account)
+```
+
+**Статус тестов:** `pytest tests/test_fingerprint.py tests/test_geo.py tests/test_contexts.py` → **45/45** ✅
