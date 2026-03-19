@@ -438,7 +438,7 @@ def collect_pending_analytics(dry_run: bool = False) -> int:
 
         profile_dir = account["dir"] / "browser_profile"
         try:
-            pw, context = launch_browser(account["config"], profile_dir)
+            pw, context = launch_browser(account["config"], profile_dir, platform=platform)
         except RuntimeError as exc:
             logger.error("[analytics][%s] Прокси недоступен: %s", platform, exc)
             continue

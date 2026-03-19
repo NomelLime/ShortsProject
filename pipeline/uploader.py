@@ -493,7 +493,7 @@ def upload_all(dry_run: bool = False) -> List[Dict]:
 
             profile_dir = acc_dir / "browser_profile"
             try:
-                pw, context = launch_browser(acc_cfg, profile_dir)
+                pw, context = launch_browser(acc_cfg, profile_dir, platform=platform)
             except RuntimeError as proxy_err:
                 logger.error("[%s][%s] Прокси недоступен: %s", acc_name, platform, proxy_err)
                 send_telegram(f"⚠️ [{acc_name}] Прокси недоступен — {platform} пропущен.\n{proxy_err}")
