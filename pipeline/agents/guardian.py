@@ -106,6 +106,7 @@ class Guardian(BaseAgent):
 
             if now - self._last_session_check >= _SESSION_CHECK_INTERVAL:
                 self._session_cycle()
+                self._fingerprint_check()
 
             self.sleep(30.0)
 
@@ -174,6 +175,62 @@ class Guardian(BaseAgent):
     # ------------------------------------------------------------------
     # Мониторинг сессий
     # ------------------------------------------------------------------
+
+    def _fingerprint_check(self) -> None:
+        """
+        Проверяет GEO-согласованность fingerprint-профилей всех аккаунтов.
+
+        Запускается раз в час вместе с _session_cycle.
+        Предупреждает если timezone fingerprint не совпадает с GEO прокси —
+        это один из главных сигналов антидетекта TikTok/Instagram.
+        """
+        try:
+            from pipeline.utils import get_all_accounts
+            from pipeline.fingerprint.geo import get_geo_params
+
+            accounts = get_all_accounts()
+            issues = []
+
+            for acc in accounts:
+                acc_cfg = acc.get("config", {})
+                fp_data = acc_cfg.get("fingerprint", {})
+                country = (acc_cfg.get("country") or "").upper()
+
+                for platform in acc.get("platforms", []):
+                    if platform not in fp_data:
+                        continue  # fingerprint не сгенерирован — сгенерится при запуске
+
+                    fp = fp_data[platform]
+                    if not country:
+                        continue  # нет GEO — не можем проверить
+
+                    expected = get_geo_params(country)
+                    fp_tz = fp.get("timezone_id", "")
+
+                    if fp_tz and fp_tz != expected["tz"]:
+                        issues.append(
+                            f"{acc['name']}/{platform}: "
+                            f"tz={fp_tz!r} ≠ ожидаемый для {country}: {expected['tz']!r}"
+                        )
+
+            if issues:
+                self.memory.set("fingerprint_issues", issues)
+                lines = "
+".join(f"  • {i}" for i in issues[:5])
+                self._send(
+                    f"🔍 [GUARDIAN] Fingerprint GEO несоответствия: {len(issues)}
+"
+                    f"{lines}
+"
+                    f"(сбросить: удалить acc_config['fingerprint'][platform])"
+                )
+                logger.warning("[GUARDIAN] Fingerprint issues: %d", len(issues))
+            else:
+                self.memory.set("fingerprint_issues", [])
+                logger.debug("[GUARDIAN] Fingerprint GEO check: всё OK (%d аккаунтов)", len(accounts))
+
+        except Exception as exc:
+            logger.warning("[GUARDIAN] Ошибка fingerprint_check: %s", exc)
 
     def _session_cycle(self) -> None:
         self._last_session_check = time.monotonic()
