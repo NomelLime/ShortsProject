@@ -14,6 +14,7 @@ from playwright_stealth import Stealth
 
 from pipeline import config as cfg
 from pipeline import utils
+from pipeline.fingerprint.generator import ensure_fingerprint
 
 logger = logging.getLogger(__name__)
 
@@ -222,17 +223,68 @@ def check_session_valid(context: BrowserContext, platforms: list[str]) -> dict[s
     return results
 
 
-def launch_browser(account_cfg: dict, profile_dir: Path) -> tuple[Playwright, BrowserContext]:
-    """
-    Запускает persistent context для аккаунта с применением stealth.
+# Реестр платформенных контекстов (lazy import для избегания circular)
+def _get_platform_contexts():
+    from pipeline.contexts.youtube   import YouTubeContext
+    from pipeline.contexts.tiktok    import TikTokContext
+    from pipeline.contexts.instagram import InstagramContext
+    return {
+        "youtube":   YouTubeContext(),
+        "tiktok":    TikTokContext(),
+        "instagram": InstagramContext(),
+    }
 
-    Перед запуском перебирает прокси (основной + резервные) и использует
-    первый работающий. Если ни один прокси не работает — выбрасывает RuntimeError.
-    Если прокси не настроен вообще — запускает без прокси.
+
+def _save_account_config(acc_config: dict, profile_dir: Path) -> None:
+    """Сохраняет обновлённый config.json аккаунта (с fingerprint) на диск."""
+    import json as _json
+    cfg_path = profile_dir.parent / "config.json"
+    if cfg_path.exists():
+        try:
+            cfg_path.write_text(
+                _json.dumps(acc_config, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+        except Exception as exc:
+            logger.warning("[browser] Не удалось сохранить config.json: %s", exc)
+
+
+def launch_browser(
+    account_cfg: dict,
+    profile_dir: Path,
+    platform: str = "",
+) -> tuple[Playwright, BrowserContext]:
     """
+    Запускает persistent context с платформенно-адаптивным fingerprint.
+
+    Определяет платформу → выбирает стратегию контекста → генерирует
+    (или загружает) уникальный fingerprint → запускает с правильными
+    мобильными/десктопными параметрами.
+
+    ОБРАТНАЯ СОВМЕСТИМОСТЬ: вызовы launch_browser(acc_cfg, profile_dir)
+    без platform работают как раньше (YouTube / десктоп).
+
+    Args:
+        account_cfg: dict конфига аккаунта (из config.json)
+        profile_dir: путь к директории профиля браузера
+        platform:    целевая платформа (опционально; если не задан —
+                     берётся первая из account_cfg["platforms"])
+    """
+    # Определяем платформу
+    if not platform:
+        platforms = account_cfg.get("platforms", ["youtube"])
+        if isinstance(platforms, str):
+            platforms = [platforms]
+        platform = platforms[0] if platforms else "youtube"
+
+    platform = platform.lower()
+
+    # Платформенная стратегия
+    ctx_strategies = _get_platform_contexts()
+    ctx_strategy = ctx_strategies.get(platform, ctx_strategies["youtube"])
+
+    # Proxy (существующая логика — без изменений)
     active_proxy = resolve_working_proxy(account_cfg)
-
-    # Есть кандидаты, но ни один не ответил
     has_proxy_cfg = bool(
         account_cfg.get("proxy", {}).get("host") or account_cfg.get("fallback_proxies")
     )
@@ -241,58 +293,40 @@ def launch_browser(account_cfg: dict, profile_dir: Path) -> tuple[Playwright, Br
             "Все прокси аккаунта недоступны (основной + резервные). "
             "Запуск браузера отменён."
         )
-
     proxy_config = _build_proxy_config(active_proxy) if active_proxy else None
-    user_agent = account_cfg.get(
-        "user_agent",
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/124.0.0.0 Safari/537.36",
-    )
+
+    # Fingerprint: генерируем или читаем из config
+    country = (account_cfg.get("country") or "US").upper()
+    fp = ensure_fingerprint(account_cfg, platform, country)
+
+    # Сохраняем config с fingerprint (если изменился)
+    _save_account_config(account_cfg, profile_dir)
 
     profile_dir.mkdir(parents=True, exist_ok=True)
     manual_login_needed = _is_profile_empty(profile_dir)
 
     pw = sync_playwright().start()
 
-    launch_kwargs = {
-        "user_data_dir": str(profile_dir),
-        "headless": False,
-        "user_agent": user_agent,
-        "viewport": {"width": 1366, "height": 768},
-        "locale": "en-US",
-        "timezone_id": "America/New_York",
-        "args": [
-            "--disable-blink-features=AutomationControlled",
-            "--no-sandbox",
-            "--disable-dev-shm-usage",
-        ],
-    }
-    if proxy_config:
-        launch_kwargs["proxy"] = proxy_config
+    # Платформенные kwargs
+    launch_kwargs = ctx_strategy.build_launch_kwargs(profile_dir, fp, proxy_config)
 
     context = pw.chromium.launch_persistent_context(**launch_kwargs)
 
-    # ИСПРАВЛЕНИЕ: Используем новый API playwright_stealth
-    stealth = Stealth()
-
-    # Применяем ко всем существующим страницам
-    for page in context.pages:
-        stealth.apply_stealth_sync(page)
-
-    # Для будущих страниц
-    def apply_stealth_to_page(page):
-        stealth.apply_stealth_sync(page)
-
-    context.on("page", apply_stealth_to_page)
+    # Post-launch: stealth + fingerprint инъекции
+    ctx_strategy.post_launch(context, fp)
 
     if manual_login_needed:
-        platforms = account_cfg.get("platforms", ["youtube"])
-        # FIX #9: убеждаемся, что передаём список, а не строку
-        if isinstance(platforms, str):
-            platforms = [platforms]
-        _manual_login_flow(context, platforms)
+        platforms_list = account_cfg.get("platforms", [platform])
+        if isinstance(platforms_list, str):
+            platforms_list = [platforms_list]
+        _manual_login_flow(context, platforms_list)
 
+    logger.info(
+        "[browser] Запущен для %s (platform=%s, device=%s, fp=%s...)",
+        profile_dir.name, platform,
+        fp.get("device_name", "?"),
+        fp.get("fp_seed", "?")[:8],
+    )
     return pw, context
 
 
