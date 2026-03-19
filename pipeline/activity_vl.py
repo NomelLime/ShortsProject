@@ -49,6 +49,42 @@ from pipeline.ai import ollama_generate_with_timeout
 from pipeline.shared_gpu_lock import acquire_gpu_lock
 from pipeline.niche import detect_and_cache_niche
 
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Санитизация комментариев от VL (FIX#V3-1)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _sanitize_comment(text: str, max_len: int = 100) -> str:
+    """
+    Очищает VL-сгенерированный комментарий перед отправкой на платформу.
+
+    Убирает URL, HTML-теги, @mentions, лишние пробелы.
+    Возвращает пустую строку если результат слишком короткий (< 3 символов).
+
+    Args:
+        text:    сырой текст от VL-модели
+        max_len: максимальная длина результата
+
+    Returns:
+        Очищенная строка или "" если небезопасно/слишком коротко.
+    """
+    if not text:
+        return ""
+    # URL (http/https и www.)
+    text = re.sub(r'https?://\S+', '', text)
+    text = re.sub(r'www\.\S+', '', text)
+    # HTML / script теги
+    text = re.sub(r'<[^>]+>', '', text)
+    # @mentions (чтобы не спамить других пользователей)
+    text = re.sub(r'@\w+', '', text)
+    # Множественные пробелы → один
+    text = re.sub(r'\s+', ' ', text).strip()
+    # Обрезаем до max_len
+    text = text[:max_len]
+    # Слишком короткий результат — не отправляем
+    return text if len(text) >= 3 else ""
+
+
 logger = logging.getLogger(__name__)
 
 # Seconds to wait for VL inference per call
@@ -164,6 +200,9 @@ def vl_analyze_feed(
             len(result["interactions"]), result["search_query"],
         )
         return result
+    except TimeoutError:
+        logger.info("[VL][%s] GPU busy — skipping feed analysis this iteration", platform)
+        return _empty_vl_result()
     except Exception as e:
         logger.warning("[VL][%s] Feed analysis failed: %s", platform, e)
         return _empty_vl_result()
@@ -173,8 +212,70 @@ def _empty_vl_result() -> Dict[str, Any]:
     return {"interactions": [], "captcha_detected": False, "search_query": None}
 
 
+# Whitelist разрешённых action-значений — LLM не может вернуть произвольное действие
+_VALID_ACTIONS = frozenset({"like", "comment", "skip"})
+
+
+def _validate_vl_result(raw_result: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Валидирует и нормализует структуру VL-ответа (FIX#V3-3).
+
+    Фильтрует невалидные action, ограничивает rank до [1, 10],
+    обрезает comment, нормализует captcha_detected и search_query.
+
+    Args:
+        raw_result: сырой dict от json.loads()
+
+    Returns:
+        Безопасный dict с валидированными полями.
+    """
+    validated: Dict[str, Any] = {
+        "captcha_detected": bool(raw_result.get("captcha_detected", False)),
+        "interactions":     [],
+        "search_query":     None,
+    }
+
+    # search_query — строка 2–50 символов или None
+    sq = raw_result.get("search_query")
+    if isinstance(sq, str):
+        sq = sq.strip()[:50]
+        if 2 <= len(sq):
+            validated["search_query"] = sq
+
+    # interactions — список, max 5 элементов (LLM иногда возвращает больше)
+    interactions = raw_result.get("interactions")
+    if not isinstance(interactions, list):
+        return validated
+
+    for item in interactions[:5]:
+        if not isinstance(item, dict):
+            continue
+
+        action = str(item.get("action", "skip")).lower()
+        if action not in _VALID_ACTIONS:
+            logger.debug("[VL] Неизвестный action '%s' → заменяем на skip", action)
+            action = "skip"
+
+        try:
+            rank = max(1, min(int(item.get("rank") or 1), 10))
+        except (TypeError, ValueError):
+            rank = 1
+
+        comment = ""
+        if action == "comment":
+            comment = str(item.get("comment") or "")[:150]
+
+        validated["interactions"].append({
+            "action":  action,
+            "rank":    rank,
+            "comment": comment,
+        })
+
+    return validated
+
+
 def _parse_vl_json(raw: str) -> Dict[str, Any]:
-    """Extracts JSON from VL response; tolerant of markdown wrappers."""
+    """Extracts and validates JSON from VL response; tolerant of markdown wrappers."""
     default = _empty_vl_result()
     try:
         clean = re.sub(r"```(?:json)?", "", raw).strip().rstrip("`").strip()
@@ -189,16 +290,8 @@ def _parse_vl_json(raw: str) -> Dict[str, Any]:
                 depth -= 1
                 if depth == 0:
                     data = json.loads(clean[start:i + 1])
-                    data.setdefault("interactions", [])
-                    data.setdefault("captcha_detected", False)
-                    data.setdefault("search_query", None)
-                    # Validate interactions list
-                    valid = []
-                    for item in data["interactions"]:
-                        if isinstance(item, dict) and item.get("action") in ("like", "comment", "skip"):
-                            valid.append(item)
-                    data["interactions"] = valid
-                    return data
+                    # FIX#V3-3: валидируем структуру ответа
+                    return _validate_vl_result(data)
     except Exception as e:
         logger.debug("[VL] JSON parse error: %s | raw: %s", e, raw[:200])
     return default
@@ -339,8 +432,11 @@ def _execute_interactions(
                 human_sleep(1, 2)
 
         elif action == "comment" and not comment_done and comment_text:
-            if _try_comment(page, platform, comment_text):
+            safe_comment = _sanitize_comment(comment_text)
+            if safe_comment and _try_comment(page, platform, safe_comment):
                 comment_done = True
+            elif not safe_comment:
+                logger.info("[VL][%s] Comment sanitized to empty — skipping", platform)
 
     return like_budget, comment_done
 
