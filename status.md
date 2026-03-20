@@ -754,3 +754,41 @@ setup_account.py → prelend_url в config.json
 - Instagram Website: всегда доступно
 
 **Статус тестов:** 112/112 ✅ (все сессии 12 + 12B вместе)
+
+---
+
+### Сессия 12C (19.03.2026) — UTM-аналитика bio-ссылок: Nginx rewrites + per-platform URL
+
+**Цель:** все клики из bio/About попадают в clicks.db с заполненными UTM-полями — `utm_source`, `utm_medium=bio`, `utm_campaign=<account_name>`.
+
+**Изменения:**
+
+| Файл | Изменение |
+|------|-----------|
+| `PreLend/deploy/nginx.conf` | 4 location-блока: `/t/acc` → TikTok UTM, `/i/acc` → Instagram UTM, `/y/acc` → YouTube UTM, `/go/tag` → универсальный |
+| `PreLend/deploy/deploy.sh` | Те же блоки с правильным `\$` экранированием для heredoc |
+| `setup_account.py` | Автогенерация `prelend_urls` при создании аккаунта: `{"tiktok": "https://domain/t/name", "instagram": "https://domain/i/name", "youtube": "https://domain/y/name"}` |
+| `pipeline/profile_manager.py` | `setup_all_links()` и `verify_all_links()` используют `prelend_urls[platform]` → fallback на общий `prelend_url` |
+| `pipeline/uploader.py` | YouTube description: `prelend_urls["youtube"]` → fallback на `prelend_url` |
+
+**Формат config.json после setup_account.py:**
+```json
+{
+    "prelend_url": "https://pulsority.com",
+    "prelend_urls": {
+        "tiktok":    "https://pulsority.com/t/acc_tt_01",
+        "instagram": "https://pulsority.com/i/acc_tt_01",
+        "youtube":   "https://pulsority.com/y/acc_tt_01"
+    }
+}
+```
+
+**Цепочка:** bio-клик → `/t/acc01` → Nginx rewrite → `index.php?utm_source=tiktok&utm_medium=bio&utm_campaign=acc01` → ClickLogger → clicks.db
+
+**На VPS после деплоя:**
+```bash
+nginx -t && systemctl reload nginx
+curl -s -o /dev/null -w "%{http_code}" https://DOMAIN/t/test_acc  # ожидается 200
+```
+
+**Тесты:** 112/112 ✅ (без изменений — новая логика покрыта существующими unit-тестами profile_manager)
