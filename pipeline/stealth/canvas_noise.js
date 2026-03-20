@@ -1,8 +1,9 @@
 // canvas_noise.js — Добавляет субпиксельный шум к Canvas output
 // Параметр __CANVAS_SEED__ подставляется из Python перед применением.
 //
-// Цель: сделать canvas fingerprint уникальным per account.
-// Разные seeds → разные hash'и toDataURL() → неотслеживаемые аккаунты.
+// Принцип: clone canvas → шумим клон → экспортируем клон.
+// Оригинал НЕ мутируется → повторный вызов toDataURL() = тот же результат
+// (fingerprint-consistency check проходит, детект не срабатывает).
 (function () {
     'use strict';
 
@@ -21,6 +22,10 @@
 
     const rng = mulberry32(SEED);
 
+    /**
+     * Шумит пиксели переданного canvas IN-PLACE.
+     * Вызывать только на клоне — не на оригинале.
+     */
     function applyNoise(canvas) {
         const ctx = canvas.getContext('2d');
         if (!ctx) return;
@@ -38,21 +43,48 @@
         }
     }
 
+    /**
+     * Создаёт клон canvas с шумом.
+     * Оригинал остаётся нетронутым.
+     */
+    function cloneWithNoise(original) {
+        const clone = document.createElement('canvas');
+        clone.width  = original.width;
+        clone.height = original.height;
+        const cloneCtx = clone.getContext('2d');
+        if (cloneCtx) {
+            cloneCtx.drawImage(original, 0, 0);
+            applyNoise(clone);
+        }
+        return clone;
+    }
+
     // Hook HTMLCanvasElement.prototype.toDataURL
+    // Клонируем → шумим клон → экспортируем с шумом
+    // Оригинал не мутируется → повторный вызов = идентичный результат
     const origToDataURL = HTMLCanvasElement.prototype.toDataURL;
     HTMLCanvasElement.prototype.toDataURL = function () {
-        applyNoise(this);
-        return origToDataURL.apply(this, arguments);
+        try {
+            const clone = cloneWithNoise(this);
+            return origToDataURL.apply(clone, arguments);
+        } catch (_) {
+            return origToDataURL.apply(this, arguments);
+        }
     };
 
-    // Hook HTMLCanvasElement.prototype.toBlob
+    // Hook HTMLCanvasElement.prototype.toBlob — аналогично
     const origToBlob = HTMLCanvasElement.prototype.toBlob;
     HTMLCanvasElement.prototype.toBlob = function () {
-        applyNoise(this);
-        return origToBlob.apply(this, arguments);
+        try {
+            const clone = cloneWithNoise(this);
+            return origToBlob.apply(clone, arguments);
+        } catch (_) {
+            return origToBlob.apply(this, arguments);
+        }
     };
 
     // Hook CanvasRenderingContext2D.prototype.getImageData
+    // Возвращает копию с шумом — не мутирует оригинал
     const origGetImageData = CanvasRenderingContext2D.prototype.getImageData;
     CanvasRenderingContext2D.prototype.getImageData = function (sx, sy, sw, sh) {
         const imageData = origGetImageData.call(this, sx, sy, sw, sh);
