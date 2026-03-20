@@ -717,16 +717,19 @@ def setup_all_links(
     """
     Размещает PreLend-ссылку во всех платформах аккаунта.
 
-    Запускает браузер, проходит по платформам, закрывает браузер.
-    Читает из config.json: prelend_url, platforms, bio_text, bio_text_{platform}.
+    Использует per-platform URL с UTM (prelend_urls[platform]) если доступен,
+    иначе — общий prelend_url. Per-platform URL генерируется setup_account.py
+    и содержит Nginx-rewrite путь (/t/, /i/, /y/) для UTM-аналитики.
 
     Returns:
         dict вида {"youtube": True, "tiktok": False, "instagram": True}
     """
     from pipeline.browser import launch_browser, close_browser
 
-    prelend_url = account_cfg.get("prelend_url", "")
-    if not prelend_url:
+    prelend_url  = account_cfg.get("prelend_url", "")
+    prelend_urls = account_cfg.get("prelend_urls", {})
+
+    if not prelend_url and not prelend_urls:
         logger.warning("[profile] prelend_url не задан в config.json — пропуск")
         return {}
 
@@ -745,10 +748,13 @@ def setup_all_links(
 
     try:
         for platform in platforms:
-            platform_bio = account_cfg.get(f"bio_text_{platform}", bio_text)
-            logger.info("[profile] Установка ссылки: %s → %s", platform, prelend_url)
+            # Per-platform URL с UTM (приоритет) → fallback на общий prelend_url
+            url_for_platform = prelend_urls.get(platform) or prelend_url
+            platform_bio     = account_cfg.get(f"bio_text_{platform}", bio_text)
 
-            ok = setup_profile_link(context, platform, prelend_url, platform_bio)
+            logger.info("[profile] Установка ссылки: %s → %s", platform, url_for_platform)
+
+            ok = setup_profile_link(context, platform, url_for_platform, platform_bio)
             results[platform] = ok
 
             status = "✅" if ok else "❌"
@@ -768,13 +774,17 @@ def verify_all_links(
     """
     Проверяет наличие ссылок во всех платформах аккаунта.
 
+    Проверяет per-platform URL (с UTM) если доступен, иначе — общий.
+
     Returns:
         dict вида {"youtube": True, "tiktok": True, "instagram": False}
     """
     from pipeline.browser import launch_browser, close_browser
 
-    prelend_url = account_cfg.get("prelend_url", "")
-    if not prelend_url:
+    prelend_url  = account_cfg.get("prelend_url", "")
+    prelend_urls = account_cfg.get("prelend_urls", {})
+
+    if not prelend_url and not prelend_urls:
         return {}
 
     platforms = account_cfg.get("platforms", [])
@@ -791,7 +801,9 @@ def verify_all_links(
 
     try:
         for platform in platforms:
-            ok = verify_profile_link(context, platform, prelend_url)
+            # Per-platform URL с UTM → fallback на общий
+            expected = prelend_urls.get(platform) or prelend_url
+            ok = verify_profile_link(context, platform, expected)
             results[platform] = ok
             _human_pause(2, 4)
     finally:
