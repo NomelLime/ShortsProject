@@ -280,6 +280,49 @@ class Publisher(BaseAgent):
     # Загрузка одного аккаунта / платформы
     # ------------------------------------------------------------------
 
+    def _maybe_setup_profile_links(
+        self,
+        acc_name: str,
+        acc_cfg: dict,
+        profile_dir: "Path",
+    ) -> None:
+        """
+        Один раз после первой загрузки — убеждается что ссылка в профиле на месте.
+
+        Флаг profile_links_set:{acc_name} в AgentMemory.
+        False / отсутствует → вызывает setup_all_links().
+        Не бросает исключения (все ошибки логируются).
+        """
+        prelend_url = acc_cfg.get("prelend_url", "")
+        if not prelend_url:
+            return
+
+        flag_key   = f"profile_links_set:{acc_name}"
+        already_set = self.memory.get(flag_key)
+        if already_set:
+            return
+
+        logger.info("[PUBLISHER] Первая загрузка %s — настраиваю ссылки в профилях", acc_name)
+        try:
+            from pipeline.profile_manager import setup_all_links
+            results = setup_all_links(acc_cfg, profile_dir)
+
+            self.memory.set(flag_key, results or {"attempted": True})
+
+            success = [p for p, ok in results.items() if ok]
+            failed  = [p for p, ok in results.items() if not ok]
+
+            if success:
+                self._send(f"🔗 [{acc_name}] Ссылки установлены в профилях: {', '.join(success)}")
+            if failed:
+                self._send(
+                    f"⚠️ [{acc_name}] Не удалось установить ссылки: {', '.join(failed)}
+"
+                    f"(TikTok требует 1000+ подписчиков)"
+                )
+        except Exception as exc:
+            logger.error("[PUBLISHER] Ошибка setup profile links для %s: %s", acc_name, exc)
+
     def _upload_account(self, task: Dict) -> List[Dict]:
         """
         Запускает браузер и загружает все видео из очереди одного аккаунта.
@@ -321,6 +364,9 @@ class Publisher(BaseAgent):
                          "platform": platform, "error_msg": "Сессия недействительна"}]
 
             mark_session_verified(acc_name, platform, valid=True)
+
+            # Setup ссылки в профиле (один раз — после первой загрузки)
+            self._maybe_setup_profile_links(acc_name, acc_cfg, profile_dir)
 
             # Определяем лимит
             daily_limit = (
