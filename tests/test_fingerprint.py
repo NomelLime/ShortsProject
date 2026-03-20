@@ -162,3 +162,125 @@ class TestEnsureFingerprint:
         # YouTube — десктоп, TikTok — мобильный
         assert fp_yt["is_mobile"] is False
         assert fp_tt["is_mobile"] is True
+
+
+class TestInjectorSafety:
+    """FIX#1: Проверяет безопасное экранирование строковых fp-полей в JS-инъекции."""
+
+    def test_safe_js_string_basic(self):
+        """_safe_js_string возвращает корректный JSON string."""
+        import importlib.util, sys
+        from pathlib import Path
+        _ROOT = Path(__file__).parent.parent
+        p = _ROOT / "pipeline" / "fingerprint" / "injector.py"
+        spec = importlib.util.spec_from_file_location("pipeline.fingerprint.injector", p)
+        m = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(m)
+
+        assert m._safe_js_string("Win32") == '"Win32"'
+        # Результат должен быть валидным JSON-строкой
+        import json
+        assert json.loads(m._safe_js_string("Win32")) == "Win32"
+
+    def test_safe_js_string_escapes_single_quote(self):
+        import importlib.util, sys, json
+        from pathlib import Path
+        _ROOT = Path(__file__).parent.parent
+        p = _ROOT / "pipeline" / "fingerprint" / "injector.py"
+        spec = importlib.util.spec_from_file_location("pipeline.fingerprint.injector_q", p)
+        m = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(m)
+
+        result = m._safe_js_string("test'quote")
+        assert json.loads(result) == "test'quote"
+
+    def test_safe_js_string_blocks_js_injection(self):
+        """Malicious payload экранируется — не вырывается из JS строки."""
+        import importlib.util, sys, json
+        from pathlib import Path
+        _ROOT = Path(__file__).parent.parent
+        p = _ROOT / "pipeline" / "fingerprint" / "injector.py"
+        spec = importlib.util.spec_from_file_location("pipeline.fingerprint.injector_inj", p)
+        m = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(m)
+
+        malicious = "'); document.cookie; //"
+        safe = m._safe_js_string(malicious)
+        # Должен начинаться и заканчиваться кавычкой
+        assert safe.startswith('"') and safe.endswith('"')
+        # Последовательность '); экранирована внутри JSON строки (не разрывает контекст)
+        # json.dumps("');...") → "'\');..." — одинарная кавычка НЕ экранируется json
+        # Но двойные кавычки обёртывают — невозможно закрыть строку через '
+        # Главное: результат парсится обратно в исходную строку
+        assert json.loads(safe) == malicious
+        # Должен быть валидным JSON
+        assert json.loads(safe) == malicious
+
+    def test_injector_no_raw_string_interp_in_webgl(self):
+        """_inject_webgl не содержит ручного replace — использует _safe_js_string."""
+        from pathlib import Path
+        src = (Path(__file__).parent.parent / "pipeline" / "fingerprint" / "injector.py"
+               ).read_text(encoding="utf-8")
+        # Старый небезопасный паттерн не должен присутствовать
+        assert ".replace(\"'\", \"\\\\'\")" not in src
+
+
+class TestProfileLock:
+    """FIX#2: Проверяет _profile_lock file locking."""
+
+    def test_lock_acquired_when_no_contention(self, tmp_path):
+        """Если профиль не занят — lock получен (yields True)."""
+        import importlib.util, sys
+        from pathlib import Path
+
+        _ROOT = Path(__file__).parent.parent
+        # Мокируем зависимости profile_manager перед загрузкой
+        import types
+        for mod in ["rebrowser_playwright", "rebrowser_playwright.sync_api"]:
+            if mod not in sys.modules:
+                m = types.ModuleType(mod)
+                m.BrowserContext = object
+                m.Page = object
+                sys.modules[mod] = m
+
+        p = _ROOT / "pipeline" / "profile_manager.py"
+        spec = importlib.util.spec_from_file_location("pipeline.profile_manager_lock", p)
+        pm = importlib.util.module_from_spec(spec)
+
+        # Мок pipeline.ai
+        ai_mock = types.ModuleType("pipeline.ai")
+        ai_mock.OLLAMA_MODEL = "test"
+        ai_mock.ollama_generate_with_timeout = lambda *a, **kw: {"response": "YES"}
+        sys.modules["pipeline.ai"] = ai_mock
+
+        spec.loader.exec_module(pm)
+
+        profile_dir = tmp_path / "browser_profile"
+        with pm._profile_lock(profile_dir) as acquired:
+            # If portalocker is installed — lock file created; otherwise graceful fallback
+            assert acquired is True
+
+    def test_lock_released_after_context(self, tmp_path):
+        """Блокировка снимается после выхода из контекста."""
+        import importlib.util, sys, types
+        from pathlib import Path
+
+        _ROOT = Path(__file__).parent.parent
+        p = _ROOT / "pipeline" / "profile_manager.py"
+        spec = importlib.util.spec_from_file_location("pipeline.profile_manager_lock2", p)
+        pm = importlib.util.module_from_spec(spec)
+
+        ai_mock = types.ModuleType("pipeline.ai")
+        ai_mock.OLLAMA_MODEL = "test"
+        ai_mock.ollama_generate_with_timeout = lambda *a, **kw: {"response": "YES"}
+        sys.modules["pipeline.ai"] = ai_mock
+
+        spec.loader.exec_module(pm)
+
+        profile_dir = tmp_path / "profile2"
+        with pm._profile_lock(profile_dir):
+            pass  # снимается при выходе
+
+        # Повторная блокировка должна сработать (предыдущая снята)
+        with pm._profile_lock(profile_dir) as acquired2:
+            assert acquired2 is True

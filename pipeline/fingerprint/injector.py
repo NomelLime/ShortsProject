@@ -17,6 +17,21 @@ import logging
 from pathlib import Path
 from typing import Dict
 
+
+def _safe_js_string(val) -> str:
+    """
+    Экранирует значение для безопасной вставки в JavaScript код.
+
+    json.dumps() добавляет кавычки и экранирует все спецсимволы:
+    одинарные/двойные кавычки, обратный слэш, переводы строк, Unicode.
+    Предотвращает JS injection при вставке fingerprint-полей в init_script.
+
+    Пример:
+        _safe_js_string("Win32")         → '"Win32"'
+        _safe_js_string("'); alert(1)")  → '"\'); alert(1)"'
+    """
+    return json.dumps(str(val))
+
 logger = logging.getLogger(__name__)
 
 _STEALTH_DIR = Path(__file__).parent.parent / "stealth"
@@ -65,9 +80,9 @@ def _inject_navigator(context, fp: Dict) -> None:
         _def(navigator, 'hardwareConcurrency', {fp['hardware_concurrency']});
         _def(navigator, 'deviceMemory',        {fp['device_memory']});
         _def(navigator, 'maxTouchPoints',      {fp['max_touch_points']});
-        _def(navigator, 'platform',            '{fp['platform_nav']}');
+        _def(navigator, 'platform',            {_safe_js_string(fp['platform_nav'])});
         _def(navigator, 'languages',           {langs_json});
-        _def(navigator, 'language',            '{fp['languages'][0]}');
+        _def(navigator, 'language',            {_safe_js_string(fp['languages'][0])});
         {dnt_line}
     }})();
     """)
@@ -104,10 +119,10 @@ def _inject_canvas(context, fp: Dict) -> None:
 
 def _inject_webgl(context, fp: Dict) -> None:
     """Подменяет WebGL vendor и renderer (WebGL1 + WebGL2)."""
-    v  = fp["webgl_vendor"].replace("'", "\\'")
-    r  = fp["webgl_renderer"].replace("'", "\\'")
-    uv = fp["webgl_unmasked_vendor"].replace("'", "\\'")
-    ur = fp["webgl_unmasked_renderer"].replace("'", "\\'")
+    v  = _safe_js_string(fp["webgl_vendor"])
+    r  = _safe_js_string(fp["webgl_renderer"])
+    uv = _safe_js_string(fp["webgl_unmasked_vendor"])
+    ur = _safe_js_string(fp["webgl_unmasked_renderer"])
 
     context.add_init_script(f"""
     (() => {{
@@ -115,10 +130,10 @@ def _inject_webgl(context, fp: Dict) -> None:
             if (typeof ctor === 'undefined') return;
             const orig = ctor.prototype.getParameter;
             ctor.prototype.getParameter = function(param) {{
-                if (param === 0x1F00) return '{v}';
-                if (param === 0x1F01) return '{r}';
-                if (param === 0x9245) return '{uv}';
-                if (param === 0x9246) return '{ur}';
+                if (param === 0x1F00) return {v};
+                if (param === 0x1F01) return {r};
+                if (param === 0x9245) return {uv};
+                if (param === 0x9246) return {ur};
                 return orig.call(this, param);
             }};
         }}
