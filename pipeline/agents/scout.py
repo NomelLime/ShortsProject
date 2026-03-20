@@ -124,6 +124,9 @@ class Scout(BaseAgent):
                 self._set_status(AgentStatus.RUNNING, "AI расширение KW")
                 from pipeline.downloader import _expand_keywords_with_ai
                 return _expand_keywords_with_ai(keywords)
+        except TimeoutError:
+            logger.info("[SCOUT] GPU занят — используем исходные keywords без расширения")
+            return keywords
         except Exception as e:
             logger.warning("[SCOUT] AI расширение не удалось: %s", e)
             return keywords
