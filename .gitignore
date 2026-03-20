@@ -48,3 +48,167 @@ processed/
 # Profile browser lock files
 accounts/**/.profile.lock
 .profile.lock
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# ShortsProject — .gitignore
+# Python pipeline: YouTube / TikTok / Instagram automated video creation
+# Dev: Windows + NVIDIA GPU + Ollama | Prod: локально
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+# ── СЕКРЕТЫ И ОКРУЖЕНИЕ ────────────────────────────────────────────────────────
+.env
+.env.*
+!.env.example          # шаблон — коммитить можно
+*.pem
+*.key
+secrets.json
+secrets.yaml
+
+
+# ── АККАУНТЫ (КРИТИЧНО — cookies, сессии, прокси, browser profiles) ───────────
+accounts/
+# Если нужно сохранить структуру папки без данных:
+# accounts/.gitkeep → не забудь добавить его вручную
+*.cookies
+cookies_*.txt
+cookies_*.json
+browser_profile/
+playwright_profile/
+*.session
+*.session.json
+proxies.txt
+proxies.json
+
+
+# ── RUNTIME-ДАННЫЕ (меняются в каждом цикле) ──────────────────────────────────
+data/
+# Если хочешь зафиксировать структуру:
+# !data/.gitkeep
+!data/init_db.sql      # SQL-схема — коммитить нужно
+
+
+# ── МЕДИАФАЙЛЫ И ВРЕМЕННЫЕ ДАННЫЕ ПАЙПЛАЙНА ───────────────────────────────────
+temp/
+tmp/
+output/
+outputs/
+downloads/
+processed/
+frames/
+thumbnails/
+clips/
+rendered/
+uploads/
+*.mp4
+*.mp3
+*.wav
+*.webm
+*.avi
+*.mov
+*.mkv
+
+
+# ── МОДЕЛИ TTS / ML (сотни MB — не коммитить) ─────────────────────────────────
+assets/tts/*.onnx
+assets/tts/*.bin
+assets/tts/*.pt
+assets/tts/*.pth
+assets/models/
+*.onnx
+*.bin
+# Но ресурсы без модельных весов — можно
+!assets/tts/voices.json
+!assets/tts/README.md
+
+
+# ── ЛОГИ ──────────────────────────────────────────────────────────────────────
+logs/
+*.log
+*.log.*
+log_*.txt
+pipeline.log
+
+
+# ── PYTHON CACHE ──────────────────────────────────────────────────────────────
+__pycache__/
+**/__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.pycache
+.Python
+
+
+# ── ВИРТУАЛЬНЫЕ ОКРУЖЕНИЯ ─────────────────────────────────────────────────────
+venv/
+.venv/
+env/
+.env_/
+ENV/
+virtualenv/
+
+
+# ── ТЕСТЫ И COVERAGE ──────────────────────────────────────────────────────────
+.pytest_cache/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+.tox/
+nosetests.xml
+junit.xml
+
+
+# ── ИНСТРУМЕНТЫ КАЧЕСТВА КОДА ─────────────────────────────────────────────────
+.mypy_cache/
+.dmypy.json
+dmypy.json
+.ruff_cache/
+
+
+# ── JUPYTER / IPYTHON ─────────────────────────────────────────────────────────
+.ipynb_checkpoints/
+*.ipynb
+
+
+# ── ИНФРАСТРУКТУРА ORCHESTRATOR ───────────────────────────────────────────────
+# Файл блокировки цикла — runtime-артефакт
+data/.cycle.lock
+.cycle.lock
+
+
+# ── СЛУЖЕБНЫЕ ФАЙЛЫ ПРОЕКТА ───────────────────────────────────────────────────
+status.md              # внутренний статус — не для публичного репо
+session*.md
+*_dev_plan.md
+
+
+# ── OS МУСОР ──────────────────────────────────────────────────────────────────
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+desktop.ini
+$RECYCLE.BIN/
+
+
+# ── IDE / РЕДАКТОРЫ ───────────────────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+*.orig
+*.bak
+
+
+# ── PACKAGING / DIST ──────────────────────────────────────────────────────────
+dist/
+build/
+*.egg-info/
+*.egg
+MANIFEST
