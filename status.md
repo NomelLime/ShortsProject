@@ -714,3 +714,43 @@ META_WHISPER_ENABLED=false
 ```
 
 **Статус тестов:** `pytest tests/test_fingerprint.py tests/test_geo.py tests/test_contexts.py` → **45/45** ✅
+
+---
+
+### Сессия 12B (19.03.2026) — PreLend ссылки в профилях аккаунтов
+
+**Новые файлы:**
+
+| Файл | Описание |
+|------|----------|
+| `pipeline/profile_manager.py` | Ядро: `_find_element_with_fallback()` (CSS→VL self-healing), `_verify_page_context()`, хендлеры YouTube/TikTok/Instagram, `setup_all_links()`, `verify_all_links()` |
+| `tests/test_profile_manager.py` | 23 теста: диспетчер, VL-fallback (координаты, NOT_FOUND, ошибка), page context, setup/verify all |
+
+**Изменения:**
+
+| Файл | Изменение |
+|------|-----------|
+| `setup_account.py` | Шаги 6-7: `prelend_url` + `bio_text` / `bio_text_{platform}` при создании аккаунта |
+| `pipeline/agents/publisher.py` | `_maybe_setup_profile_links()` — один раз после первой загрузки аккаунта |
+| `pipeline/agents/guardian.py` | `_profile_link_cycle()` — ежедневно (86400 сек), авто-восстановление пропавших ссылок |
+| `pipeline/uploader.py` | `prelend_url` → конец description YouTube видео. TikTok/Instagram — не добавляем (не кликабельно) |
+
+**Поток:**
+```
+setup_account.py → prelend_url в config.json
+    → Publisher: первая загрузка → setup_all_links()
+        → browser.py → launch_browser() → новая страница per platform
+        → _verify_page_context() VL: правильная страница?
+        → _find_element_with_fallback() CSS → VL координаты
+        → fill + save
+    → Guardian: раз в 24ч → verify_all_links()
+        → если пропала → setup_all_links() авто-восстановление
+        → Telegram уведомление если не удалось
+```
+
+**Ограничения:**
+- TikTok Website поле: только при 1000+ подписчиков или бизнес-аккаунте (graceful: возвращает False)
+- YouTube About Links: через Studio (надёжнее публичного UI)
+- Instagram Website: всегда доступно
+
+**Статус тестов:** 112/112 ✅ (все сессии 12 + 12B вместе)
