@@ -24,6 +24,7 @@ import logging
 import random
 import re
 import time
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Dict, Optional
 
@@ -43,6 +44,61 @@ def _human_type(page, text: str) -> None:
 def _human_pause(lo: float = 1.0, hi: float = 3.0) -> None:
     """Пауза как у живого человека."""
     time.sleep(random.uniform(lo, hi))
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Profile lock: предотвращает одновременный launch_browser на одном профиле
+# ─────────────────────────────────────────────────────────────────────────────
+
+@contextmanager
+def _profile_lock(profile_dir: Path, timeout: float = 30.0):
+    """
+    File lock на browser profile_dir.
+
+    Предотвращает одновременный launch_browser() на одном профиле — если
+    Guardian и Publisher запустятся одновременно, второй пропустит операцию
+    (не крашится). Использует portalocker (уже в requirements.txt).
+
+    Args:
+        profile_dir: директория профиля браузера
+        timeout:     секунды ожидания блокировки
+
+    Yields:
+        True если блокировка получена, False если timeout.
+    """
+    try:
+        import portalocker as _portalocker
+    except ImportError:
+        logger.debug("[profile] portalocker не установлен — lock пропущен")
+        yield True
+        return
+
+    lock_path = profile_dir / ".profile.lock"
+    lock_file = None
+    acquired  = False
+    try:
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        lock_file = open(str(lock_path), "w")
+        _portalocker.lock(lock_file, _portalocker.LOCK_EX, timeout=timeout)
+        acquired = True
+        yield True
+    except (_portalocker.LockException, _portalocker.AlreadyLocked):
+        logger.warning(
+            "[profile] Profile %s заблокирован — пропуск (другой процесс активен)",
+            profile_dir.name,
+        )
+        yield False
+    except Exception as exc:
+        logger.warning("[profile] profile_lock ошибка: %s", exc)
+        yield True  # fallback: не блокируем при неожиданной ошибке
+    finally:
+        if lock_file:
+            try:
+                if acquired:
+                    _portalocker.unlock(lock_file)
+                lock_file.close()
+            except Exception:
+                pass
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -740,29 +796,33 @@ def setup_all_links(
     bio_text = account_cfg.get("bio_text", "")
     results: Dict[str, bool] = {}
 
-    try:
-        pw, context = launch_browser(account_cfg, profile_dir)
-    except Exception as exc:
-        logger.error("[profile] Браузер не запустился: %s", exc)
-        return {p: False for p in platforms}
+    with _profile_lock(profile_dir) as acquired:
+        if not acquired:
+            return {p: False for p in platforms}
 
-    try:
-        for platform in platforms:
-            # Per-platform URL с UTM (приоритет) → fallback на общий prelend_url
-            url_for_platform = prelend_urls.get(platform) or prelend_url
-            platform_bio     = account_cfg.get(f"bio_text_{platform}", bio_text)
+        try:
+            pw, context = launch_browser(account_cfg, profile_dir)
+        except Exception as exc:
+            logger.error("[profile] Браузер не запустился: %s", exc)
+            return {p: False for p in platforms}
 
-            logger.info("[profile] Установка ссылки: %s → %s", platform, url_for_platform)
+        try:
+            for platform in platforms:
+                # Per-platform URL с UTM (приоритет) → fallback на общий prelend_url
+                url_for_platform = prelend_urls.get(platform) or prelend_url
+                platform_bio     = account_cfg.get(f"bio_text_{platform}", bio_text)
 
-            ok = setup_profile_link(context, platform, url_for_platform, platform_bio)
-            results[platform] = ok
+                logger.info("[profile] Установка ссылки: %s → %s", platform, url_for_platform)
 
-            status = "✅" if ok else "❌"
-            logger.info("[profile][%s] %s Ссылка %s", platform, status,
-                        "установлена" if ok else "НЕ установлена")
-            _human_pause(3, 6)
-    finally:
-        close_browser(pw, context)
+                ok = setup_profile_link(context, platform, url_for_platform, platform_bio)
+                results[platform] = ok
+
+                status = "✅" if ok else "❌"
+                logger.info("[profile][%s] %s Ссылка %s", platform, status,
+                            "установлена" if ok else "НЕ установлена")
+                _human_pause(3, 6)
+        finally:
+            close_browser(pw, context)
 
     return results
 
@@ -793,20 +853,24 @@ def verify_all_links(
 
     results: Dict[str, bool] = {}
 
-    try:
-        pw, context = launch_browser(account_cfg, profile_dir)
-    except Exception as exc:
-        logger.error("[profile] Браузер не запустился для verify: %s", exc)
-        return {p: False for p in platforms}
+    with _profile_lock(profile_dir) as acquired:
+        if not acquired:
+            return {p: False for p in platforms}
 
-    try:
-        for platform in platforms:
-            # Per-platform URL с UTM → fallback на общий
-            expected = prelend_urls.get(platform) or prelend_url
-            ok = verify_profile_link(context, platform, expected)
-            results[platform] = ok
-            _human_pause(2, 4)
-    finally:
-        close_browser(pw, context)
+        try:
+            pw, context = launch_browser(account_cfg, profile_dir)
+        except Exception as exc:
+            logger.error("[profile] Браузер не запустился для verify: %s", exc)
+            return {p: False for p in platforms}
+
+        try:
+            for platform in platforms:
+                # Per-platform URL с UTM → fallback на общий
+                expected = prelend_urls.get(platform) or prelend_url
+                ok = verify_profile_link(context, platform, expected)
+                results[platform] = ok
+                _human_pause(2, 4)
+        finally:
+            close_browser(pw, context)
 
     return results

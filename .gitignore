@@ -44,3 +44,7 @@ output/
 outputs/
 downloads/
 processed/
+
+# Profile browser lock files
+accounts/**/.profile.lock
+.profile.lock
