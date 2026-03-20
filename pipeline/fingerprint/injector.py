@@ -68,7 +68,8 @@ def _inject_navigator(context, fp: Dict) -> None:
     langs_json = json.dumps(fp["languages"])
     dnt_line = ""
     if fp.get("do_not_track"):
-        dnt_line = f"Object.defineProperty(navigator, 'doNotTrack', {{ get: () => '{fp['do_not_track']}' }});"
+        dnt_val  = _safe_js_string(fp["do_not_track"])
+        dnt_line = f"Object.defineProperty(navigator, 'doNotTrack', {{ get: () => {dnt_val} }});"
 
     context.add_init_script(f"""
     (() => {{
