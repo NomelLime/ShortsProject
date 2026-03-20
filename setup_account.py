@@ -181,6 +181,35 @@ def build_config() -> tuple[str, dict]:
     if proxy:
         cfg["proxy"] = proxy
 
+    # ── 6. PreLend URL ────────────────────────────────────────────────────────
+    print()
+    prelend_url = _ask(
+        "PreLend URL (ссылка для bio/профиля, Enter — пропустить)",
+        default="",
+    )
+    if prelend_url:
+        if not prelend_url.startswith("http"):
+            prelend_url = "https://" + prelend_url
+        cfg["prelend_url"] = prelend_url
+        print(f"  ✓ PreLend URL: {prelend_url}")
+
+        # ── 7. Bio текст ─────────────────────────────────────────────────
+        print()
+        print("  Bio/описание профиля (можно задать общий и per-platform):")
+        bio = _ask("  Общий текст bio (Enter — пропустить)", default="")
+        if bio:
+            cfg["bio_text"] = bio
+
+        for platform in platforms:
+            platform_bio = _ask(
+                f"  Bio для {platform} (Enter — использовать общий)",
+                default="",
+            )
+            if platform_bio:
+                cfg[f"bio_text_{platform}"] = platform_bio
+    else:
+        print("  ✓ PreLend URL не задан (можно добавить позже в config.json)")
+
     return name, cfg
 
 
