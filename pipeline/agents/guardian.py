@@ -57,7 +57,8 @@ def _sanitize_llm_input(text: str, max_len: int = 300) -> str:
     return text.strip()[:max_len]
 
 _PROXY_CHECK_INTERVAL   = 300   # 5 минут
-_SESSION_CHECK_INTERVAL = 3600  # 1 час
+_SESSION_CHECK_INTERVAL  = 3600   # 1 час
+_PROFILE_CHECK_INTERVAL  = 86400  # 24 часа
 
 
 class Guardian(BaseAgent):
@@ -82,7 +83,8 @@ class Guardian(BaseAgent):
         self._stale_sessions: List[Dict]      = []
         self._quarantined: Dict[str, List]    = {}  # acc_name → [platforms]
         self._last_proxy_check  = 0.0
-        self._last_session_check = 0.0
+        self._last_session_check  = 0.0
+        self._last_profile_check  = 0.0
         # Кеш LLM-задержки: acc_name → (delay_sec, computed_at monotonic)
         # TTL = 30 мин — иначе каждая загрузка захватывает GPU и шлёт промпт
         self._delay_cache: Dict[str, Tuple[float, float]] = {}
@@ -107,6 +109,10 @@ class Guardian(BaseAgent):
             if now - self._last_session_check >= _SESSION_CHECK_INTERVAL:
                 self._session_cycle()
                 self._fingerprint_check()
+
+            # Проверка ссылок в профилях (раз в 24ч)
+            if now - self._last_profile_check >= _PROFILE_CHECK_INTERVAL:
+                self._profile_link_cycle()
 
             self.sleep(30.0)
 
@@ -231,6 +237,73 @@ class Guardian(BaseAgent):
 
         except Exception as exc:
             logger.warning("[GUARDIAN] Ошибка fingerprint_check: %s", exc)
+
+    def _profile_link_cycle(self) -> None:
+        """
+        Проверяет что PreLend-ссылки на месте во всех профилях.
+
+        Запускается раз в 24 часа. При обнаружении пропавшей ссылки —
+        пробует восстановить автоматически, сообщает в Telegram.
+        """
+        self._last_profile_check = time.monotonic()
+        self._set_status(AgentStatus.RUNNING, "проверка ссылок в профилях")
+        missing_links: list = []
+
+        try:
+            from pipeline.utils import get_all_accounts
+            from pipeline.profile_manager import verify_all_links, setup_all_links
+
+            accounts = get_all_accounts()
+
+            for acc in accounts:
+                acc_cfg     = acc.get("config", {})
+                prelend_url = acc_cfg.get("prelend_url", "")
+                if not prelend_url:
+                    continue  # ссылка не настроена — пропуск
+
+                profile_dir = acc["dir"] / "browser_profile"
+                results     = verify_all_links(acc_cfg, profile_dir)
+
+                for platform, present in results.items():
+                    if present:
+                        continue
+
+                    label = f"{acc['name']}/{platform}"
+                    logger.info("[GUARDIAN] Ссылка пропала: %s — восстанавливаю", label)
+
+                    restore = setup_all_links(acc_cfg, profile_dir)
+                    if restore.get(platform):
+                        logger.info("[GUARDIAN] ✅ Ссылка восстановлена: %s", label)
+                    else:
+                        missing_links.append(label)
+                        logger.warning("[GUARDIAN] ❌ Восстановление не удалось: %s", label)
+
+            from datetime import datetime
+            self.memory.set("profile_links_status", {
+                "checked_at": datetime.now().isoformat(timespec="seconds"),
+                "missing":    missing_links,
+            })
+
+            if missing_links:
+                lines = "
+".join(f"  • {m}" for m in missing_links)
+                self._send(
+                    f"🔗 [GUARDIAN] Пропавшие ссылки (авто-восстановление не удалось):
+"
+                    f"{lines}
+
+Проверьте вручную."
+                )
+            else:
+                logger.info(
+                    "[GUARDIAN] Profile link check: всі ссылки на месте (%d аккаунтов)",
+                    len(accounts),
+                )
+
+        except Exception as exc:
+            logger.error("[GUARDIAN] Ошибка _profile_link_cycle: %s", exc)
+        finally:
+            self._set_status(AgentStatus.IDLE)
 
     def _session_cycle(self) -> None:
         self._last_session_check = time.monotonic()
