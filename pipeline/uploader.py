@@ -538,10 +538,14 @@ def upload_all(dry_run: bool = False) -> List[Dict]:
                         })
                         continue
 
-                    # Пробрасываем prelend_url только для YouTube
+                    # Пробрасываем prelend_url только для YouTube (кликабельно в description)
+                    # Используем per-platform URL с UTM если есть (Nginx /y/acc)
                     if platform == "youtube":
                         meta = dict(meta)
-                        meta["prelend_url"] = acc_cfg.get("prelend_url", "")
+                        prelend_urls = acc_cfg.get("prelend_urls", {})
+                        meta["prelend_url"] = (
+                            prelend_urls.get("youtube") or acc_cfg.get("prelend_url", "")
+                        )
                     clean_path = clean_video_metadata(video_path)
                     video_url  = upload_video(
                         context, platform, clean_path, meta,
