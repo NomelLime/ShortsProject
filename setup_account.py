@@ -193,6 +193,27 @@ def build_config() -> tuple[str, dict]:
         cfg["prelend_url"] = prelend_url
         print(f"  ✓ PreLend URL: {prelend_url}")
 
+        # Автогенерация per-platform bio URL с UTM через Nginx rewrites
+        from urllib.parse import urlparse
+        parsed      = urlparse(prelend_url)
+        base_domain = f"{parsed.scheme}://{parsed.netloc}"
+
+        _platform_paths = {
+            "tiktok":    "/t/",
+            "instagram": "/i/",
+            "youtube":   "/y/",
+        }
+
+        prelend_urls: dict = {}
+        for _p in platforms:
+            _path = _platform_paths.get(_p, "/go/")
+            prelend_urls[_p] = f"{base_domain}{_path}{name}"
+
+        cfg["prelend_urls"] = prelend_urls
+        print("  ✓ Bio-ссылки (с UTM):")
+        for _p, _u in prelend_urls.items():
+            print(f"      {_p}: {_u}")
+
         # ── 7. Bio текст ─────────────────────────────────────────────────
         print()
         print("  Bio/описание профиля (можно задать общий и per-platform):")
