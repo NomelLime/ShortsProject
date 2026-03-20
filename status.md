@@ -6,7 +6,7 @@ https://github.com/NomelLime/ShortsProject
 
 # ShortsProject — Status
 
-**Дата последнего обновления:** 19.03.2026
+**Дата последнего обновления:** 20.03.2026
 **Ветка:** `main`  
 **Репозиторий:** `NomelLime/ShortsProject` (private)
 
@@ -792,3 +792,19 @@ curl -s -o /dev/null -w "%{http_code}" https://DOMAIN/t/test_acc  # ожидае
 ```
 
 **Тесты:** 112/112 ✅ (без изменений — новая логика покрыта существующими unit-тестами profile_manager)
+
+---
+
+### Ревью сессий 12A–12C (20.03.2026) — Security & Quality fixes
+
+| # | Severity | Файл(ы) | Исправление |
+|---|----------|---------|-------------|
+| R12-1 | High | `pipeline/fingerprint/injector.py` | `_safe_js_string()` — все строковые fp-поля (platform_nav, language, webgl_vendor/renderer, do_not_track) через `json.dumps()` перед вставкой в JS. Предотвращает JS injection через редактирование `config.json["fingerprint"]` |
+| R12-2 | Medium | `pipeline/profile_manager.py` | `_profile_lock()` — portalocker file lock на browser profile_dir. Предотвращает crash при одновременном Guardian + Publisher на одном профиле |
+| R12-3 | Medium | `pipeline/stealth/canvas_noise.js` | `toDataURL`/`toBlob`: clone canvas вместо мутации оригинала — fingerprint consistency (повторный вызов = тот же результат) |
+| R12-4 | Medium | `pipeline/agents/scout.py` | `_expand_keywords()`: explicit `except TimeoutError` — graceful fallback на исходные keywords |
+| R12-5 | ✅ верифицирован | `pipeline/shared_gpu_lock.py` | FIX#V3-2: `raise TimeoutError` уже применён |
+| R12-6 | ✅ верифицирован | — | finances_block санитизация в Orchestrator уже применена |
+
+**Дата обновления:** 20.03.2026
+**Статус тестов:** 118/118 ✅
