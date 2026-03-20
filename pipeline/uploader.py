@@ -77,7 +77,13 @@ def _try_get_url(page: Page, selectors: list[str], base: str = "") -> str:
 def _upload_youtube(page: Page, video_path: Path, meta: Dict) -> str:
     """Загружает видео на YouTube. Возвращает публичный URL видео."""
     title       = (meta.get("title") or video_path.stem)[:100]
-    description = (meta.get("description") or "")[:4900]
+    # FIX: prelend_url добавляется в конец description (только YouTube — кликабельно)
+    prelend_url = meta.get("prelend_url", "")
+    raw_desc    = meta.get("description") or ""
+    if prelend_url:
+        link_line = f"\n\n🔗 {prelend_url}"
+        raw_desc  = raw_desc[:4990 - len(link_line)] + link_line
+    description = raw_desc[:4990]
 
     page.goto("https://studio.youtube.com", wait_until="domcontentloaded", timeout=30_000)
     time.sleep(random.uniform(2, 4))
@@ -532,6 +538,10 @@ def upload_all(dry_run: bool = False) -> List[Dict]:
                         })
                         continue
 
+                    # Пробрасываем prelend_url только для YouTube
+                    if platform == "youtube":
+                        meta = dict(meta)
+                        meta["prelend_url"] = acc_cfg.get("prelend_url", "")
                     clean_path = clean_video_metadata(video_path)
                     video_url  = upload_video(
                         context, platform, clean_path, meta,
