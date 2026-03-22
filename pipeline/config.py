@@ -520,3 +520,13 @@ META_WHISPER_ENABLED  = os.getenv("META_WHISPER_ENABLED", "false").lower() == "t
 META_WHISPER_MODEL    = os.getenv("META_WHISPER_MODEL", "base")   # tiny/base/small/medium
 META_WHISPER_MAX_SEC  = int(os.getenv("META_WHISPER_MAX_SEC", "120"))  # макс. длина для транскрипции
 META_WHISPER_LANGUAGE = os.getenv("META_WHISPER_LANGUAGE", "")    # "" = автодетект
+
+# ----------------------------------------------------------------------
+# Фон: внешний AnimateDiff / Ken-Burns (animatediff_bg.py)
+# Реальные веса AnimateDiff не bundled — используйте ANIMATEDIFF_SCRIPT или FF-fallback.
+# ----------------------------------------------------------------------
+ANIMATEDIFF_ENABLED       = os.getenv("ANIMATEDIFF_ENABLED", "0") == "1"
+ANIMATEDIFF_SCRIPT        = os.getenv("ANIMATEDIFF_SCRIPT", "")   # exe: topic output.mp4
+ANIMATEDIFF_FF_FALLBACK   = os.getenv("ANIMATEDIFF_FF_FALLBACK", "1") == "1"
+ANIMATEDIFF_DURATION_SEC  = int(os.getenv("ANIMATEDIFF_DURATION_SEC", "5"))
+ANIMATEDIFF_SIZE          = os.getenv("ANIMATEDIFF_SIZE", "1280:720")  # ширина:высота для ffmpeg

@@ -18,6 +18,8 @@ pipeline/voice_cloner.py — Голосовое клонирование (OpenVo
   VOICE_CLONE_MODEL     = openvoice  — openvoice | rvc
   VOICE_CLONE_REF_AUDIO = ""         — путь к reference audio (загружается через ContentHub)
 
+Чекпоинты OpenVoice v2: python scripts/setup_voice_clone.py
+
 Если клонирование недоступно/ошибка — возвращает None (fallback в tts_utils.py).
 """
 from __future__ import annotations

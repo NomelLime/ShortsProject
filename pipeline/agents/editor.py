@@ -10,7 +10,7 @@ pipeline/agents/editor.py — EDITOR: нарезка, постобработка
 Умный выбор фона:
   1. Файл по теме из assets/backgrounds/
   2. Ротация (get_unique_bg) без повторов
-  3. AnimateDiff (заглушка — Этап 5)
+  3. ANIMATEDIFF: внешний скрипт или Ken-Burns из .jpg/.png (animatediff_bg.py)
 """
 from __future__ import annotations
 
@@ -84,6 +84,22 @@ def _sanitize_llm_input(text: str, max_len: int = _MAX_PROMPT_FIELD_LEN) -> str:
     )
     # Обрезаем
     return text.strip()[:max_len]
+
+
+def _motion_topic_from_meta(video_path: Path, meta_variants: List[Dict]) -> str:
+    """Тема для AnimateDiff/Ken-Burns: первая строка hook/title/description или stem файла."""
+    stem = video_path.stem
+    meta = meta_variants[0] if meta_variants else {}
+    if not isinstance(meta, dict):
+        return stem
+    for key in ("hook_text", "title", "description"):
+        val = meta.get(key)
+        if not val or not isinstance(val, str):
+            continue
+        first_line = val.strip().split("\n")[0].strip()
+        if first_line:
+            return _sanitize_llm_input(first_line)
+    return stem
 
 
 class Editor(BaseAgent):
@@ -314,10 +330,20 @@ class Editor(BaseAgent):
             except Exception as exc:
                 logger.warning("[EDITOR] GPU:LLM недоступен: %s — используем fallback", exc)
                 if needs_llm_bg:
-                    bg_path = self.select_background()
+                    bg_path = self.select_background(video_path.stem)
                 meta_variants = [{}]
         else:
             meta_variants = self._get_metadata_no_acquire(video_path)
+
+        motion_topic = _motion_topic_from_meta(video_path, meta_variants)
+        if bg_path is None and getattr(config, "ANIMATEDIFF_ENABLED", False):
+            try:
+                gen = self._run_motion_background(motion_topic)
+                if gen is not None:
+                    bg_path = gen
+                    logger.info("[EDITOR] Фон сгенерирован (AnimateDiff/Ken-Burns): %s", gen.name)
+            except Exception as _ad_exc:
+                logger.debug("[EDITOR] AnimateDiff/Ken-Burns: %s", _ad_exc)
 
         return bg_path, meta_variants
 
@@ -607,6 +633,8 @@ class Editor(BaseAgent):
           3. По теме (совпадение в имени файла)
           4. Ротация get_unique_bg (без повторов)
           5. Случайный
+          6. Если в каталоге нет .mp4/.mov и включён ANIMATEDIFF — генерация фона
+             (внешний скрипт под GPU VIDEO_GEN, затем при необходимости Ken-Burns).
         """
         try:
             from pipeline import config
@@ -627,6 +655,11 @@ class Editor(BaseAgent):
 
             bg_files = list(bg_dir.glob("*.mp4")) + list(bg_dir.glob("*.mov"))
             if not bg_files:
+                if getattr(config, "ANIMATEDIFF_ENABLED", False):
+                    gen = self._run_motion_background(topic or "")
+                    if gen is not None:
+                        logger.info("[EDITOR] Фон сгенерирован (нет видео в каталоге): %s", gen.name)
+                        return gen
                 return None
 
             # Определяем категорию для кэша
@@ -836,7 +869,23 @@ class Editor(BaseAgent):
             pass
         return None
 
+    def _run_motion_background(self, topic: str) -> Optional[Path]:
+        """AnimateDiff-скрипт (при наличии) под GPU VIDEO_GEN; Ken-Burns — без удержания слота."""
+        try:
+            from pipeline import config
+            from pipeline.animatediff_bg import generate_motion_background
+
+            script = str(getattr(config, "ANIMATEDIFF_SCRIPT", "") or "").strip()
+            acquire = None
+            if script:
+                acquire = lambda: self._gpu.acquire(
+                    "EDITOR_VIDEO_GEN", GPUPriority.VIDEO_GEN
+                )
+            return generate_motion_background(topic or "", acquire_script_gpu=acquire)
+        except Exception as e:
+            logger.debug("[EDITOR] _run_motion_background: %s", e)
+            return None
+
     def _generate_bg_ai(self, topic: str) -> Optional[Path]:
-        """AnimateDiff генерация — Этап 5."""
-        logger.info("[EDITOR] AnimateDiff: TODO — Этап 5")
-        return None
+        """Точка расширения: делегирует в animatediff_bg с учётом GPU для внешнего скрипта."""
+        return self._run_motion_background(topic)

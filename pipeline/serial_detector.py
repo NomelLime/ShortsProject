@@ -91,9 +91,11 @@ def detect_serial_candidates(
     # Сохраняем в AgentMemory
     memory = get_memory()
     memory.set("serial_candidates", candidates)
+    from datetime import datetime, timezone
+
     memory.set(
         "serial_candidates_updated_at",
-        __import__("datetime").datetime.utcnow().isoformat(),
+        datetime.now(timezone.utc).isoformat(),
     )
 
     logger.info(
