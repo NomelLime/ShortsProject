@@ -20,6 +20,7 @@ from pipeline.config import (
     HUE_RANGE, VIGNETTE_RANGE, NOISE_STRENGTH_RANGE,
     AUDIO_BITRATE,
     MUSIC_DIR, MUSIC_VOLUME, MUSIC_FADE_DUR,
+    CLONE_HFLIP_PROBABILITY,
 )
 from pipeline.utils import probe_video, check_video_integrity, get_random_asset
 
@@ -99,8 +100,8 @@ def _clone_task(task: Tuple) -> Tuple[int, str, Optional[Path]]:
         vignette   = random.uniform(*VIGNETTE_RANGE)
         noise_str  = random.randint(*NOISE_STRENGTH_RANGE)
 
-        # Горизонтальный флип (50% вероятность)
-        do_hflip = random.random() < 0.5
+        # Горизонтальный флип — по умолчанию выкл. (портит читаемый текст на видео)
+        do_hflip = random.random() < max(0.0, min(1.0, CLONE_HFLIP_PROBABILITY))
 
         # Per-clone фон
         bg_path = _pick_random_bg()

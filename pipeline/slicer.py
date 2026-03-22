@@ -101,7 +101,11 @@ def slice_long_video(video_path: Path, clip_dir: Path,
     else:
         metadata = generate_video_metadata(video_path, num_variants=1)[0]
     best_segment = metadata.get("best_segment")
-    best_segment_end = best_segment + _BEST_SEGMENT_MIN_LEN if best_segment else None
+    # Нельзя использовать «if best_segment» — 0.0 — валидное начало сегмента
+    if best_segment is not None:
+        best_segment_end = best_segment + _BEST_SEGMENT_MIN_LEN
+    else:
+        best_segment_end = None
 
     if best_segment is not None:
         out = clip_dir / f"{source_name}_best_segment.mp4"
@@ -165,6 +169,7 @@ def slice_long_video(video_path: Path, clip_dir: Path,
 def stage_slice(video_path: Path, clip_dir: Path,
                metadata_variants: Optional[List[dict]] = None) -> List[Path]:
     """Главный этап нарезки."""
+    clip_dir.mkdir(parents=True, exist_ok=True)
     if probe_video(video_path)['duration'] < SHORT_VIDEO_THRESHOLD:
         return slice_short_video(video_path, clip_dir)
     return slice_long_video(video_path, clip_dir, metadata_variants=metadata_variants)

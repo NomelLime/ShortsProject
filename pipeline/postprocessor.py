@@ -33,6 +33,15 @@ from pipeline.utils import probe_video
 
 logger = logging.getLogger(__name__)
 
+
+def _cleanup_zero_byte_output(out_path: Path) -> None:
+    """Удаляет пустой .mp4 после сбоя ffmpeg (на Windows часто остаётся 0 байт)."""
+    try:
+        if out_path.exists() and out_path.stat().st_size == 0:
+            out_path.unlink()
+    except OSError:
+        pass
+
 SHAPES = ["circle", "rounded_rect", "portrait_center"]
 
 
@@ -422,104 +431,21 @@ def _postprocess_single(
             return True
 
         logger.error("Постобработка: выходной файл пуст: %s", out_path)
+        _cleanup_zero_byte_output(out_path)
         return False
 
     except subprocess.CalledProcessError as e:
         logger.error("ffmpeg ошибка %s:\n%s", clip_path.name,
                      e.stderr.decode(errors="replace")[-800:])
+        _cleanup_zero_byte_output(out_path)
         return False
     except subprocess.TimeoutExpired:
         logger.error("ffmpeg timeout >300s для %s", clip_path.name)
+        _cleanup_zero_byte_output(out_path)
         return False
     except Exception as e:
         logger.error("Постобработка %s: %s", clip_path.name, e)
-        return False
-    try:
-        info      = probe_video(clip_path)
-        duration  = info["duration"]
-        w, h      = info["width"], info["height"]
-        has_audio = info["has_audio"]
-
-        is_landscape = w > h
-        circle_ratio = (CIRCLE_RATIO_LANDSCAPE if is_landscape else CIRCLE_RATIO_PORTRAIT)
-        circle_ratio = circle_ratio + random.uniform(-CIRCLE_VARIATION, CIRCLE_VARIATION)
-        circle_ratio = max(0.5, min(0.98, circle_ratio))
-
-        actual_banner = banner_path or _pick_random_banner()
-        has_banner    = actual_banner is not None and actual_banner.exists()
-        banner_h_px   = int(OUTPUT_H * BANNER_HEIGHT_PCT) if has_banner else 0
-        banner_h_px  -= banner_h_px % 2
-
-        has_bg = bg_path is not None and bg_path.exists()
-
-        # Индексы входных потоков
-        bg_idx, banner_idx = -1, -1
-        next_idx = 1
-        if has_bg:
-            bg_idx = next_idx; next_idx += 1
-        if has_banner:
-            banner_idx = next_idx; next_idx += 1
-
-        out_path.parent.mkdir(parents=True, exist_ok=True)
-
-        fc = _build_filter_complex(
-            duration=duration,
-            has_audio=has_audio,
-            has_bg=has_bg,
-            has_banner=has_banner,
-            banner_h_px=banner_h_px,
-            shape=shape,
-            font_str=font_str,
-            meta=meta,
-            circle_ratio=circle_ratio,
-            bg_idx=bg_idx,
-            banner_idx=banner_idx,
-        )
-
-        cmd = ["ffmpeg", "-y", "-i", str(clip_path)]
-        if has_bg:
-            cmd += ["-stream_loop", "-1", "-i", str(bg_path)]
-        if has_banner:
-            cmd += ["-i", str(actual_banner)]
-
-        cmd += ["-filter_complex", fc, "-map", "[vout]"]
-
-        if has_audio:
-            cmd += ["-map", "0:a", "-c:a", "aac", "-b:a", AUDIO_BITRATE]
-        else:
-            cmd += ["-an"]
-
-        cmd += ["-c:v", vcodec]
-        for k, v in (vcodec_opts or {}).items():
-            cmd += [f"-{k}", str(v)]
-
-        cmd += [
-            "-r", str(OUTPUT_FPS),
-            "-pix_fmt", "yuv420p",
-            "-t", str(duration),
-            "-movflags", "+faststart",
-            str(out_path),
-        ]
-
-        logger.debug("ffmpeg cmd: %s", " ".join(cmd))
-        subprocess.run(cmd, check=True, capture_output=True, timeout=300)
-
-        if out_path.exists() and out_path.stat().st_size > 0:
-            logger.info("Постобработка OK: %s (shape=%s)", out_path.name, shape)
-            return True
-
-        logger.error("Постобработка: выходной файл пуст: %s", out_path)
-        return False
-
-    except subprocess.CalledProcessError as e:
-        logger.error("ffmpeg ошибка %s:\n%s", clip_path.name,
-                     e.stderr.decode(errors="replace")[-800:])
-        return False
-    except subprocess.TimeoutExpired:
-        logger.error("ffmpeg timeout >300s для %s", clip_path.name)
-        return False
-    except Exception as e:
-        logger.error("Постобработка %s: %s", clip_path.name, e)
+        _cleanup_zero_byte_output(out_path)
         return False
 
 
@@ -535,6 +461,7 @@ def stage_postprocess(
     metadata_variants: Optional[List[Dict]] = None,
     bg_path: Optional[Path] = None,
     tts_audio_paths: Optional[List[Optional[Path]]] = None,
+    output_dir: Optional[Path] = None,
 ) -> List[Path]:
     """
     Постобработка списка клипов. Возвращает список готовых путей.
@@ -542,6 +469,7 @@ def stage_postprocess(
     Args:
         tts_audio_paths: список .wav файлов (по одному на клип) или None.
                          Если передан — голос микшируется с оригинальным аудио.
+        output_dir: подпапка в OUTPUT_DIR (например по имени исходника); иначе файлы в корне OUTPUT_DIR.
     """
     if metadata_variants is None:
         metadata_variants = []
@@ -553,11 +481,14 @@ def stage_postprocess(
     font_ok  = _check_font()
     font_str = str(FONT_PATH) if font_ok else ""
 
+    base_out = output_dir if output_dir is not None else config.OUTPUT_DIR
+    base_out.mkdir(parents=True, exist_ok=True)
+
     successful: List[Path] = []
     for i, clip_path in enumerate(clips):
         meta     = random.choice(metadata_variants) if metadata_variants else {}
         shape    = random.choice(SHAPES)
-        out_path = config.OUTPUT_DIR / clip_path.with_suffix(".mp4").name
+        out_path = base_out / clip_path.with_suffix(".mp4").name
 
         # TTS файл для этого клипа (если есть)
         tts_path = tts_audio_paths[i] if i < len(tts_audio_paths) else None

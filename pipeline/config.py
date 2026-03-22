@@ -138,6 +138,11 @@ OVERLAY_POSITION     = "x=(w-text_w)/2:y=h*0.8"
 # Клонирование (cloner)
 # Баннер/лого в клонере УБРАН — баннер уже накладывается в postprocessor
 # ----------------------------------------------------------------------
+# Вероятность горизонтального зеркалирования (hflip). 0 = выключено — надписи
+# на исходном видео не зеркалятся; 0.5 = как раньше (до 50% клонов с flip).
+CLONE_HFLIP_PROBABILITY = float(os.getenv("CLONE_HFLIP_PROBABILITY", "0"))
+# Папка для готовых роликов: короткое имя вместо длинного stem (TikTok id и т.д.)
+OUTPUT_FOLDER_SHORT = os.getenv("OUTPUT_FOLDER_SHORT", "0") == "1"
 CLONES_PER_VIDEO     = 20
 SPEED_RANGE          = (0.97, 1.03)
 ZOOM_RANGE           = (1.02, 1.06)

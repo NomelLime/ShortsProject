@@ -263,6 +263,16 @@ class Editor(BaseAgent):
         with self._gpu.acquire("EDITOR", GPUPriority.ENCODE):
             self._set_status(AgentStatus.RUNNING, f"постобработка {video_path.name}")
             banner_path = self._pick_banner()
+            from pipeline import config as _cfg
+            from pipeline.utils import safe_output_folder_name
+
+            folder_key = (
+                safe_output_folder_name(video_path.stem)
+                if getattr(_cfg, "OUTPUT_FOLDER_SHORT", False)
+                else video_path.stem
+            )
+            _out_dir = _cfg.OUTPUT_DIR / folder_key
+            _out_dir.mkdir(parents=True, exist_ok=True)
             ready_clips = stage_postprocess(
                 clips=clips,
                 banner_path=banner_path,
@@ -271,6 +281,7 @@ class Editor(BaseAgent):
                 metadata_variants=meta_variants,
                 bg_path=bg_path,
                 tts_audio_paths=tts_paths,
+                output_dir=_out_dir,
             )
 
         # Очистка временных TTS файлов

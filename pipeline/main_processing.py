@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import List, Optional
 
 from pipeline import config, utils
+from pipeline.utils import safe_output_folder_name
 from pipeline.ai import generate_video_metadata, load_trending_hashtags, check_ollama
 from pipeline.cloner import run_cloning
 from pipeline.postprocessor import stage_postprocess
@@ -144,10 +145,16 @@ def run_processing(dry_run: bool = False) -> List[Path]:
         # Первый клип получает первый вариант метаданных (он же с best_segment).
         # Остальные клипы тоже используют первый вариант для постобработки —
         # финальное разнообразие метаданных обеспечивается на этапе клонирования.
+        folder_key = (
+            safe_output_folder_name(source_name)
+            if getattr(config, "OUTPUT_FOLDER_SHORT", False)
+            else source_name
+        )
+        out_dir = config.OUTPUT_DIR / folder_key
+        out_dir.mkdir(parents=True, exist_ok=True)
+
         postprocessed: List[Path] = []
         for clip_idx, clip_path in enumerate(clips):
-            out_dir = config.OUTPUT_DIR / source_name
-            out_dir.mkdir(parents=True, exist_ok=True)
             out_path = out_dir / clip_path.name
 
             # Для постобработки используем первый вариант метаданных
@@ -166,6 +173,7 @@ def run_processing(dry_run: bool = False) -> List[Path]:
                     vcodec=vcodec,
                     vcodec_opts=vcodec_opts,
                     metadata_variants=[clip_meta],
+                    output_dir=out_dir,
                 )
                 if post_results:
                     postprocessed.extend(post_results)

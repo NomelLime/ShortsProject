@@ -750,7 +750,10 @@ def _make_unique_variant(src: Path, out_dir: Path) -> Optional[Path]:
     saturation = _rnd.uniform(0.90, 1.10)
     hue        = _rnd.uniform(-8.0, 8.0)
     noise      = _rnd.randint(3, 8)
-    do_hflip   = _rnd.random() < 0.5
+    from pipeline import config as _cfg
+
+    p_hflip = float(getattr(_cfg, "CLONE_HFLIP_PROBABILITY", 0.0))
+    do_hflip = _rnd.random() < max(0.0, min(1.0, p_hflip))
 
     vf_parts = [
         f"setpts={1/speed:.4f}*PTS",
