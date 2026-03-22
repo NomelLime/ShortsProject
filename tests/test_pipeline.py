@@ -316,6 +316,27 @@ class TestUniqueLines:
         assert result == []
 
 
+class TestLoadKeywords:
+    def test_skips_comments_and_blank(self, tmp_path, monkeypatch):
+        from pipeline import config
+        from pipeline.utils import load_keywords
+
+        kw = tmp_path / "keywords.txt"
+        kw.write_text(
+            "# header comment\n\n  alpha  \n# skip\nbeta\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(config, "KEYWORDS_FILE", kw)
+        assert load_keywords() == ["alpha", "beta"]
+
+    def test_missing_file_returns_empty(self, tmp_path, monkeypatch):
+        from pipeline import config
+        from pipeline.utils import load_keywords
+
+        monkeypatch.setattr(config, "KEYWORDS_FILE", tmp_path / "none.txt")
+        assert load_keywords() == []
+
+
 class TestSaveAndLoadJson:
     def test_roundtrip(self, tmp_path):
         from pipeline.utils import save_json, load_json

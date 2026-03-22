@@ -879,3 +879,31 @@ curl -s -o /dev/null -w "%{http_code}" https://DOMAIN/t/test_acc  # ожидае
 **Статус тестов:** полный прогон `pytest tests` → **231/231** ✅
 
 **Проверка скачивания TikTok / Instagram (22.03.2026):** на тестовой сети TikTok вернул блокировку IP; Instagram — пустой ответ без cookies (ожидаемо: нужен логин в профиле или Netscape-файл). Логика `get_ytdlp_cookie_options()` отрабатывает; успех на проде зависит от IP, логина в профиле и версии `yt-dlp`.
+
+---
+
+### Сессия 12E (22.03.2026) — первичное заполнение `data/keywords.txt`
+
+**Проблема:** `data/` в `.gitignore`; `bootstrap_requirements.json` требует непустой `keywords.txt` — нужен шаблон и сценарий первого запуска.
+
+**`examples/keywords.example.txt`**
+
+- Коммитится в репо (не в `data/`). Стартовый набор коротких запросов под Shorts + комментарии `#` с инструкцией подстроить нишу.
+
+**`pipeline/utils.py` — `load_keywords()`**
+
+- Пропуск пустых строк и строк-комментариев (начинаются с `#` после `strip()`).
+
+**`scripts/init_keywords.py`**
+
+- Копирует шаблон → `data/keywords.txt`; флаг `--force` перезаписывает непустой файл.
+
+**`setup_account.py`**
+
+- После создания аккаунта: если `keywords.txt` отсутствует или не содержит ни одной «живой» строки — вопрос «Создать из шаблона?» (по умолчанию да) → `shutil.copyfile` из `examples/keywords.example.txt`.
+
+**`tests/test_pipeline.py`**
+
+- `TestLoadKeywords`: комментарии + отсутствующий файл.
+
+**Статус тестов:** полный прогон `pytest tests` → **233/233** ✅

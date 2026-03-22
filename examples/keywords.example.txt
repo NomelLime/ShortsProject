@@ -1,0 +1,21 @@
+# ShortsProject — стартовый список ключевых слов для SCOUT / downloader.search_and_save()
+# Формат: одна фраза на строку; строки с # в начале — комментарии (игнорируются).
+# Подстройте под нишу аккаунта: 10–40 коротких запросов лучше, чем один длинный.
+# После копирования в data/keywords.txt отредактируйте под себя.
+
+# Универсальные (shorts / viral)
+motivation
+funny moments
+life hacks
+cooking tips
+fitness motivation
+pet compilation
+travel short
+asmr
+story time
+before and after
+
+# Дополнительные идеи (раскомментируйте или замените)
+# tech tips
+# morning routine
+# satisfying video

@@ -210,10 +210,18 @@ def get_unique_bg(
 
 
 def load_keywords() -> List[str]:
-    """Загружает ключевые слова из keywords.txt, по одному на строку."""
+    """Загружает ключевые слова из keywords.txt, по одному на строку.
+    Пустые строки и комментарии (# …) пропускаются.
+    """
     if not config.KEYWORDS_FILE.exists():
         return []
-    return [line.strip() for line in config.KEYWORDS_FILE.read_text(encoding="utf-8").splitlines() if line.strip()]
+    out: List[str] = []
+    for line in config.KEYWORDS_FILE.read_text(encoding="utf-8").splitlines():
+        s = line.strip()
+        if not s or s.startswith("#"):
+            continue
+        out.append(s)
+    return out
 
 
 def load_proxy() -> Optional[str]:
