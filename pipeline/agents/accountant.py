@@ -157,10 +157,13 @@ class Accountant(BaseAgent):
             custom = self.memory.get("custom_limits", {})
             for acc in get_all_accounts():
                 if acc["name"] == account_name:
+                    acc_cfg = acc.get("config", {})
                     limit = (
                         custom.get(f"{account_name}.{platform}")
                         or custom.get(platform)
                         or custom.get("all")
+                        or acc_cfg.get("daily_limits", {}).get(platform)
+                        or getattr(config, "PLATFORM_DAILY_LIMITS", {}).get(platform)
                         or config.DAILY_UPLOAD_LIMIT
                     )
                     return get_uploads_today(Path(acc["dir"]), platform=platform) >= limit

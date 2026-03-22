@@ -240,10 +240,12 @@ class Publisher(BaseAgent):
             except Exception:
                 pass
 
-        # Прямая проверка
+        # Прямая проверка по платформе (согласовано с get_uploads_today(..., platform=))
         try:
-            from pipeline.utils import is_daily_limit_reached
-            return is_daily_limit_reached(acc_dir)
+            from pipeline import config as _cfg
+
+            limit = _cfg.PLATFORM_DAILY_LIMITS.get(platform, _cfg.DAILY_UPLOAD_LIMIT)
+            return uploads_today >= limit
         except Exception:
             return False
 
@@ -323,8 +325,7 @@ class Publisher(BaseAgent):
                 self._send(f"🔗 [{acc_name}] Ссылки установлены в профилях: {', '.join(success)}")
             if failed:
                 self._send(
-                    f"⚠️ [{acc_name}] Не удалось установить ссылки: {', '.join(failed)}
-"
+                    f"⚠️ [{acc_name}] Не удалось установить ссылки: {', '.join(failed)} "
                     f"(TikTok требует 1000+ подписчиков)"
                 )
         except Exception as exc:

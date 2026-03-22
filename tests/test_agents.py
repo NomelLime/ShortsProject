@@ -62,6 +62,10 @@ class TestGPUManager:
         # Создаём свежий экземпляр (не синглтон)
         from pipeline.agents.gpu_manager import GPUResourceManager
         self.gpu = GPUResourceManager(max_concurrent=1)
+        self.gpu.start()
+
+    def teardown_method(self):
+        self.gpu.stop()
 
     def test_priority_order(self):
         """CRITICAL должен получать ресурс раньше LLM при конкуренции."""
@@ -72,7 +76,10 @@ class TestGPUManager:
 
         def worker(priority, label):
             barrier.wait()  # все стартуют одновременно
-            with self.gpu.acquire(priority, label):
+            # Иначе LLM может попасть в очередь раньше CRITICAL — диспетчер обслужит его первым
+            if label == "llm":
+                time.sleep(0.08)
+            with self.gpu.acquire(label, priority):
                 acquired_order.append(label)
 
         # LLM стартует первым, CRITICAL — после небольшой задержки
@@ -86,8 +93,8 @@ class TestGPUManager:
         t_llm.join(timeout=5)
         t_crit.join(timeout=5)
 
-        # Оба должны были выполниться
-        assert set(acquired_order) == {"llm", "critical"}
+        # Оба выполнились; CRITICAL (0) обслуживается раньше LLM (1)
+        assert acquired_order == ["critical", "llm"]
 
     def test_concurrent_limit(self):
         """Не более max_concurrent=1 задачи одновременно."""
@@ -98,7 +105,7 @@ class TestGPUManager:
         lock             = threading.Lock()
 
         def worker():
-            with self.gpu.acquire(GPUPriority.ENCODE, "test"):
+            with self.gpu.acquire("test", GPUPriority.ENCODE):
                 with lock:
                     concurrent_count[0] += 1
                     max_seen[0] = max(max_seen[0], concurrent_count[0])
@@ -115,22 +122,22 @@ class TestGPUManager:
         assert max_seen[0] == 1, f"Одновременно работало {max_seen[0]} задач"
 
     def test_stats_tracking(self):
-        """После acquire → stats.total_acquisitions увеличивается."""
+        """После acquire → stats['tts_test'].calls увеличивается."""
         from pipeline.agents.gpu_manager import GPUPriority
 
-        stats_before = self.gpu.status()
-        with self.gpu.acquire(GPUPriority.TTS, "tts_test"):
+        stats_before = self.gpu.status().get("stats", {})
+        with self.gpu.acquire("tts_test", GPUPriority.TTS):
             pass
-        stats_after = self.gpu.status()
-
-        assert stats_after.get("total_acquisitions", 0) > \
-               stats_before.get("total_acquisitions", 0)
+        stats_after = self.gpu.status().get("stats", {})
+        assert stats_after.get("tts_test", {}).get("calls", 0) >= 1
+        assert stats_after.get("tts_test", {}).get("calls", 0) > \
+               stats_before.get("tts_test", {}).get("calls", 0)
 
     def test_decorator_usage(self):
         """@gpu_manager.task() должен освобождать ресурс после вызова."""
         from pipeline.agents.gpu_manager import GPUPriority
 
-        @self.gpu.task(GPUPriority.LLM, "decorated")
+        @self.gpu.gpu_task(GPUPriority.LLM)
         def my_task():
             return 42
 
@@ -319,7 +326,7 @@ class TestBaseAgentLifecycle:
         report_key = f"report_{agent.name.lower()}"
         stored = agent.memory.get(report_key)
         assert stored is not None
-        assert stored.get("score") == 42
+        assert stored.get("data", {}).get("score") == 42
 
 
 # ===========================================================================
@@ -348,6 +355,7 @@ class TestScout:
             scout = Scout(memory=mem, notify=None, interval_sec=9999)
 
             with patch("pipeline.utils.merge_and_save_urls") as mock_save:
+                mock_save.return_value = 2
                 scout._crawl_cycle()
                 # merge_and_save_urls должен быть вызван с найденными URL
                 mock_save.assert_called_once()
@@ -403,7 +411,7 @@ class TestCurator:
 
         ok, reason = curator._evaluate(
             Path("test.mp4"),
-            mock_probe,
+            lambda _p: mock_probe,
             lambda _path: False,   # is_duplicate = False
         )
         assert not ok
@@ -421,7 +429,7 @@ class TestCurator:
 
         ok, reason = curator._evaluate(
             Path("test.mp4"),
-            mock_probe,
+            lambda _p: mock_probe,
             lambda _path: False,
         )
         assert ok, f"Ожидали OK, получили: {reason}"
@@ -438,7 +446,7 @@ class TestCurator:
 
         ok, reason = curator._evaluate(
             Path("test.mp4"),
-            mock_probe,
+            lambda _p: mock_probe,
             lambda _path: True,   # is_duplicate = True
         )
         assert not ok
@@ -455,7 +463,7 @@ class TestCurator:
 
         ok, reason = curator._evaluate(
             Path("test.mp4"),
-            mock_probe,
+            lambda _p: mock_probe,
             lambda _path: False,
         )
         assert not ok
@@ -466,71 +474,66 @@ class TestCurator:
 # ===========================================================================
 
 class TestPublisher:
-    """Publisher: очередь загрузки, уведомление Guardian при ошибке."""
+    """Publisher: построение очереди, сводка батча (_process_results)."""
 
-    def test_publisher_notifies_guardian_on_error(self, tmp_path):
-        """upload_all вернул error → guardian.report_upload_error вызван."""
+    def test_process_results_updates_counters_and_batch_done(self, tmp_path):
+        """ok/error/warmup/other → счётчики и событие batch_done в памяти."""
         mem = make_memory(tmp_path)
+        from pipeline.agents.publisher import Publisher
 
-        error_result = [{
-            "status":     "error",
-            "account_id": "acc1",
-            "platform":   "youtube",
-            "error":      "HTTP 429 Too Many Requests",
+        pub = Publisher(memory=mem, notify=None)
+        pub._guardian = MagicMock()
+        results = [
+            {"status": "ok", "platform": "youtube"},
+            {"status": "ok", "platform": "youtube"},
+            {"status": "error", "platform": "tiktok"},
+            {"status": "warmup", "platform": "instagram"},
+            {"status": "not_logged_in", "platform": "youtube"},
+        ]
+        with patch.object(pub, "_send"):
+            pub._process_results(results)
+
+        assert pub._uploaded == 2
+        assert pub._failed == 1
+        batch_events = [e for e in mem.get_events(agent="PUBLISHER") if e.get("event") == "batch_done"]
+        assert batch_events
+        data = batch_events[-1].get("data", {})
+        assert data.get("batch_ok") == 2
+        assert data.get("batch_errors") == 1
+        assert data.get("batch_warmup") == 1
+        assert data.get("batch_other") == 1
+
+    def test_build_task_list_skips_quarantined_account(self, tmp_path):
+        """Карантин в Guardian → задача не попадает в список."""
+        mem = make_memory(tmp_path)
+        acc_root = tmp_path / "accounts" / "acc1"
+        acc_root.mkdir(parents=True)
+        (acc_root / "config.json").write_text(json.dumps({"platforms": ["youtube"]}), encoding="utf-8")
+
+        accounts = [{
+            "name":      "acc1",
+            "dir":       acc_root,
+            "config":    {"platforms": ["youtube"]},
+            "platforms": ["youtube"],
         }]
+        mock_g = MagicMock()
+        mock_g.is_account_safe.return_value = (False, "quarantine")
 
-        mock_guardian = MagicMock()
+        fake_queue = [{"video_path": tmp_path / "v.mp4", "meta": {}}]
+        (tmp_path / "v.mp4").write_bytes(b"x")
 
-        with patch("pipeline.uploader.upload_all", return_value=error_result), \
+        with patch("pipeline.utils.get_upload_queue", return_value=fake_queue), \
+             patch("pipeline.utils.get_uploads_today", return_value=0), \
+             patch("pipeline.upload_warmup.is_upload_blocked", return_value=(False, "")), \
              patch("pipeline.agents.publisher.get_memory", return_value=mem):
 
             from pipeline.agents.publisher import Publisher
-            publisher = Publisher(memory=mem, notify=None)
-            publisher._guardian = mock_guardian
 
-            publisher._process_batch(error_result)
+            pub = Publisher(memory=mem, notify=None, guardian=mock_g)
+            tasks = pub._build_task_list(accounts)
 
-        mock_guardian.report_upload_error.assert_called_once()
-        call_args = mock_guardian.report_upload_error.call_args[0]
-        assert call_args[0] == "acc1"
-
-    def test_publisher_notifies_guardian_on_success(self, tmp_path):
-        """upload_all вернул success → guardian.report_upload_success вызван."""
-        mem = make_memory(tmp_path)
-
-        success_result = [{
-            "status":     "success",
-            "account_id": "acc2",
-            "platform":   "tiktok",
-        }]
-
-        mock_guardian = MagicMock()
-
-        with patch("pipeline.agents.publisher.get_memory", return_value=mem):
-            from pipeline.agents.publisher import Publisher
-            publisher = Publisher(memory=mem, notify=None)
-            publisher._guardian = mock_guardian
-
-            publisher._process_batch(success_result)
-
-        mock_guardian.report_upload_success.assert_called_once()
-
-    def test_publisher_skips_quarantined_account(self, tmp_path):
-        """Аккаунт в карантине → пропускается в очереди."""
-        mem = make_memory(tmp_path)
-        mock_guardian = MagicMock()
-        mock_guardian.is_account_safe.return_value = (False, "quarantine")
-
-        with patch("pipeline.agents.publisher.get_memory", return_value=mem):
-            from pipeline.agents.publisher import Publisher
-            publisher = Publisher(memory=mem, notify=None)
-            publisher._guardian = mock_guardian
-
-        items = [
-            {"account_id": "acc1", "platform": "youtube", "video_path": Path("v.mp4"), "meta": {}},
-        ]
-        filtered = publisher._filter_queue(items)
-        assert len(filtered) == 0
+        assert tasks == []
+        assert pub._skipped >= 1
 
 
 # ===========================================================================
@@ -559,6 +562,7 @@ class TestGuardian:
         mem = make_memory(tmp_path)
 
         with patch("pipeline.quarantine.is_quarantined", return_value=False), \
+             patch("pipeline.upload_warmup.is_upload_blocked", return_value=(False, "")), \
              patch("pipeline.agents.guardian.get_memory", return_value=mem):
 
             from pipeline.agents.guardian import Guardian

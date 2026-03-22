@@ -232,13 +232,10 @@ class Guardian(BaseAgent):
 
             if issues:
                 self.memory.set("fingerprint_issues", issues)
-                lines = "
-".join(f"  • {i}" for i in issues[:5])
+                lines = "\n".join(f"  • {i}" for i in issues[:5])
                 self._send(
-                    f"🔍 [GUARDIAN] Fingerprint GEO несоответствия: {len(issues)}
-"
-                    f"{lines}
-"
+                    f"🔍 [GUARDIAN] Fingerprint GEO несоответствия: {len(issues)}\n"
+                    f"{lines}\n"
                     f"(сбросить: удалить acc_config['fingerprint'][platform])"
                 )
                 logger.warning("[GUARDIAN] Fingerprint issues: %d", len(issues))
@@ -296,14 +293,11 @@ class Guardian(BaseAgent):
             })
 
             if missing_links:
-                lines = "
-".join(f"  • {m}" for m in missing_links)
+                lines = "\n".join(f"  • {m}" for m in missing_links)
                 self._send(
-                    f"🔗 [GUARDIAN] Пропавшие ссылки (авто-восстановление не удалось):
-"
-                    f"{lines}
-
-Проверьте вручную."
+                    f"🔗 [GUARDIAN] Пропавшие ссылки (авто-восстановление не удалось):\n"
+                    f"{lines}\n\n"
+                    f"Проверьте вручную."
                 )
             else:
                 logger.info(

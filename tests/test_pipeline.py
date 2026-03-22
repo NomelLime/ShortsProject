@@ -271,20 +271,24 @@ class TestProbeVideo:
 class TestIsDuplicate:
     def test_first_video_not_duplicate(self, tmp_video, tmp_path):
         from pipeline import utils
+        import imagehash
 
-        with patch.object(utils, "compute_perceptual_hash", return_value="abc123"), \
+        ph = imagehash.hex_to_hash("a" * 16)
+        with patch.object(utils, "compute_perceptual_hash", return_value=ph), \
              patch.object(utils, "load_hashes", return_value=[]), \
              patch.object(utils, "save_hashes") as mock_save:
             result = utils.is_duplicate(tmp_video)
 
         assert result is False
-        mock_save.assert_called_once_with(["abc123"])
+        mock_save.assert_called_once_with([str(ph)])
 
     def test_duplicate_detected(self, tmp_video):
         from pipeline import utils
+        import imagehash
 
-        with patch.object(utils, "compute_perceptual_hash", return_value="abc123"), \
-             patch.object(utils, "load_hashes", return_value=["abc123"]):
+        ph = imagehash.hex_to_hash("b" * 16)
+        with patch.object(utils, "compute_perceptual_hash", return_value=ph), \
+             patch.object(utils, "load_hashes", return_value=[str(ph)]):
             result = utils.is_duplicate(tmp_video)
 
         assert result is True
@@ -591,7 +595,7 @@ class TestCollectStatistics:
         assert stats["uploaded"] == 2
         assert stats["errors"] == 1
         assert stats["skipped"] == 1
-        assert stats["by_platform"]["youtube"]["uploaded"] == 1
+        assert stats["platforms"]["youtube"] == 1
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -665,6 +669,7 @@ class TestSendTelegram:
              patch("pipeline.notifications.TELEGRAM_CHAT_ID", "CHAT"), \
              patch("pipeline.notifications.requests.post",
                    side_effect=req.exceptions.ConnectionError("fail")):
-            result = notifications.send_telegram("hello")
+            # Другой текст — иначе дедуп после test_returns_true_on_200 вернёт True без post()
+            result = notifications.send_telegram("hello (connection error test)")
 
         assert result is False
