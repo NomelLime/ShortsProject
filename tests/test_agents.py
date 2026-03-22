@@ -367,11 +367,13 @@ class TestScout:
         """COMMANDER устанавливает scout_keywords_override → Scout использует."""
         mem = make_memory(tmp_path)
         mem.set("scout_keywords_override", ["override_kw"])
+        # Иначе при пустом yt-dlp пойдёт реальный браузерный поиск (сеть/Playwright).
+        mem.set("scout_browser_enabled", False)
 
         with patch("pipeline.agents.scout.get_gpu_manager") as mock_gpu_mgr, \
              patch("pipeline.downloader._search_ytdlp", return_value=[]) as mock_search, \
              patch("pipeline.utils.load_keywords", return_value=["original_kw"]), \
-             patch("pipeline.utils.merge_and_save_urls"):
+             patch("pipeline.utils.merge_and_save_urls", return_value=0):
 
             mock_gpu = MagicMock()
             mock_gpu.acquire.return_value.__enter__ = MagicMock(return_value=None)
@@ -383,13 +385,13 @@ class TestScout:
             scout._crawl_cycle()
 
             # Поиск вызван с override-ключевым словом, не оригинальным
-            if mock_search.called:
-                call_kwargs = mock_search.call_args
-                called_keywords = (
-                    call_kwargs[0][0] if call_kwargs[0] else
-                    call_kwargs[1].get("keywords", [])
-                )
-                assert "override_kw" in str(called_keywords)
+            assert mock_search.called, "ожидали вызов _search_ytdlp с override keywords"
+            call_kwargs = mock_search.call_args
+            called_keywords = (
+                call_kwargs[0][0] if call_kwargs[0] else
+                call_kwargs[1].get("keywords", [])
+            )
+            assert "override_kw" in str(called_keywords)
 
 
 # ===========================================================================

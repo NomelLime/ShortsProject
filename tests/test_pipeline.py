@@ -318,7 +318,10 @@ class TestUniqueLines:
 
 class TestLoadKeywords:
     def test_skips_comments_and_blank(self, tmp_path, monkeypatch):
-        from pipeline import config
+        # Патчим pipeline.utils.config, а не pipeline.config: тесты вроде
+        # test_upload_warmup подменяют sys.modules["pipeline.config"], после чего
+        # у pipeline.utils остаётся старая ссылка на «настоящий» config.
+        import pipeline.utils as pipeline_utils
         from pipeline.utils import load_keywords
 
         kw = tmp_path / "keywords.txt"
@@ -326,14 +329,14 @@ class TestLoadKeywords:
             "# header comment\n\n  alpha  \n# skip\nbeta\n",
             encoding="utf-8",
         )
-        monkeypatch.setattr(config, "KEYWORDS_FILE", kw)
+        monkeypatch.setattr(pipeline_utils.config, "KEYWORDS_FILE", kw)
         assert load_keywords() == ["alpha", "beta"]
 
     def test_missing_file_returns_empty(self, tmp_path, monkeypatch):
-        from pipeline import config
+        import pipeline.utils as pipeline_utils
         from pipeline.utils import load_keywords
 
-        monkeypatch.setattr(config, "KEYWORDS_FILE", tmp_path / "none.txt")
+        monkeypatch.setattr(pipeline_utils.config, "KEYWORDS_FILE", tmp_path / "none.txt")
         assert load_keywords() == []
 
 
@@ -660,7 +663,16 @@ class TestConfigHasTelegramVars:
 # ═══════════════════════════════════════════════════════════════════════
 
 class TestSendTelegram:
+    @staticmethod
+    def _reset_telegram_rate_state():
+        """Сброс глобального dedup/rate-limit между тестами одного процесса."""
+        from pipeline import notifications
+
+        notifications._tg_dedup_cache.clear()
+        notifications._tg_last_send_ts = 0.0
+
     def test_returns_false_when_not_configured(self):
+        self._reset_telegram_rate_state()
         from pipeline import notifications, config
 
         with patch.object(config, "TELEGRAM_BOT_TOKEN", ""), \
@@ -673,6 +685,7 @@ class TestSendTelegram:
         assert result is False
 
     def test_returns_true_on_200(self):
+        self._reset_telegram_rate_state()
         from pipeline import notifications
 
         mock_resp = MagicMock()
@@ -680,20 +693,25 @@ class TestSendTelegram:
 
         with patch("pipeline.notifications.TELEGRAM_BOT_TOKEN", "TOKEN"), \
              patch("pipeline.notifications.TELEGRAM_CHAT_ID", "CHAT"), \
+             patch("pipeline.notifications._CRITICAL_ONLY", False), \
              patch("pipeline.notifications.requests.post", return_value=mock_resp):
             result = notifications.send_telegram("hello")
 
         assert result is True
 
     def test_returns_false_on_request_error(self):
+        self._reset_telegram_rate_state()
         from pipeline import notifications
         import requests as req
 
         with patch("pipeline.notifications.TELEGRAM_BOT_TOKEN", "TOKEN"), \
              patch("pipeline.notifications.TELEGRAM_CHAT_ID", "CHAT"), \
+             patch("pipeline.notifications._CRITICAL_ONLY", False), \
              patch("pipeline.notifications.requests.post",
                    side_effect=req.exceptions.ConnectionError("fail")):
-            # Другой текст — иначе дедуп после test_returns_true_on_200 вернёт True без post()
-            result = notifications.send_telegram("hello (connection error test)")
+            # Уникальный текст — гарантия обхода дедупа от других тестов в suite
+            result = notifications.send_telegram(
+                "hello (connection error test) 7f3c2a1b-unique-msg"
+            )
 
         assert result is False
