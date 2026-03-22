@@ -71,6 +71,18 @@ def mark_session_verified(account_name: str, platform: str, valid: bool = True) 
         account_name, platform, valid,
     )
 
+    if valid:
+        try:
+            from pathlib import Path as _Path
+
+            from pipeline.upload_warmup import ensure_warmup_started, load_account_config
+
+            acc_dir = _Path(config.ACCOUNTS_ROOT) / account_name
+            if acc_dir.is_dir():
+                ensure_warmup_started(acc_dir, platform, load_account_config(acc_dir))
+        except Exception as exc:
+            logger.warning("[session_manager] upload_warmup ensure: %s", exc)
+
 
 def get_session_age_hours(account_name: str, platform: str) -> Optional[float]:
     """

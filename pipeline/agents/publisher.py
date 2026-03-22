@@ -179,6 +179,7 @@ class Publisher(BaseAgent):
         """
         from pipeline.utils import get_upload_queue, get_uploads_today
         from pipeline import config
+        from pipeline.upload_warmup import is_upload_blocked
 
         tasks = []
         for acc in accounts:
@@ -195,6 +196,12 @@ class Publisher(BaseAgent):
                         logger.debug("[PUBLISHER] Пропуск %s/%s: %s", acc_name, platform, reason)
                         self._skipped += 1
                         continue
+
+                warm_block, warm_reason = is_upload_blocked(acc_name, platform)
+                if warm_block:
+                    logger.debug("[PUBLISHER] Пропуск %s/%s: %s", acc_name, platform, warm_reason)
+                    self._skipped += 1
+                    continue
 
                 # Проверка лимита (Accountant или напрямую)
                 if self._is_at_limit(acc_dir, platform, uploads_today):
@@ -365,6 +372,18 @@ class Publisher(BaseAgent):
 
             mark_session_verified(acc_name, platform, valid=True)
 
+            from pipeline.upload_warmup import is_upload_warmup_active
+
+            w_block, w_reason = is_upload_warmup_active(acc_dir, platform, acc_cfg)
+            if w_block:
+                logger.info("[PUBLISHER] %s/%s — заливка на паузе (%s)", acc_name, platform, w_reason)
+                return [{
+                    "status":      "warmup",
+                    "account_id":  acc_name,
+                    "platform":    platform,
+                    "error_msg":   w_reason,
+                }]
+
             # Setup ссылки в профиле (один раз — после первой загрузки)
             self._maybe_setup_profile_links(acc_name, acc_cfg, profile_dir)
 
@@ -491,6 +510,13 @@ class Publisher(BaseAgent):
                 logger.warning("[PUBLISHER] Retry: файл не найден %s — пропуск", file_path)
                 continue
 
+            from pipeline.upload_warmup import is_upload_blocked
+
+            rb, _ = is_upload_blocked(acc_id, platform)
+            if rb:
+                remaining.append(item)
+                continue
+
             logger.info("[PUBLISHER] Retry попытка %d/%d: %s → %s",
                         attempts + 1, _MAX_RETRY_ATTEMPTS, file_path.name, platform)
             try:
@@ -530,9 +556,13 @@ class Publisher(BaseAgent):
     # ------------------------------------------------------------------
 
     def _process_results(self, results: List[Dict]) -> None:
-        ok     = [r for r in results if r.get("status") == "ok"]
-        errors = [r for r in results if r.get("status") == "error"]
-        other  = [r for r in results if r.get("status") not in ("ok", "error")]
+        ok      = [r for r in results if r.get("status") == "ok"]
+        errors  = [r for r in results if r.get("status") == "error"]
+        warmup  = [r for r in results if r.get("status") == "warmup"]
+        other   = [
+            r for r in results
+            if r.get("status") not in ("ok", "error", "warmup")
+        ]
 
         self._uploaded += len(ok)
         self._failed   += len(errors)
@@ -550,6 +580,7 @@ class Publisher(BaseAgent):
             "ts":              datetime.now().isoformat(timespec="seconds"),
             "batch_ok":        len(ok),
             "batch_errors":    len(errors),
+            "batch_warmup":    len(warmup),
             "batch_other":     len(other),
             "total_uploaded":  self._uploaded,
             "total_failed":    self._failed,
@@ -563,14 +594,22 @@ class Publisher(BaseAgent):
         parts = [f"✅ {len(ok)}"]
         if errors:
             parts.append(f"❌ {len(errors)}")
+        if warmup:
+            parts.append(f"🧊 прогрев {len(warmup)}")
         by_p = ", ".join(f"{p}:{n}" for p, n in platforms.items())
         msg = f"📤 [PUBLISHER] {' / '.join(parts)}"
         if by_p:
             msg += f" ({by_p})"
         self._send(msg)
 
-        logger.info("[PUBLISHER] Батч: ok=%d, errors=%d, итого=%d/%d",
-                    len(ok), len(errors), self._uploaded, self._uploaded + self._failed)
+        logger.info(
+            "[PUBLISHER] Батч: ok=%d, errors=%d, warmup=%d, итого=%d/%d",
+            len(ok),
+            len(errors),
+            len(warmup),
+            self._uploaded,
+            self._uploaded + self._failed,
+        )
 
     # ------------------------------------------------------------------
     # Публичный API

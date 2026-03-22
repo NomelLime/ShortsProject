@@ -318,6 +318,13 @@ def _run_upload_for(account: Dict, platform: str) -> None:
         logger.info("[upload_scheduler] [%s][%s] Аккаунт в карантине — пропуск.", acc_name, platform)
         return
 
+    from pipeline.upload_warmup import is_upload_blocked
+
+    wb, wr = is_upload_blocked(acc_name, platform)
+    if wb:
+        logger.info("[upload_scheduler] [%s][%s] Прогрев — заливка отложена (%s).", acc_name, platform, wr)
+        return
+
     profile_dir = acc_dir / "browser_profile"
     try:
         pw, context = launch_browser(acc_cfg, profile_dir)
@@ -332,7 +339,33 @@ def _run_upload_for(account: Dict, platform: str) -> None:
             logger.error("[upload_scheduler] [%s][%s] Сессия невалидна.", acc_name, platform)
             return
         mark_session_verified(acc_name, platform, valid=True)
-        run_activity(context, platform, queue[0].get("meta", {}))
+
+        from pipeline.upload_warmup import is_upload_warmup_active
+
+        w_active, w_msg = is_upload_warmup_active(acc_dir, platform, acc_cfg)
+        if w_active:
+            logger.info(
+                "[upload_scheduler] [%s][%s] После входа — только активность, без заливки (%s)",
+                acc_name,
+                platform,
+                w_msg,
+            )
+            run_activity(
+                context,
+                platform,
+                queue[0].get("meta", {}),
+                acc_dir=acc_dir,
+                acc_cfg=acc_cfg,
+            )
+            return
+
+        run_activity(
+            context,
+            platform,
+            queue[0].get("meta", {}),
+            acc_dir=acc_dir,
+            acc_cfg=acc_cfg,
+        )
 
         for item in queue:
             if utils.get_uploads_today(acc_dir) >= daily_limit:

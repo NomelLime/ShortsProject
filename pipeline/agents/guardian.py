@@ -59,6 +59,7 @@ def _sanitize_llm_input(text: str, max_len: int = 300) -> str:
 _PROXY_CHECK_INTERVAL   = 300   # 5 минут
 _SESSION_CHECK_INTERVAL  = 3600   # 1 час
 _PROFILE_CHECK_INTERVAL  = 86400  # 24 часа
+_WARMUP_REMINDER_INTERVAL = 3600  # напоминания о конце прогрева (upload_warmup)
 
 
 class Guardian(BaseAgent):
@@ -85,6 +86,7 @@ class Guardian(BaseAgent):
         self._last_proxy_check  = 0.0
         self._last_session_check  = 0.0
         self._last_profile_check  = 0.0
+        self._last_warmup_reminder_check = 0.0
         # Кеш LLM-задержки: acc_name → (delay_sec, computed_at monotonic)
         # TTL = 30 мин — иначе каждая загрузка захватывает GPU и шлёт промпт
         self._delay_cache: Dict[str, Tuple[float, float]] = {}
@@ -113,6 +115,15 @@ class Guardian(BaseAgent):
             # Проверка ссылок в профилях (раз в 24ч)
             if now - self._last_profile_check >= _PROFILE_CHECK_INTERVAL:
                 self._profile_link_cycle()
+
+            if now - self._last_warmup_reminder_check >= _WARMUP_REMINDER_INTERVAL:
+                self._last_warmup_reminder_check = time.monotonic()
+                try:
+                    from pipeline.warmup_notify import scan_warmup_end_reminders
+
+                    scan_warmup_end_reminders()
+                except Exception as exc:
+                    logger.debug("[GUARDIAN] warmup reminders: %s", exc)
 
             self.sleep(30.0)
 
@@ -396,6 +407,16 @@ class Guardian(BaseAgent):
             from pipeline.quarantine import is_quarantined
             if is_quarantined(acc_name, platform):
                 return False, "в карантине"
+        except Exception:
+            pass
+
+        # 3. Прогрев после первой сессии (заливка отложена на несколько дней)
+        try:
+            from pipeline.upload_warmup import is_upload_blocked
+
+            blocked, reason = is_upload_blocked(acc_name, platform)
+            if blocked:
+                return False, reason or "прогрев аккаунта"
         except Exception:
             pass
 

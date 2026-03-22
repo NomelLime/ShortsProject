@@ -25,6 +25,7 @@ from pipeline.notifications import check_and_handle_captcha, send_telegram
 from pipeline.session_manager import ensure_session_fresh, mark_session_verified
 from pipeline.analytics import register_upload
 from pipeline.quarantine import is_quarantined, mark_error as q_mark_error, mark_success as q_mark_success
+from pipeline.upload_warmup import is_upload_blocked, is_upload_warmup_active
 
 logger = logging.getLogger(__name__)
 
@@ -497,6 +498,17 @@ def upload_all(dry_run: bool = False) -> List[Dict]:
                 logger.info("[%s][%s] Дневной лимит (%d/%d).", acc_name, platform, uploads_today, daily_limit)
                 continue
 
+            wb, wr = is_upload_blocked(acc_name, platform)
+            if wb:
+                logger.info("[%s][%s] Прогрев — заливка отложена (%s).", acc_name, platform, wr)
+                results.append({
+                    "status": "warmup",
+                    "platform": platform,
+                    "account_id": acc_name,
+                    "error_msg": wr,
+                })
+                continue
+
             profile_dir = acc_dir / "browser_profile"
             try:
                 pw, context = launch_browser(acc_cfg, profile_dir, platform=platform)
@@ -520,7 +532,36 @@ def upload_all(dry_run: bool = False) -> List[Dict]:
                     continue
                 mark_session_verified(acc_name, platform, valid=True)
 
-                run_activity(context, platform, queue[0].get("meta", {}))
+                w_active, w_msg = is_upload_warmup_active(acc_dir, platform, acc_cfg)
+                if w_active:
+                    logger.info(
+                        "[%s][%s] Прогрев после первой сессии — только активность, без заливки (%s)",
+                        acc_name,
+                        platform,
+                        w_msg,
+                    )
+                    run_activity(
+                        context,
+                        platform,
+                        queue[0].get("meta", {}),
+                        acc_dir=acc_dir,
+                        acc_cfg=acc_cfg,
+                    )
+                    results.append({
+                        "status": "warmup",
+                        "platform": platform,
+                        "account_id": acc_name,
+                        "error_msg": w_msg,
+                    })
+                    continue
+
+                run_activity(
+                    context,
+                    platform,
+                    queue[0].get("meta", {}),
+                    acc_dir=acc_dir,
+                    acc_cfg=acc_cfg,
+                )
 
                 for item in queue:
                     if utils.get_uploads_today(acc_dir) >= daily_limit:

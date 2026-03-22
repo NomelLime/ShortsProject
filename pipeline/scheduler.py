@@ -85,7 +85,22 @@ class _AccountActivityJob:
 
     def _next_delay(self) -> float:
         jitter = random.uniform(-self._jitter_sec, self._jitter_sec)
-        return max(60.0, self._interval_sec + jitter)
+        base = max(60.0, self._interval_sec + jitter)
+        try:
+            from pathlib import Path
+
+            from pipeline.upload_warmup import is_upload_warmup_active
+
+            acc_dir = Path(self._account["dir"])
+            warm, _ = is_upload_warmup_active(
+                acc_dir, self._platform, self._account.get("config", {}),
+            )
+            imult = float(getattr(config, "ACTIVITY_WARMUP_INTERVAL_MULT", 1.0) or 1.0)
+            if warm and imult > 1.0:
+                base *= imult
+        except Exception:
+            pass
+        return base
 
     def start(self) -> None:
         with self._lock:

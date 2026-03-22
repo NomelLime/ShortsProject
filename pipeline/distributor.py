@@ -7,6 +7,8 @@ distributor.py — Этап «Распределение готовых шорт
     а не из единого DAILY_UPLOAD_LIMIT.
     Например: youtube=5, tiktok=5, instagram=5 в сутки на аккаунт.
   - MAX_PER_ACCOUNT заменён на платформо-зависимый лимит из конфига.
+  - Прогрев заливки: слоты отключены; OUTPUT можно очистить, если платформа
+    полностью в прогреве у всех аккаунтов (см. upload_warmup).
 """
 
 import json
@@ -18,6 +20,7 @@ from pathlib import Path
 
 from pipeline import config
 from pipeline.analytics import assign_ab_variants, get_ab_meta_for_account
+from pipeline.upload_warmup import all_accounts_warmup_for_platform, is_upload_warmup_active
 
 log = logging.getLogger("distributor")
 
@@ -34,7 +37,7 @@ def _load_distributed_tracking() -> dict:
     try:
         return json.loads(DISTRIBUTED_TRACKING_FILE.read_text(encoding="utf-8"))
     except Exception as exc:
-        logger.warning("[distributor] Не удалось прочитать tracking файл, сбрасываем: %s", exc)
+        log.warning("[distributor] Не удалось прочитать tracking файл, сбрасываем: %s", exc)
         return {}
 
 
@@ -64,8 +67,22 @@ def _get_active_platforms() -> set:
                     platforms = [platforms]
                 active.update(platforms)
             except Exception as exc:
-                logger.warning("[distributor] Не удалось прочитать конфиг аккаунта %s: %s", acc_dir.name, exc)
+                log.warning("[distributor] Не удалось прочитать конфиг аккаунта %s: %s", acc_dir.name, exc)
     return active or set(config.ALL_PLATFORMS)
+
+
+def _output_distribution_satisfied(platform_map: dict, active_platforms: set) -> bool:
+    """
+    Можно удалить ролик из OUTPUT: для каждой активной платформы либо уже есть копия
+    в очереди, либо все аккаунты с этой платформой в прогреве (копию класть некуда).
+    """
+    for p in active_platforms:
+        if platform_map.get(p):
+            continue
+        if all_accounts_warmup_for_platform(p):
+            continue
+        return False
+    return True
 
 
 # ─────────────────────────── Парсинг описания ────────────────────────────
@@ -133,10 +150,10 @@ def distribute_shorts(dry_run: bool = False) -> None:
     Распределяет готовые шортсы по папкам upload_queue/<platform>/
     для каждого аккаунта с учётом дневных лимитов по платформам.
 
-    После того как видео распределено во все очереди активных платформ,
-    оно удаляется из OUTPUT_DIR — копии уже в очередях на загрузку.
-    Архивирование исходника из preparing_shorts/ выполняет finalize.py
-    после подтверждения реальной загрузки на все платформы.
+    После того как для каждой активной платформы либо есть копия в очереди,
+    либо все аккаунты с этой платформой в прогреве (копию класть некуда),
+    файл удаляется из OUTPUT_DIR. Архивирование исходника из preparing_shorts/
+    выполняет finalize.py (заливка и/или учёт прогрева по платформам).
     """
     today             = date.today().isoformat()
     shorts            = collect_shorts()
@@ -178,6 +195,15 @@ def distribute_shorts(dry_run: bool = False) -> None:
             platforms = [platforms]
 
         for platform in platforms:
+            w_active, _ = is_upload_warmup_active(acc_dir, platform, acc_cfg)
+            if w_active:
+                log.info(
+                    "[%s][%s] Прогрев заливки — слот дистрибьютора отключён.",
+                    acc_dir.name,
+                    platform,
+                )
+                continue
+
             daily_limit = config.PLATFORM_DAILY_LIMITS.get(platform, config.DAILY_UPLOAD_LIMIT)
             queue_dir   = acc_dir / "upload_queue" / platform
             queue_dir.mkdir(parents=True, exist_ok=True)
@@ -193,7 +219,9 @@ def distribute_shorts(dry_run: bool = False) -> None:
             })
 
     if not slot_list:
-        log.info("Все очереди заполнены — нечего распределять.")
+        log.info(
+            "Нет слотов для распределения: очереди полны по лимиту и/или все целевые аккаунты в прогреве заливки."
+        )
         return
 
     # ── A/B: регистрируем варианты метаданных для каждого source-стема ─────────
@@ -269,9 +297,11 @@ def distribute_shorts(dry_run: bool = False) -> None:
     # Удаляем из OUTPUT_DIR видео, которые распределены на все активные платформы
     deleted = 0
     for stem, platform_map in dist_tracking.items():
-        all_covered = all(platform_map.get(p, False) for p in active_platforms)
-        if not all_covered:
-            missing = [p for p in active_platforms if not platform_map.get(p, False)]
+        if not _output_distribution_satisfied(platform_map, active_platforms):
+            missing = [
+                p for p in active_platforms
+                if not platform_map.get(p, False) and not all_accounts_warmup_for_platform(p)
+            ]
             log.debug("Пропуск удаления %s — ещё не распределено на: %s", stem, ", ".join(missing))
             continue
 

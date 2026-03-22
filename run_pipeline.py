@@ -59,6 +59,13 @@ def main():
     # Создаём все необходимые директории
     ensure_dirs()
 
+    try:
+        from pipeline.warmup_report import log_warmup_dashboard
+
+        log_warmup_dashboard(logger)
+    except Exception:
+        pass
+
     # Запускаем фоновый планировщик активности аккаунтов
     # Активность идёт параллельно с пайплайном, независимо от загрузки
     with ActivityScheduler():

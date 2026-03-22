@@ -338,6 +338,35 @@ DAILY_UPLOAD_LIMIT = int(os.getenv("DAILY_UPLOAD_LIMIT", "5"))
 ALL_PLATFORMS = {"youtube", "tiktok", "instagram"}
 
 # ----------------------------------------------------------------------
+# Прогрев после первой валидной сессии: заливка откладывается на N дней
+# (см. pipeline/upload_warmup.py, accounts/<name>/upload_warmup.json).
+# В config.json аккаунта: "skip_upload_warmup": true — отключить для старых аккаунтов.
+# ----------------------------------------------------------------------
+def _env_bool(name: str, default: bool) -> bool:
+    v = os.getenv(name)
+    if v is None:
+        return default
+    return v.strip().lower() not in ("0", "false", "no", "off")
+
+
+UPLOAD_WARMUP_ENABLED = _env_bool("UPLOAD_WARMUP_ENABLED", True)
+UPLOAD_WARMUP_MIN_DAYS = max(1, int(os.getenv("UPLOAD_WARMUP_MIN_DAYS", "3")))
+UPLOAD_WARMUP_MAX_DAYS = max(
+    UPLOAD_WARMUP_MIN_DAYS,
+    int(os.getenv("UPLOAD_WARMUP_MAX_DAYS", "5")),
+)
+# platform — отдельный прогрев на каждую сеть; account — одно окно на весь аккаунт
+UPLOAD_WARMUP_DEFAULT_SCOPE = os.getenv("UPLOAD_WARMUP_DEFAULT_SCOPE", "platform").strip().lower()
+if UPLOAD_WARMUP_DEFAULT_SCOPE not in ("platform", "account"):
+    UPLOAD_WARMUP_DEFAULT_SCOPE = "platform"
+# Напоминание в Telegram за N часов до конца прогрева (0 = отключить)
+UPLOAD_WARMUP_REMINDER_HOURS = float(os.getenv("UPLOAD_WARMUP_REMINDER_HOURS", "24"))
+# VL-активность в прогреве: доля длительности сессии (1.0 = как обычно)
+ACTIVITY_WARMUP_DURATION_MULT = float(os.getenv("ACTIVITY_WARMUP_DURATION_MULT", "0.45"))
+# Множитель интервала между сессиями активности (1.0 = без изменений)
+ACTIVITY_WARMUP_INTERVAL_MULT = float(os.getenv("ACTIVITY_WARMUP_INTERVAL_MULT", "1.75"))
+
+# ----------------------------------------------------------------------
 # TTS — Kokoro-82M (локальный, бесплатный, MIT лицензия)
 # Файлы модели: assets/tts/kokoro-v1.9.onnx + voices-v1.0.bin
 # Скачать: https://github.com/thewh1teagle/kokoro-onnx/releases

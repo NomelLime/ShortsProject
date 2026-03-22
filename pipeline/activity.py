@@ -4,6 +4,9 @@
 import time
 import random
 import logging
+from pathlib import Path
+from typing import Any, Dict, Optional
+
 from rebrowser_playwright.sync_api import BrowserContext, Page
 
 from pipeline.config import (
@@ -110,11 +113,19 @@ def _perform_search(page: Page, platform: str, keywords: list[str]) -> None:
 # Основной модуль активности
 # ──────────────────────────────────────────────────────────────
 
-def run_activity(context: BrowserContext, platform: str, metadata: dict) -> None:
+def run_activity(
+    context: BrowserContext,
+    platform: str,
+    metadata: dict,
+    *,
+    acc_dir: Optional[Path] = None,
+    acc_cfg: Optional[Dict[str, Any]] = None,
+) -> None:
     """
     Главная функция симуляции активности.
     Открывает страницу платформы, скроллит ленту, смотрит видео,
     ставит лайки и делает поиск. Работает ACTIVITY_DURATION_*_SEC секунд.
+    При acc_dir/acc_cfg и прогреве заливки — сокращённая длительность (как VL).
     """
     urls     = PLATFORM_URLS.get(platform, {})
     feed_url = (
@@ -125,6 +136,24 @@ def run_activity(context: BrowserContext, platform: str, metadata: dict) -> None
     )
 
     duration = random.randint(ACTIVITY_DURATION_MIN_SEC, ACTIVITY_DURATION_MAX_SEC)
+    if acc_dir is not None and acc_cfg is not None:
+        try:
+            from pipeline import config as _cfg
+            from pipeline.upload_warmup import is_upload_warmup_active
+
+            warm, _ = is_upload_warmup_active(acc_dir, platform, acc_cfg)
+            wmult = float(getattr(_cfg, "ACTIVITY_WARMUP_DURATION_MULT", 1.0) or 1.0)
+            if warm and 0 < wmult < 1.0:
+                lo = max(60, int(ACTIVITY_DURATION_MIN_SEC * wmult))
+                hi = max(lo + 30, int(ACTIVITY_DURATION_MAX_SEC * wmult))
+                duration = random.randint(lo, hi)
+                logger.info(
+                    "[%s] Прогрев — сокращённая активность (~%.0f%% длительности)",
+                    platform,
+                    wmult * 100,
+                )
+        except Exception:
+            pass
     logger.info(f"[{platform}] Начало симуляции активности на {duration // 60} мин.")
 
     page = context.new_page()

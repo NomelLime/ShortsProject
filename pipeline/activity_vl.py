@@ -37,6 +37,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from rebrowser_playwright.sync_api import BrowserContext, Page
 
+from pipeline import config
 from pipeline.config import (
     ACTIVITY_DURATION_MIN_SEC, ACTIVITY_DURATION_MAX_SEC,
     WATCH_TIME_MIN_SEC, WATCH_TIME_MAX_SEC,
@@ -515,7 +516,24 @@ def run_activity_vl(
     # detect_and_cache_niche сохраняет результат в config.json["niche"]
     account_niche = detect_and_cache_niche(account)
 
-    duration = random.randint(ACTIVITY_DURATION_MIN_SEC, ACTIVITY_DURATION_MAX_SEC)
+    from pathlib import Path as _Path
+
+    from pipeline.upload_warmup import is_upload_warmup_active
+
+    acc_dir = _Path(account["dir"])
+    in_warmup, _ = is_upload_warmup_active(acc_dir, platform, account_cfg)
+    wmult = float(getattr(config, "ACTIVITY_WARMUP_DURATION_MULT", 1.0) or 1.0)
+    if in_warmup and 0 < wmult < 1.0:
+        lo = max(60, int(ACTIVITY_DURATION_MIN_SEC * wmult))
+        hi = max(lo + 30, int(ACTIVITY_DURATION_MAX_SEC * wmult))
+        duration = random.randint(lo, hi)
+        logger.info(
+            "[VL-Activity][%s] Прогрев заливки — сокращённая сессия (~%.0f%% длительности)",
+            platform,
+            wmult * 100,
+        )
+    else:
+        duration = random.randint(ACTIVITY_DURATION_MIN_SEC, ACTIVITY_DURATION_MAX_SEC)
     logger.info(
         "[VL-Activity][%s] Starting (niche: %s, duration: %d min)",
         platform, account_niche, duration // 60,

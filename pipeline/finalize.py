@@ -2,9 +2,9 @@
 pipeline/finalize.py – Этап финализации.
 
 Изменения:
-  - Архивирование исходника из preparing_shorts/ происходит ТОЛЬКО тогда,
-    когда видео загружено хотя бы на одну из платформ каждой группы:
-    youtube + tiktok + instagram.
+  - Архивирование исходника из preparing_shorts/ когда в трекинге есть хотя бы
+    одна успешная заливка и по каждой активной платформе либо залито, либо все
+    аккаунты с этой платформой в прогреве (upload_warmup).
   - Для отслеживания используется data/upload_tracking.json:
       { "video_stem": {"youtube": true, "tiktok": false, "instagram": true} }
   - Связь между клоном в upload_queue и исходником в preparing_shorts/
@@ -21,6 +21,7 @@ from typing import Dict, List, Set
 
 from pipeline import config, utils
 from pipeline.notifications import send_telegram, send_telegram_alert
+from pipeline.upload_warmup import tracking_stem_ready_for_archive
 
 logger = logging.getLogger(__name__)
 
@@ -125,15 +126,14 @@ def _find_complete_sources(
     tracking: Dict[str, Dict[str, bool]],
 ) -> Set[str]:
     """
-    Возвращает множество stems исходников, загруженных на все АКТИВНЫЕ платформы.
-    Активные платформы определяются по существующим аккаунтам, а не по ALL_PLATFORMS.
-    Это означает: если у пользователя только YouTube-аккаунты — видео архивируется
-    после загрузки на YouTube, не ожидая TikTok/Instagram.
+    Возвращает stems исходников, по которым «закрыты» все обязательные платформы:
+    либо успешная заливка, либо платформа целиком в прогреве у всех аккаунтов
+    (фактическая заливка на неё сейчас отключена — см. upload_warmup).
     """
     required = _get_required_platforms()
     complete: Set[str] = set()
     for stem, platforms in tracking.items():
-        if all(platforms.get(p, False) for p in required):
+        if tracking_stem_ready_for_archive(platforms, required):
             complete.add(stem)
     return complete
 
@@ -145,8 +145,8 @@ def _archive_sources(
     dry_run: bool = False,
 ) -> tuple[int, int]:
     """
-    Перемещает в archive/ только те исходники из preparing_shorts/,
-    которые загружены на все платформы (stem в complete_stems).
+    Перемещает в archive/ исходники из preparing_shorts/, stem ∈ complete_stems
+    (все обязательные платформы: заливка или полный прогрев по платформе).
 
     Возвращает (перемещено, ошибок).
     """
@@ -301,7 +301,7 @@ def _build_report_text(
         f"  ❌ Ошибок:            `{stats['errors']}`",
         "",
         "📦 *Архивирование:*",
-        f"  📂 Перемещено файлов: `{archived}` (все 3 платформы ✓)",
+        f"  📂 Перемещено файлов: `{archived}` (все обязательные платформы ✓)",
         f"  ⏳ Ожидают платформ:  `{len(pending)}`",
         f"  ⚠️ Ошибок архива:    `{archive_errors}`",
         "",
@@ -378,7 +378,8 @@ def finalize_and_report(
     """
     Этап финализации:
       1. Обновляем tracking-таблицу: какие исходники загружены на какие платформы
-      2. Архивируем ТОЛЬКО те исходники, которые загружены на все 3 платформы
+      2. Архивируем исходники, по которым закрыты все активные платформы
+         (заливка или отсутствие из‑за прогрева на всех аккаунтах платформы)
       3. Обновляем global daily_limit.json
       4. Собираем статистику
       5. Отправляем отчёт в Telegram
@@ -395,9 +396,10 @@ def finalize_and_report(
     _save_tracking(tracking)
 
     complete_stems = _find_complete_sources(tracking)
+    req = _get_required_platforms()
     logger.info(
-        "Загружены на все платформы (%s): %d исходников",
-        " + ".join(sorted(config.ALL_PLATFORMS)),
+        "Готовы к архивированию (%s): %d исходников",
+        " + ".join(sorted(req)) if req else "—",
         len(complete_stems),
     )
     if complete_stems:

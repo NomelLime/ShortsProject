@@ -277,6 +277,12 @@ def create_account(accounts_root: str = "accounts") -> None:
     print()
     print("  Следующий шаг: запустите пайплайн — при первом запуске")
     print("  откроется браузер для ручного входа в аккаунт.")
+    print("  После первого успешного входа заливка видео блокируется на 3–5 суток")
+    print("  (прогрев); остальной пайплайн работает. Отключить: \"skip_upload_warmup\": true")
+    print("  в config.json. Один прогрев на весь аккаунт: \"upload_warmup_scope\": \"account\".")
+    print("  См. UPLOAD_WARMUP_* и ACTIVITY_WARMUP_* в pipeline/config.py.")
+    print("  Сводка прогрева: python -m pipeline.warmup_report")
+    print("  Из архива в OUTPUT: python -m pipeline.redistribute_from_archive --days 7")
     print("=" * 55)
     print()
 
