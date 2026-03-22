@@ -715,3 +715,51 @@ class TestSendTelegram:
             )
 
         assert result is False
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# postprocessor: регрессия — один -filter_complex без TTS (не дублировать)
+# ═══════════════════════════════════════════════════════════════════════
+
+
+class TestPostprocessSingleFilterComplex:
+    def test_no_tts_branch_single_filter_complex(self, tmp_path, tmp_video, probe_info):
+        """Без TTS ffmpeg должен получить ровно один -filter_complex (иначе libx264 EOF)."""
+        from pipeline.postprocessor import _postprocess_single
+
+        out_path = tmp_path / "out.mp4"
+
+        def _fake_run(cmd, **kwargs):
+            Path(cmd[-1]).write_bytes(b"ok")
+            return MagicMock(returncode=0)
+
+        with patch("pipeline.postprocessor.probe_video", return_value=probe_info), \
+             patch("pipeline.postprocessor._pick_random_banner", return_value=None), \
+             patch("pipeline.postprocessor.subprocess.run", side_effect=_fake_run) as run_mock:
+            ok = _postprocess_single(
+                clip_path=tmp_video,
+                out_path=out_path,
+                banner_path=None,
+                font_str="",
+                vcodec="libx264",
+                vcodec_opts={"preset": "veryfast"},
+                meta={},
+                shape="portrait_center",
+                bg_path=None,
+                tts_audio_path=None,
+            )
+
+        assert ok is True
+        cmd = run_mock.call_args[0][0]
+        assert cmd.count("-filter_complex") == 1
+        assert cmd.count("[vout]") >= 1
+
+
+class TestOverlayPositionExprs:
+    def test_overlay_xy_no_duplicate_prefix(self):
+        """OVERLAY_POSITION x=...:y=... не должен давать x=x= в drawtext."""
+        from pipeline.postprocessor import _overlay_xy_exprs
+
+        ox, oy = _overlay_xy_exprs()
+        assert not ox.strip().lower().startswith("x=")
+        assert not oy.strip().lower().startswith("y=")

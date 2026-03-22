@@ -27,7 +27,7 @@ from pathlib import Path
 # Добавляем корень проекта в PYTHONPATH
 sys.path.insert(0, str(Path(__file__).parent))
 
-from pipeline.logging_setup import setup_logging
+from pipeline.logging_setup import setup_logger
 from pipeline.crew import ShortsProjectCrew
 
 logger = logging.getLogger("run_crew")
@@ -133,7 +133,7 @@ def main() -> None:
     parser.add_argument("--no-telegram", action="store_true", help="Без Telegram polling")
     args = parser.parse_args()
 
-    setup_logging()
+    setup_logger()
 
     # Telegram интеграция
     tg_token   = os.getenv("TELEGRAM_BOT_TOKEN", "")

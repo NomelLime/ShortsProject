@@ -12,7 +12,7 @@ import random
 import subprocess
 import textwrap
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 from pipeline import config
 from pipeline.config import (
@@ -79,6 +79,20 @@ def _escape_drawtext(text: str) -> str:
             .replace("]",  "\\]"))
 
 
+def _overlay_xy_exprs() -> Tuple[str, str]:
+    """Выражения для drawtext x= / y= (без дублирования префиксов x= / y=)."""
+    ox, oy = ("(w-text_w)/2", "h*0.8")
+    raw = (OVERLAY_POSITION or "").strip()
+    if ":" in raw:
+        left, right = raw.split(":", 1)
+        ox, oy = left.strip(), right.strip()
+        if ox.lower().startswith("x="):
+            ox = ox[2:].strip()
+        if oy.lower().startswith("y="):
+            oy = oy[2:].strip()
+    return ox, oy
+
+
 def _font_size_for_text(text: str, base: int = 56) -> int:
     n = len(text)
     if n <= 20: return base
@@ -106,6 +120,14 @@ def _build_filter_complex(
     filters: List[str] = []
 
     video_area_h = OUTPUT_H - banner_h_px if has_banner else OUTPUT_H
+    is_portrait_center = shape == "portrait_center"
+    # Размытый фон: отдельный граф [0:v]split → …; не совмещать с [0:v]→[vmask] (FFmpeg 6+: reinitializing filters).
+    _use_blurred = (
+        not has_bg
+        and BLURRED_BG_ENABLED
+        and is_portrait_center
+    )
+
     circle_d = int(min(OUTPUT_W, video_area_h) * circle_ratio)
     circle_d -= circle_d % 2
 
@@ -135,23 +157,18 @@ def _build_filter_complex(
         circle_d = rw
 
     else:  # portrait_center
-        filters.append(
-            f"[0:v]scale={OUTPUT_W}:{video_area_h}:force_original_aspect_ratio=decrease,"
-            f"pad={OUTPUT_W}:{video_area_h}:(ow-iw)/2:(oh-ih)/2:black,"
-            f"format=yuva420p[vmask]"
-        )
         overlay_x = "0"
         overlay_y = "0"
-        _portrait_shape = True  # маркер для blurred_bg
+        # При BLURRED_BG ниже идёт [0:v]split — не трогаем [0:v] здесь (иначе два входа с [0:v] без split).
+        if not _use_blurred:
+            filters.append(
+                f"[0:v]scale={OUTPUT_W}:{video_area_h}:force_original_aspect_ratio=decrease,"
+                f"pad={OUTPUT_W}:{video_area_h}:(ow-iw)/2:(oh-ih)/2:black,"
+                f"format=yuva420p[vmask]"
+            )
 
     # ── Фон ─────────────────────────────────────────────────────────────────
     # Приоритет: bg_path (видео-фон) > BLURRED_BG_ENABLED (размытие) > чёрные полосы
-    _use_blurred = (
-        not has_bg
-        and BLURRED_BG_ENABLED
-        and locals().get("_portrait_shape", False)  # только portrait_center
-    )
-
     if has_bg:
         filters.append(
             f"[{bg_idx}:v]scale={OUTPUT_W}:{OUTPUT_H}:force_original_aspect_ratio=increase,"
@@ -260,9 +277,7 @@ def _build_filter_complex(
                 continue
             t  = _escape_drawtext(ov_text)
             fs = _font_size_for_text(ov_text, base=44)
-            ox, oy = ("(w-text_w)/2", "h*0.8")
-            if ":" in OVERLAY_POSITION:
-                ox, oy = OVERLAY_POSITION.split(":", 1)
+            ox, oy = _overlay_xy_exprs()
             text_filters.append(
                 f"drawtext=fontfile='{fe}':text='{t}':"
                 f"fontsize={fs}:fontcolor=white:borderw=2:bordercolor=black:"
@@ -348,9 +363,8 @@ def _postprocess_single(
         if has_tts:
             cmd += ["-i", str(tts_audio_path)]
 
-        cmd += ["-filter_complex", fc, "-map", "[vout]"]
-
         # ── Аудио: оригинал + TTS mix ──────────────────────────────────
+        # Ветка без TTS добавляет -filter_complex один раз (см. else ниже).
         if has_tts and has_audio:
             # Микшируем оригинальный аудио + TTS голос
             # TTS_VOICE_OVER_MIX = 0.85 → голос 85%, оригинал 15%
@@ -404,7 +418,7 @@ def _postprocess_single(
                     "-c:a", "aac", "-b:a", AUDIO_BITRATE]
 
         else:
-            # Без TTS — оригинальная логика
+            # Без TTS — один filter_complex (раньше дублировался с предыдущим блоком → libx264 EOF)
             cmd += ["-filter_complex", fc, "-map", "[vout]"]
             if has_audio:
                 cmd += ["-map", "0:a", "-c:a", "aac", "-b:a", AUDIO_BITRATE]
