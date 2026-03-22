@@ -212,3 +212,10 @@ build/
 *.egg-info/
 *.egg
 MANIFEST
+
+
+
+
+data/
+assets/
+accounts/
