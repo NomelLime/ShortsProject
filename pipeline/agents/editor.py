@@ -1,11 +1,12 @@
 """
-pipeline/agents/editor.py — EDITOR: нарезка, постобработка, клонирование + TTS.
+pipeline/agents/editor.py — EDITOR: тот же монтажный путь, что main_processing (без cloner).
 
-Полный цикл обработки одного видео:
-  1. VISIONARY   → generate_metadata()   (GPU: LLM)
-  2. NARRATOR    → synthesize()          (GPU: TTS)  ← новое в Этапе 3
-  3. main_processing.run_processing()    (GPU: ENCODE)
-     └── slicer → postprocessor (с TTS audio mix)
+Порядок как в main_processing.run_processing:
+  1. Фон + метаданные (GPU:LLM) — _get_bg_and_metadata / Visionary
+  2. Нарезка — stage_slice(video, TEMP/stem, metadata_variants): VL-точки,
+     postprocess точек, опционально SLICER_DISPUTED_VL_REFINE, best_segment
+  3. TTS (Narrator / Kokoro), если включено
+  4. Постобработка — stage_postprocess(..., output_dir=..., tts_audio_paths=...)
 
 Умный выбор фона:
   1. Файл по теме из assets/backgrounds/
@@ -213,16 +214,14 @@ class Editor(BaseAgent):
         tts_temp: Path,
     ) -> bool:
         """
-        Полный пайплайн одного видео:
-          1. Нарезка через slicer
-          2. LLM-фаза (один GPU:LLM захват): выбор фона + генерация метаданных
-          3. TTS синтез (Narrator / Kokoro)
-          4. Постобработка с TTS миксом (ffmpeg)
-
-        Было 3 GPU-захвата (фон LLM + мета LLM + encode), стало 2:
-        фон и мета объединены в один GPU:LLM блок.
+        Полный пайплайн одного видео (синхронно с main_processing):
+          1. LLM: выбор фона + метаданные (один GPU:LLM захват)
+          2. Нарезка stage_slice с теми же metadata_variants (best_segment, VL-резы)
+          3. TTS (Narrator / Kokoro)
+          4. Постобработка с TTS миксом (ffmpeg, ENCODE)
         """
         from pipeline import config
+        from pipeline.main_processing import _cleanup_clip_dir, _default_meta
         from pipeline.slicer import stage_slice
         from pipeline.postprocessor import stage_postprocess
         from pipeline.utils import detect_encoder
@@ -230,62 +229,80 @@ class Editor(BaseAgent):
 
         logger.info("[EDITOR] Обработка: %s", video_path.name)
 
-        # 1. Нарезка (CPU, без GPU)
-        self._set_status(AgentStatus.RUNNING, f"нарезка {video_path.name}")
-        clips = stage_slice([video_path], metadata_variants=None)
-        if not clips:
-            logger.warning("[EDITOR] Нарезка не дала клипов: %s", video_path.name)
-            return False
-        logger.info("[EDITOR] Нарезано %d клип(ов)", len(clips))
-
-        # 2. Единый GPU:LLM блок — фон + метаданные (было два отдельных захвата)
+        # 1. Единый GPU:LLM блок — фон + метаданные (как в main_processing до нарезки)
+        self._set_status(AgentStatus.RUNNING, f"LLM: фон+мета {video_path.name}")
         bg_path, meta_variants = self._get_bg_and_metadata(video_path)
 
-        # 2а. Инжектируем visual_filter из account config.json в каждый вариант мета.
-        # Это позволяет Orchestrator Zone 2 менять фильтр через config.json аккаунта.
-        # Если meta уже содержит visual_filter (из LLM) — не перезаписываем.
+        # Инжектируем visual_filter из account config.json в каждый вариант мета.
         _acc_visual_filter = self._get_account_visual_filter(video_path)
         if _acc_visual_filter and _acc_visual_filter != "none":
             for _mv in meta_variants:
                 if not _mv.get("visual_filter"):
                     _mv["visual_filter"] = _acc_visual_filter
 
-        # 3. TTS синтез — один файл на видео (озвучиваем hook_text)
-        tts_paths = self._generate_tts_batch(
-            clips=clips,
-            meta_variants=meta_variants,
-            tts_enabled=tts_enabled,
-            tts_temp=tts_temp,
-        )
+        if not meta_variants:
+            meta_variants = [_default_meta(video_path.stem)]
 
-        # 4. Постобработка с TTS
-        self._set_status(AgentStatus.WAITING, "ожидание GPU (encode)")
-        with self._gpu.acquire("EDITOR", GPUPriority.ENCODE):
-            self._set_status(AgentStatus.RUNNING, f"постобработка {video_path.name}")
-            banner_path = self._pick_banner()
-            from pipeline import config as _cfg
-            from pipeline.utils import safe_output_folder_name
-
-            folder_key = (
-                safe_output_folder_name(video_path.stem)
-                if getattr(_cfg, "OUTPUT_FOLDER_SHORT", False)
-                else video_path.stem
-            )
-            _out_dir = _cfg.OUTPUT_DIR / folder_key
-            _out_dir.mkdir(parents=True, exist_ok=True)
-            ready_clips = stage_postprocess(
-                clips=clips,
-                banner_path=banner_path,
-                vcodec=vcodec,
-                vcodec_opts=vcodec_opts,
+        # 2. Нарезка — те же slicer / disputed VL / keyframes, что и в main_processing
+        self._set_status(AgentStatus.RUNNING, f"нарезка {video_path.name}")
+        clip_dir = Path(config.TEMP_DIR) / video_path.stem
+        try:
+            clips = stage_slice(
+                video_path,
+                clip_dir,
                 metadata_variants=meta_variants,
-                bg_path=bg_path,
-                tts_audio_paths=tts_paths,
-                output_dir=_out_dir,
+            )
+        except Exception as e:
+            logger.error("[EDITOR] Ошибка нарезки %s: %s", video_path.name, e)
+            _cleanup_clip_dir(clip_dir)
+            return False
+
+        if not clips:
+            logger.warning("[EDITOR] Нарезка не дала клипов: %s", video_path.name)
+            _cleanup_clip_dir(clip_dir)
+            return False
+        logger.info("[EDITOR] Нарезано %d клип(ов)", len(clips))
+
+        ready_clips: List[Path] = []
+        try:
+            # 3. TTS синтез — один файл на клип (озвучиваем hook_text)
+            tts_paths = self._generate_tts_batch(
+                clips=clips,
+                meta_variants=meta_variants,
+                tts_enabled=tts_enabled,
+                tts_temp=tts_temp,
             )
 
-        # Очистка временных TTS файлов
-        self._cleanup_tts_temp(tts_paths)
+            # 4. Постобработка с TTS
+            self._set_status(AgentStatus.WAITING, "ожидание GPU (encode)")
+            with self._gpu.acquire("EDITOR", GPUPriority.ENCODE):
+                self._set_status(AgentStatus.RUNNING, f"постобработка {video_path.name}")
+                banner_path = self._pick_banner()
+                from pipeline import config as _cfg
+                from pipeline.utils import safe_output_folder_name
+
+                folder_key = (
+                    safe_output_folder_name(video_path.stem)
+                    if getattr(_cfg, "OUTPUT_FOLDER_SHORT", False)
+                    else video_path.stem
+                )
+                _out_dir = _cfg.OUTPUT_DIR / folder_key
+                _out_dir.mkdir(parents=True, exist_ok=True)
+                ready_clips = stage_postprocess(
+                    clips=clips,
+                    banner_path=banner_path,
+                    vcodec=vcodec,
+                    vcodec_opts=vcodec_opts,
+                    metadata_variants=meta_variants,
+                    bg_path=bg_path,
+                    tts_audio_paths=tts_paths,
+                    output_dir=_out_dir,
+                )
+
+            # Очистка временных TTS файлов
+            self._cleanup_tts_temp(tts_paths)
+        finally:
+            _cleanup_clip_dir(clip_dir)
 
         if ready_clips:
             # Субтитры (если включены)

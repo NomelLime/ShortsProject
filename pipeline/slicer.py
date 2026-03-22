@@ -16,11 +16,17 @@ import subprocess
 from pathlib import Path
 from typing import List, Optional, Tuple
 
+from pipeline import config
 from pipeline.config import (
     CLIP_MIN_LEN, CLIP_MAX_LEN,
     SHORT_VIDEO_THRESHOLD,
     SILENCE_THRESHOLD, SILENCE_MIN_DUR,
     AI_NUM_FRAMES,
+)
+from pipeline.slicer_cut_utils import (
+    coarse_cuts_heuristic,
+    normalize_best_segment,
+    postprocess_cut_times,
 )
 from pipeline.utils import probe_video
 
@@ -100,7 +106,10 @@ def slice_long_video(video_path: Path, clip_dir: Path,
         metadata = metadata_variants[0]
     else:
         metadata = generate_video_metadata(video_path, num_variants=1)[0]
-    best_segment = metadata.get("best_segment")
+    raw_best = metadata.get("best_segment")
+    best_segment = normalize_best_segment(raw_best, dur, seg_min_len=_BEST_SEGMENT_MIN_LEN)
+    if best_segment is not None:
+        metadata["best_segment"] = best_segment
     # Нельзя использовать «if best_segment» — 0.0 — валидное начало сегмента
     if best_segment is not None:
         best_segment_end = best_segment + _BEST_SEGMENT_MIN_LEN
@@ -116,15 +125,37 @@ def slice_long_video(video_path: Path, clip_dir: Path,
     # ── AI-точки нарезки ────────────────────────────────────────
     logger.info("   🤖 AI определяет точки нарезки...")
 
-    # Reintroduced silencedetect
     silences = detect_silences(str(video_path))
+    silence_intervals = detect_silence_intervals(str(video_path))
+
+    coarse_hints = None
+    if getattr(config, "SLICER_TWO_PASS", False):
+        coarse_hints = coarse_cuts_heuristic(dur, silence_intervals)
+        logger.info(
+            "   Грубые границы (two-pass): %s",
+            ", ".join(f"{c:.1f}" for c in coarse_hints) if coarse_hints else "нет",
+        )
 
     ai_cuts = generate_cut_points(
         video_path=video_path,
         duration=dur,
         silences=silences,
+        coarse_hints=coarse_hints,
     )
+    ai_cuts = postprocess_cut_times(ai_cuts, video_path, dur)
     logger.info("   AI точки: %s", ", ".join(f"{c:.1f}" for c in ai_cuts) if ai_cuts else "нет → равномерно")
+
+    if getattr(config, "SLICER_DISPUTED_VL_REFINE", False) and silence_intervals:
+        from pipeline.ai import refine_disputed_cut_boundaries
+
+        ai_cuts = refine_disputed_cut_boundaries(
+            video_path, dur, list(ai_cuts), silence_intervals,
+        )
+        ai_cuts = postprocess_cut_times(ai_cuts, video_path, dur)
+        logger.info(
+            "   После refine спорных (VL): %s",
+            ", ".join(f"{c:.1f}" for c in ai_cuts) if ai_cuts else "нет",
+        )
 
     # ── Нарезка диапазонов, исключая занятый отрезок best_segment ───────────
     segments_to_slice: List[Tuple[float, float]] = []
@@ -175,16 +206,62 @@ def stage_slice(video_path: Path, clip_dir: Path,
     return slice_long_video(video_path, clip_dir, metadata_variants=metadata_variants)
 
 
-# New: Silencedetect function
+def _silencedetect_stderr(video_path: str, threshold: float, min_dur: float) -> str:
+    out = subprocess.run(
+        [
+            "ffmpeg",
+            "-i",
+            video_path,
+            "-af",
+            f"silencedetect=n={threshold}dB:d={min_dur}",
+            "-f",
+            "null",
+            "-",
+        ],
+        capture_output=True,
+        text=True,
+    )
+    return out.stderr or ""
+
+
 def detect_silences(video_path: str, threshold: float = SILENCE_THRESHOLD, min_dur: float = SILENCE_MIN_DUR) -> List[float]:
     try:
-        out = subprocess.run(['ffmpeg', '-i', video_path, '-af', f'silencedetect=n={threshold}dB:d={min_dur}', '-f', 'null', '-'], capture_output=True, text=True)
-        lines = out.stderr.splitlines()
+        lines = _silencedetect_stderr(video_path, threshold, min_dur).splitlines()
         silences = []
         for line in lines:
-            if 'silence_start' in line:
-                silences.append(float(line.split('silence_start: ')[1].split(' ')[0]))
+            if "silence_start" in line:
+                silences.append(float(line.split("silence_start: ")[1].split(" ")[0]))
         return silences
     except Exception as e:
-        logger.warning(f"Silencedetect failed: {e}")
+        logger.warning("Silencedetect failed: %s", e)
         return []
+
+
+def detect_silence_intervals(
+    video_path: str,
+    threshold: float = SILENCE_THRESHOLD,
+    min_dur: float = SILENCE_MIN_DUR,
+) -> List[Tuple[float, float]]:
+    """Пары (silence_start, silence_end) из ffmpeg silencedetect."""
+    try:
+        lines = _silencedetect_stderr(video_path, threshold, min_dur).splitlines()
+    except Exception as e:
+        logger.warning("Silencedetect intervals failed: %s", e)
+        return []
+
+    starts: List[float] = []
+    ends: List[float] = []
+    for line in lines:
+        if "silence_start" in line:
+            try:
+                starts.append(float(line.split("silence_start: ")[1].split(" ")[0]))
+            except (IndexError, ValueError):
+                pass
+        if "silence_end" in line:
+            try:
+                ends.append(float(line.split("silence_end: ")[1].split(" ")[0]))
+            except (IndexError, ValueError):
+                pass
+
+    n = min(len(starts), len(ends))
+    return [(starts[i], ends[i]) for i in range(n)]

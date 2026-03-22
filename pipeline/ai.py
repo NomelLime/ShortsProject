@@ -23,7 +23,8 @@ from pipeline.config import (
     CLIP_MIN_LEN, CLIP_MAX_LEN,
     VL_CACHE_FILE,
 )
-from pipeline.utils import save_json
+from pipeline.slicer_cut_utils import normalize_best_segment
+from pipeline.utils import probe_video, save_json
 
 logger = logging.getLogger(__name__)
 
@@ -287,6 +288,16 @@ def generate_video_metadata(
         raw = re.sub(r"\s*```$", "", raw)
         variants = json.loads(raw)
 
+        try:
+            dur_meta = probe_video(video_path)["duration"]
+            for v in variants:
+                if isinstance(v, dict):
+                    v["best_segment"] = normalize_best_segment(
+                        v.get("best_segment"), dur_meta
+                    )
+        except Exception as _norm_exc:
+            logger.debug("best_segment normalize: %s", _norm_exc)
+
         save_json(cache_path, variants)
         return variants
     except Exception as e:
@@ -299,12 +310,20 @@ def generate_cut_points(
     duration: float,
     num_frames: int = AI_NUM_FRAMES,
     silences: Optional[List[float]] = None,
+    coarse_hints: Optional[List[float]] = None,
 ) -> List[float]:
     """Определяет точки нарезки видео через VL-модель — модель видит кадры."""
     silences_str = (
-        f"\nТихие паузы (секунды): {', '.join(f'{s:.1f}' for s in silences)}"
+        f"\nТихие паузы (начало, секунды): {', '.join(f'{s:.1f}' for s in silences)}"
         if silences else ""
     )
+    coarse_str = ""
+    if coarse_hints:
+        coarse_str = (
+            "\nГрубые границы (тишина/длина клипа) — ориентиры, уточни по кадрам:\n"
+            + ", ".join(f"{c:.1f}" for c in sorted(coarse_hints))
+            + "\nЕсли кадр указывает лучший рез рядом — смести на 0.2–1.0 с.\n"
+        )
 
     try:
         frames = extract_frames(video_path, num_frames)
@@ -315,7 +334,7 @@ def generate_cut_points(
     prompt = (
         f"Видео длительностью {duration:.1f} секунд.\n"
         f"Тебе показаны {len(frames)} равномерно распределённых кадров.\n"
-        f"Нужно нарезать на клипы по {CLIP_MIN_LEN:.0f}–{CLIP_MAX_LEN:.0f} секунд.{silences_str}\n"
+        f"Нужно нарезать на клипы по {CLIP_MIN_LEN:.0f}–{CLIP_MAX_LEN:.0f} секунд.{silences_str}{coarse_str}\n"
         "Найди лучшие точки реза: смена сцены, логический переход, завершение действия.\n"
         "Предпочитай резать в тихих паузах (если есть).\n"
         "Ответ: ТОЛЬКО числа секунд, по одному на строке. Никакого другого текста."
@@ -333,6 +352,167 @@ def _parse_timestamps(text: str) -> List[float]:
     """Извлекает числа-секунды из ответа Ollama."""
     numbers = re.findall(r"\b(\d+(?:\.\d+)?)\b", text)
     return sorted(float(n) for n in numbers)
+
+
+def extract_frames_around_time(
+    video_path: Path,
+    center_sec: float,
+    duration: float,
+    num_frames: int,
+    window_sec: float,
+) -> List[bytes]:
+    """JPEG-кадры равномерно по времени в окне [center ± window/2] ∩ [0, duration]."""
+    if duration <= 0 or num_frames < 1:
+        return []
+    half = window_sec / 2.0
+    t0 = max(0.0, center_sec - half)
+    t1 = min(duration, center_sec + half)
+    if t1 <= t0 + 1e-3:
+        t0 = max(0.0, center_sec - 0.5)
+        t1 = min(duration, center_sec + 0.5)
+    cap = cv2.VideoCapture(str(video_path))
+    if not cap.isOpened():
+        return []
+    fps = float(cap.get(cv2.CAP_PROP_FPS) or 30.0)
+    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    if num_frames == 1:
+        times = [(t0 + t1) / 2.0]
+    else:
+        times = [t0 + (t1 - t0) * i / (num_frames - 1) for i in range(num_frames)]
+    frames: List[bytes] = []
+    for t in times:
+        frame_idx = int(min(max(0.0, t * fps), max(0, total_frames - 1)))
+        cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
+        ret, frame = cap.read()
+        if not ret:
+            continue
+        _, buf = cv2.imencode(".jpg", frame)
+        frames.append(buf.tobytes())
+    cap.release()
+    return frames
+
+
+def _parse_first_timestamp(text: str) -> Optional[float]:
+    nums = re.findall(r"\b(\d+(?:\.\d+)?)\b", text)
+    if not nums:
+        return None
+    return float(nums[0])
+
+
+def refine_single_cut_boundary_vl(
+    video_path: Path,
+    duration: float,
+    candidate_sec: float,
+    window_sec: float,
+    num_frames: int,
+    timeout: int,
+) -> Optional[float]:
+    """
+    Один VL-запрос: уточнить секунду разреза в окне вокруг candidate_sec.
+    Возвращает абсолютное время на шкале ролика или None.
+    """
+    half = window_sec / 2.0
+    t0 = max(0.0, candidate_sec - half)
+    t1 = min(duration, candidate_sec + half)
+    if t1 <= t0 + 1e-3:
+        return None
+    frames = extract_frames_around_time(
+        video_path, candidate_sec, duration, num_frames, window_sec
+    )
+    if len(frames) < 2:
+        logger.warning(
+            "[slicer] refine: мало кадров вокруг %.2f с — пропуск", candidate_sec
+        )
+        return None
+    prompt = (
+        f"Окно фрагмента: {t0:.2f}–{t1:.2f} с (вся длительность ролика {duration:.1f} с).\n"
+        f"Показано {len(frames)} кадров по времени слева направо.\n"
+        "Нужна ОДНА абсолютная секунда от начала файла для лучшего разреза клипа "
+        "(тишина, смена сцены, конец реплики).\n"
+        f"Число должно быть в [{t0:.1f}, {t1:.1f}].\n"
+        "Ответ: только одно число, без текста."
+    )
+    try:
+        response = ollama_generate_with_timeout(
+            OLLAMA_MODEL,
+            prompt,
+            images=frames,
+            timeout=timeout,
+        )
+        raw = response.get("response", "") if isinstance(response, dict) else str(response)
+        val = _parse_first_timestamp(str(raw))
+        if val is None:
+            return None
+        val = max(t0, min(t1, val))
+        val = max(0.0, min(duration, val))
+        return val
+    except Exception as e:
+        logger.warning("[slicer] refine VL около %.2f с: %s", candidate_sec, e)
+        return None
+
+
+def refine_disputed_cut_boundaries(
+    video_path: Path,
+    duration: float,
+    cuts: List[float],
+    silence_intervals: List[Tuple[float, float]],
+) -> List[float]:
+    """
+    Отдельные VL-вызовы для границ, далёких от тишины (см. rank_disputed_cuts_for_refinement).
+    Лимит — SLICER_DISPUTED_MAX_CALLS. Без интервалов тишины не вызывается.
+    """
+    from pipeline.slicer_cut_utils import rank_disputed_cuts_for_refinement
+
+    if not getattr(config, "SLICER_DISPUTED_VL_REFINE", False):
+        return cuts
+    if not check_ollama():
+        logger.warning("Ollama недоступен — refine спорных границ пропущен")
+        return cuts
+    if not silence_intervals:
+        logger.info("[slicer] нет интервалов тишины — refine спорных границ пропущен")
+        return cuts
+    if not cuts:
+        return cuts
+
+    prox = float(getattr(config, "SLICER_DISPUTED_SILENCE_PROX_SEC", 1.2))
+    ranked = rank_disputed_cuts_for_refinement(cuts, silence_intervals, prox)
+    max_calls = int(getattr(config, "SLICER_DISPUTED_MAX_CALLS", 12))
+    if max_calls <= 0 or not ranked:
+        return cuts
+
+    win = float(getattr(config, "SLICER_DISPUTED_WINDOW_SEC", 2.5))
+    nf = max(2, int(getattr(config, "SLICER_DISPUTED_FRAMES", 5)))
+    to = int(getattr(config, "SLICER_DISPUTED_VL_TIMEOUT", 45))
+
+    ranked = ranked[:max_calls]
+    replacements: Dict[float, float] = {}
+
+    for i, t in enumerate(ranked):
+        new_t = refine_single_cut_boundary_vl(
+            video_path, duration, t, win, nf, to,
+        )
+        if new_t is not None and abs(new_t - t) > 1e-3:
+            replacements[float(t)] = new_t
+            logger.info(
+                "[slicer] спорная граница %d/%d: %.2f с → %.2f с",
+                i + 1,
+                len(ranked),
+                t,
+                new_t,
+            )
+
+    if not replacements:
+        return cuts
+
+    out: List[float] = []
+    for c in cuts:
+        repl: Optional[float] = None
+        for old_t, new_v in replacements.items():
+            if abs(float(c) - old_t) < 0.05:
+                repl = new_v
+                break
+        out.append(repl if repl is not None else c)
+    return sorted(set(out))
 
 
 def _fallback_meta(video_path: Path, num_variants: int) -> List[Dict]:

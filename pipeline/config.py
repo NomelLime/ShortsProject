@@ -110,6 +110,25 @@ SHORT_VIDEO_THRESHOLD = 15.0
 SILENCE_THRESHOLD     = -30.0
 SILENCE_MIN_DUR       = 0.5
 
+# Постобработка точек нарезки после ответа VL (slicer_cut_utils + slicer.py)
+# Округление (0.1 с), снап к ближайшему I-frame, отсев слишком близких резов
+SLICER_ROUND_DECIMALS = int(os.getenv("SLICER_ROUND_DECIMALS", "1"))
+SLICER_KEYFRAME_SNAP = os.getenv("SLICER_KEYFRAME_SNAP", "1") == "1"
+SLICER_KEYFRAME_MAX_DELTA_SEC = float(os.getenv("SLICER_KEYFRAME_MAX_DELTA_SEC", "0.5"))
+# ffprobe по всем кадрам на очень длинных файлах дорогой — выше порога снап отключён
+SLICER_KEYFRAME_PROBE_MAX_DURATION_SEC = float(
+    os.getenv("SLICER_KEYFRAME_PROBE_MAX_DURATION_SEC", "600")
+)
+# Двухпроход: грубые границы по тишине → второй запрос VL с подсказками (один вызов)
+SLICER_TWO_PASS = os.getenv("SLICER_TWO_PASS", "0") == "1"
+# Отдельный VL на каждую «спорную» границу (далеко от тишины); дорого — лимит вызовов
+SLICER_DISPUTED_VL_REFINE = os.getenv("SLICER_DISPUTED_VL_REFINE", "0") == "1"
+SLICER_DISPUTED_SILENCE_PROX_SEC = float(os.getenv("SLICER_DISPUTED_SILENCE_PROX_SEC", "1.2"))
+SLICER_DISPUTED_WINDOW_SEC = float(os.getenv("SLICER_DISPUTED_WINDOW_SEC", "2.5"))
+SLICER_DISPUTED_FRAMES = max(2, int(os.getenv("SLICER_DISPUTED_FRAMES", "5")))
+SLICER_DISPUTED_MAX_CALLS = max(0, int(os.getenv("SLICER_DISPUTED_MAX_CALLS", "12")))
+SLICER_DISPUTED_VL_TIMEOUT = int(os.getenv("SLICER_DISPUTED_VL_TIMEOUT", "45"))
+
 # ----------------------------------------------------------------------
 # Постобработка (postprocessor)
 # ----------------------------------------------------------------------
