@@ -27,19 +27,12 @@ _ytdlp = types.ModuleType("yt_dlp")
 _ytdlp.YoutubeDL = object
 sys.modules["yt_dlp"] = _ytdlp
 
-# Мок browser (launch_browser/close_browser)
+# Мок browser (launch_browser/close_browser) — подключается в fixture, не при импорте файла
 _browser = types.ModuleType("pipeline.browser")
 _browser.launch_browser = MagicMock(return_value=(MagicMock(), MagicMock()))
 _browser.close_browser  = MagicMock()
-sys.modules["pipeline.browser"] = _browser
 
-# Мок rebrowser_playwright
-_pw = types.ModuleType("rebrowser_playwright")
-_pw.sync_api = types.ModuleType("rebrowser_playwright.sync_api")
-_pw.sync_api.BrowserContext = object
-_pw.sync_api.Page           = object
-sys.modules["rebrowser_playwright"]          = _pw
-sys.modules["rebrowser_playwright.sync_api"] = _pw.sync_api
+# rebrowser_playwright не трогаем — общая заглушка из tests/conftest.py (нужен sync_playwright для browser.py).
 
 # Мок pipeline.ai (полный — чтобы patch() не пытался импортировать pipeline.__init__)
 _ai = types.ModuleType("pipeline.ai")
@@ -49,27 +42,30 @@ _ai.generate_video_metadata      = MagicMock(return_value=[])
 _ai.check_ollama                 = MagicMock(return_value=True)
 _ai.load_trending_hashtags       = MagicMock(return_value=[])
 _ai.extract_frames               = MagicMock(return_value=[])
-sys.modules["pipeline.ai"] = _ai
 
-# Мок pipeline.utils (тянется из pipeline.__init__)
-_utils = types.ModuleType("pipeline.utils")
-_utils.get_all_accounts     = MagicMock(return_value=[])
-_utils.get_upload_queue     = MagicMock(return_value=[])
-_utils.mark_uploaded        = MagicMock()
-_utils.get_uploads_today    = MagicMock(return_value=0)
-_utils.increment_upload_count = MagicMock()
-_utils.is_daily_limit_reached = MagicMock(return_value=False)
-_utils.create_sample_account  = MagicMock()
-_utils.get_logger             = MagicMock(return_value=MagicMock())
-_utils.human_sleep            = MagicMock()
-_utils.type_humanlike         = MagicMock()
-_utils.probe_video            = MagicMock()
-_utils.check_video_integrity  = MagicMock()
-_utils.detect_encoder         = MagicMock()
-_utils.get_random_asset       = MagicMock()
-sys.modules["pipeline.utils"] = _utils
+_pm = None
 
-_pm = _load("profile_manager")
+
+@pytest.fixture(scope="module", autouse=True)
+def _profile_manager_loaded():
+    """Подмена browser/ai только на время тестов этого файла; не ломает test_pipeline и др."""
+    global _pm
+    save_b = sys.modules.pop("pipeline.browser", None)
+    save_ai = sys.modules.pop("pipeline.ai", None)
+    sys.modules["pipeline.browser"] = _browser
+    sys.modules["pipeline.ai"] = _ai
+    sys.modules.pop("pipeline.profile_manager", None)
+    _pm = _load("profile_manager")
+    yield
+    if save_b is None:
+        sys.modules.pop("pipeline.browser", None)
+    else:
+        sys.modules["pipeline.browser"] = save_b
+    if save_ai is None:
+        sys.modules.pop("pipeline.ai", None)
+    else:
+        sys.modules["pipeline.ai"] = save_ai
+    sys.modules.pop("pipeline.profile_manager", None)
 
 
 @pytest.fixture(autouse=True)

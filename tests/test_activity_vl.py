@@ -19,13 +19,7 @@ def _load(name: str):
     spec.loader.exec_module(m)
     return m
 
-# Мокируем зависимости activity_vl перед импортом
-_mock_playwright = type(sys)("rebrowser_playwright")
-_mock_playwright.sync_api = type(sys)("rebrowser_playwright.sync_api")
-_mock_playwright.sync_api.BrowserContext = object
-_mock_playwright.sync_api.Page = object
-sys.modules["rebrowser_playwright"] = _mock_playwright
-sys.modules["rebrowser_playwright.sync_api"] = _mock_playwright.sync_api
+# rebrowser_playwright — общая заглушка из tests/conftest.py (Page, sync_playwright).
 
 # Мок pipeline.config
 import types as _types
@@ -60,6 +54,18 @@ for mod in ["pipeline.utils", "pipeline.notifications", "pipeline.ai",
     sys.modules[mod] = m
 
 _vl = _load("activity_vl")
+
+# Заглушки нужны только на время exec_module(activity_vl). Иначе остальные тесты
+# получают пустые pipeline.utils / pipeline.notifications и падают.
+for _mod in (
+    "pipeline.config",
+    "pipeline.utils",
+    "pipeline.notifications",
+    "pipeline.ai",
+    "pipeline.shared_gpu_lock",
+    "pipeline.niche",
+):
+    sys.modules.pop(_mod, None)
 
 
 class TestSanitizeComment:

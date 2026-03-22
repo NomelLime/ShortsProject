@@ -438,31 +438,33 @@ class TestUploadVideo:
         from pipeline.uploader import upload_video
 
         mock_ctx = MagicMock()
-        with patch("pipeline.uploader.send_telegram"):
+
+        def _fake_youtube(page, video_path, meta):
+            return "https://youtu.be/ok"
+
+        with patch("pipeline.uploader.send_telegram"), \
+             patch.dict("pipeline.uploader._PLATFORM_UPLOADERS", {"youtube": _fake_youtube}):
             result = upload_video(mock_ctx, "youtube", tmp_video, {})
 
-        assert result is True
+        assert result == "https://youtu.be/ok"
 
     def test_saves_error_json_after_5_failures(self, tmp_path, tmp_video):
         from pipeline.uploader import upload_video
 
         mock_ctx = MagicMock()
-        call_count = 0
 
-        def flaky_send(msg):
-            nonlocal call_count
-            call_count += 1
-            if "success" in msg.lower():
-                raise RuntimeError("upload failed")
+        def _always_fail(page, video_path, meta):
+            raise RuntimeError("upload failed")
 
-        with patch("pipeline.uploader.send_telegram", side_effect=flaky_send), \
+        with patch("pipeline.uploader.send_telegram"), \
+             patch.dict("pipeline.uploader._PLATFORM_UPLOADERS", {"youtube": _always_fail}), \
              patch("pipeline.uploader.time.sleep"), \
              patch.object(__import__("pipeline.config", fromlist=["ACCOUNTS_ROOT"]),
                           "ACCOUNTS_ROOT", str(tmp_path)):
             result = upload_video(mock_ctx, "youtube", tmp_video, {},
                                   account_name="acc1", account_cfg={})
 
-        assert result is False
+        assert result is None
 
 
 @pytest.mark.slow
@@ -484,6 +486,7 @@ class TestUploadAllDryRun:
              patch("pipeline.uploader.launch_browser",
                    return_value=(MagicMock(), MagicMock())), \
              patch("pipeline.uploader.close_browser"), \
+             patch("pipeline.uploader.ensure_session_fresh", return_value=True), \
              patch("pipeline.uploader.run_activity"), \
              patch("pipeline.uploader.config.PLATFORM_DAILY_LIMITS",
                    {"youtube": 5}):

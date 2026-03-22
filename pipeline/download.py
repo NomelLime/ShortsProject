@@ -165,6 +165,7 @@ def download_single(
         "continuedl": True,
         "proxy":      proxy,
     }
+    ydl_opts.update(cfg.get_ytdlp_cookie_options())
 
     try:
         with YoutubeDL(ydl_opts) as ydl:

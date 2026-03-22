@@ -251,14 +251,19 @@ class TestProfileLock:
         ai_mock = types.ModuleType("pipeline.ai")
         ai_mock.OLLAMA_MODEL = "test"
         ai_mock.ollama_generate_with_timeout = lambda *a, **kw: {"response": "YES"}
+        _prev_ai = sys.modules.pop("pipeline.ai", None)
         sys.modules["pipeline.ai"] = ai_mock
+        try:
+            spec.loader.exec_module(pm)
 
-        spec.loader.exec_module(pm)
-
-        profile_dir = tmp_path / "browser_profile"
-        with pm._profile_lock(profile_dir) as acquired:
-            # If portalocker is installed — lock file created; otherwise graceful fallback
-            assert acquired is True
+            profile_dir = tmp_path / "browser_profile"
+            with pm._profile_lock(profile_dir) as acquired:
+                # If portalocker is installed — lock file created; otherwise graceful fallback
+                assert acquired is True
+        finally:
+            sys.modules.pop("pipeline.ai", None)
+            if _prev_ai is not None:
+                sys.modules["pipeline.ai"] = _prev_ai
 
     def test_lock_released_after_context(self, tmp_path):
         """Блокировка снимается после выхода из контекста."""
@@ -273,14 +278,19 @@ class TestProfileLock:
         ai_mock = types.ModuleType("pipeline.ai")
         ai_mock.OLLAMA_MODEL = "test"
         ai_mock.ollama_generate_with_timeout = lambda *a, **kw: {"response": "YES"}
+        _prev_ai = sys.modules.pop("pipeline.ai", None)
         sys.modules["pipeline.ai"] = ai_mock
+        try:
+            spec.loader.exec_module(pm)
 
-        spec.loader.exec_module(pm)
+            profile_dir = tmp_path / "profile2"
+            with pm._profile_lock(profile_dir):
+                pass  # снимается при выходе
 
-        profile_dir = tmp_path / "profile2"
-        with pm._profile_lock(profile_dir):
-            pass  # снимается при выходе
-
-        # Повторная блокировка должна сработать (предыдущая снята)
-        with pm._profile_lock(profile_dir) as acquired2:
-            assert acquired2 is True
+            # Повторная блокировка должна сработать (предыдущая снята)
+            with pm._profile_lock(profile_dir) as acquired2:
+                assert acquired2 is True
+        finally:
+            sys.modules.pop("pipeline.ai", None)
+            if _prev_ai is not None:
+                sys.modules["pipeline.ai"] = _prev_ai

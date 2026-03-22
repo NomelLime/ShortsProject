@@ -38,13 +38,7 @@ class _MockStealth:
 _stealth_mod.Stealth = _MockStealth
 sys.modules["playwright_stealth"] = _stealth_mod
 
-# Мок rebrowser_playwright
-_pw = types.ModuleType("rebrowser_playwright")
-_pw.sync_api = types.ModuleType("rebrowser_playwright.sync_api")
-_pw.sync_api.BrowserContext = object
-_pw.sync_api.Playwright     = object
-sys.modules["rebrowser_playwright"] = _pw
-sys.modules["rebrowser_playwright.sync_api"] = _pw.sync_api
+# rebrowser_playwright — tests/conftest.py (не перезаписывать: нужны Page и sync_playwright).
 
 _base = _load("contexts.base")
 sys.modules["pipeline.contexts.base"] = _base

@@ -845,3 +845,37 @@ curl -s -o /dev/null -w "%{http_code}" https://DOMAIN/t/test_acc  # ожидае
 
 **Дата обновления:** 20.03.2026
 **Статус тестов:** 118/118 ✅
+
+---
+
+### Сессия 12D (22.03.2026) — yt-dlp: cookies из `browser_profile` + стабилизация pytest
+
+**Контекст:** отпечатки (fingerprint в `config.json`) ≠ HTTP-cookies; сессии лежат в `accounts/<имя>/browser_profile/` (Chromium persistent context). Нужна связка yt-dlp с тем же логином, что у аккаунта.
+
+**`pipeline/config.py`**
+
+- `get_ytdlp_cookie_options() → dict` — параметры для `yt_dlp.YoutubeDL`:
+  1. `YTDLP_COOKIES_FILE` — Netscape `cookies.txt`, если файл существует;
+  2. иначе `YTDLP_BROWSER_PROFILE` (полный путь к `browser_profile`) **или** `YTDLP_COOKIES_ACCOUNT` (имя аккаунта → `accounts/<имя>/browser_profile`) → `cookiesfrombrowser = (YTDLP_COOKIES_BROWSER, путь, None, None)`, по умолчанию браузер `chromium`;
+  3. иначе legacy: `cookies_youtube.txt` в корне проекта, если есть.
+- Вспомогательные: `_accounts_root_resolved()`, `_resolve_ytdlp_browser_profile_dir()`.
+
+**`pipeline/download.py`**, **`pipeline/downloader.py`**
+
+- Вместо ручной подстановки `cookiefile`: `ydl_opts.update(cfg.get_ytdlp_cookie_options())` (скачивание и ytsearch).
+
+**`.env.example`**
+
+- Документированы `YTDLP_COOKIES_ACCOUNT`, `YTDLP_BROWSER_PROFILE`, `YTDLP_COOKIES_BROWSER`.
+
+**pytest (изоляция модулей)**
+
+- `tests/test_activity_vl.py` — после загрузки `activity_vl` снимаются заглушки `sys.modules` (`pipeline.config`, `utils`, `notifications`, …), чтобы не ломать остальные тесты.
+- `tests/test_profile_manager.py` — подмена `pipeline.browser` / `pipeline.ai` только в module-scoped fixture; убрана перезапись `rebrowser_playwright` и `pipeline.utils` при импорте.
+- `tests/test_contexts.py` — не перезаписывать глобальную заглушку `rebrowser_playwright` из `conftest` (нужны `Page`, `sync_playwright` для `browser.py` / `notifications`).
+- `tests/test_fingerprint.py` — после тестов `_profile_lock` восстанавливается `pipeline.ai` в `sys.modules`.
+- `tests/test_pipeline.py` — тесты загрузки: `patch.dict(_PLATFORM_UPLOADERS, …)` (патч `_upload_youtube` не работал из‑за ссылок в словаре); `ensure_session_fresh` для `upload_all(dry_run=True)`; ожидания возврата `upload_video` / `None`.
+
+**Статус тестов:** полный прогон `pytest tests` → **231/231** ✅
+
+**Проверка скачивания TikTok / Instagram (22.03.2026):** на тестовой сети TikTok вернул блокировку IP; Instagram — пустой ответ без cookies (ожидаемо: нужен логин в профиле или Netscape-файл). Логика `get_ytdlp_cookie_options()` отрабатывает; успех на проде зависит от IP, логина в профиле и версии `yt-dlp`.

@@ -2,8 +2,11 @@
 Единый конфигурационный файл для всего проекта.
 """
 
+from __future__ import annotations
+
 import os
 from pathlib import Path
+from typing import Any
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -45,6 +48,58 @@ COOKIES = {
     "tiktok":    BASE_DIR / "cookies_tiktok.txt",
     "instagram": BASE_DIR / "cookies_instagram.txt",
 }
+
+# yt-dlp: см. get_ytdlp_cookie_options() — Netscape-файл и/или cookies из профиля Playwright (browser_profile).
+
+
+def _accounts_root_resolved() -> Path:
+    r = Path(ACCOUNTS_ROOT)
+    return r if r.is_absolute() else (BASE_DIR / r)
+
+
+def _resolve_ytdlp_browser_profile_dir() -> Path | None:
+    """
+    Профиль Chromium из persistent context (accounts/<имя>/browser_profile).
+    Задаётся через YTDLP_BROWSER_PROFILE (полный путь) или YTDLP_COOKIES_ACCOUNT (имя аккаунта).
+    """
+    explicit = os.getenv("YTDLP_BROWSER_PROFILE", "").strip()
+    if explicit:
+        p = Path(explicit).expanduser()
+        return p if p.is_dir() else None
+    acc = os.getenv("YTDLP_COOKIES_ACCOUNT", "").strip()
+    if acc:
+        p = _accounts_root_resolved() / acc / "browser_profile"
+        return p if p.is_dir() else None
+    return None
+
+
+def get_ytdlp_cookie_options() -> dict[str, Any]:
+    """
+    Параметры для yt_dlp.YoutubeDL: ``cookiefile`` или ``cookiesfrombrowser``.
+
+    Приоритет:
+      1) ``YTDLP_COOKIES_FILE`` в .env — путь к Netscape cookies, если файл существует;
+      2) ``YTDLP_BROWSER_PROFILE`` или ``YTDLP_COOKIES_ACCOUNT`` — каталог browser_profile,
+         ``cookiesfrombrowser`` = (``YTDLP_COOKIES_BROWSER``, путь, None, None);
+      3) ``cookies_youtube.txt`` в корне проекта, если файл есть (legacy).
+    """
+    env_file = os.getenv("YTDLP_COOKIES_FILE", "").strip()
+    if env_file:
+        p = Path(env_file).expanduser()
+        if p.is_file():
+            return {"cookiefile": str(p)}
+
+    prof = _resolve_ytdlp_browser_profile_dir()
+    if prof is not None:
+        browser = os.getenv("YTDLP_COOKIES_BROWSER", "chromium").strip().lower() or "chromium"
+        return {"cookiesfrombrowser": (browser, str(prof), None, None)}
+
+    legacy = COOKIES["youtube"]
+    if legacy.is_file():
+        return {"cookiefile": str(legacy)}
+
+    return {}
+
 
 # ----------------------------------------------------------------------
 # Параметры нарезки (slicer)

@@ -13,6 +13,7 @@ from __future__ import annotations
 import random
 import re
 import time
+from pathlib import Path
 from urllib.parse import quote_plus
 
 from yt_dlp import YoutubeDL
@@ -85,6 +86,7 @@ def _search_ydl_opts(proxy: str | None) -> dict:
     }
     if proxy:
         opts["proxy"] = proxy
+    opts.update(cfg.get_ytdlp_cookie_options())
     return opts
 
 
