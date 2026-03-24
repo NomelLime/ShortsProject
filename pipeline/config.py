@@ -191,7 +191,14 @@ MAX_WORKERS = os.cpu_count() or 2
 OLLAMA_MODEL    = 'qwen2.5vl:7b'   # VL-модель: видит реальные кадры видео
 AI_ENABLED      = True
 OLLAMA_TIMEOUT  = 60
-AI_NUM_FRAMES   = 6      # кадры для VL-анализа метаданных и точек нарезки
+AI_NUM_FRAMES   = 8      # кадры для VL-анализа метаданных и точек нарезки
+VL_BACKEND      = os.getenv("VL_BACKEND", "ollama").strip().lower()  # ollama | transformers
+QWEN_VL_MODEL_ID = os.getenv("QWEN_VL_MODEL_ID", "Qwen/Qwen2.5-VL-7B-Instruct")
+QWEN_VL_VIDEO_FPS = float(os.getenv("QWEN_VL_VIDEO_FPS", "1.0"))
+QWEN_VL_MAX_PIXELS = int(os.getenv("QWEN_VL_MAX_PIXELS", str(360 * 420)))
+QWEN_VL_MAX_NEW_TOKENS = int(os.getenv("QWEN_VL_MAX_NEW_TOKENS", "512"))
+QWEN_VL_TEMPERATURE = float(os.getenv("QWEN_VL_TEMPERATURE", "0.4"))
+QWEN_VL_FLASH_ATTN = os.getenv("QWEN_VL_FLASH_ATTN", "1") == "1"
 
 # VL-фильтрация контента (CURATOR + SCOUT)
 # CURATOR: проверяет качество видео перед обработкой (только новые — кеш по sha256)
@@ -460,6 +467,7 @@ TTS_VOLUME         = float(os.getenv("TTS_VOLUME", "1.0")) # громкость 
 TTS_VOICE_OVER_MIX = float(os.getenv("TTS_VOICE_OVER_MIX", "0.85"))  # доля голоса в миксе
 # Голос применяется к hook_text из метаданных видео
 TTS_USE_HOOK_TEXT  = os.getenv("TTS_USE_HOOK_TEXT", "true").lower() == "true"
+TTS_FORCE_LANG_OVERRIDE = os.getenv("TTS_FORCE_LANG_OVERRIDE", "false").lower() == "true"
 # Временная папка для .wav файлов до микширования
 TTS_TEMP_DIR       = BASE_DIR / "data" / "tts_temp"
 

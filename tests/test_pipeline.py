@@ -763,3 +763,140 @@ class TestOverlayPositionExprs:
         ox, oy = _overlay_xy_exprs()
         assert not ox.strip().lower().startswith("x=")
         assert not oy.strip().lower().startswith("y=")
+
+
+class TestAiMetadataQuality:
+    def test_normalize_meta_variant_trims_and_limits(self):
+        from pipeline.ai import _normalize_meta_variant
+
+        src = {
+            "title": "  Очень длинный заголовок " + "x" * 200,
+            "description": "  Описание " + "y" * 300,
+            "tags": "a, b, c",
+            "hook_text": "  hook  ",
+            "thumbnail_idea": "  idea  ",
+            "loop_prompt": "  loop  ",
+            "overlays": [],
+        }
+        out = _normalize_meta_variant(src)
+        assert len(out["title"]) <= 60
+        assert len(out["description"]) <= 150
+        assert out["tags"] == ["a", "b", "c"]
+        assert out["hook_text"] == "hook"
+
+    def test_meta_quality_rejects_generic_templates(self):
+        from pipeline.ai import _meta_quality_ok
+
+        bad = {
+            "title": "Amazing video",
+            "description": "Subscribe for more! #shorts #viral #trending",
+        }
+        good = {
+            "title": "Кот открыл кран и затопил ванную",
+            "description": "Кот случайно запускает воду в ванной, а хозяин в шоке пытается остановить поток.",
+        }
+        assert _meta_quality_ok(bad) is False
+        assert _meta_quality_ok(good) is True
+
+    def test_infer_niche_style_hint_animals(self, tmp_path):
+        from pipeline.ai import _infer_niche_style_hint
+
+        p = tmp_path / "cat_funny.mp4"
+        hint = _infer_niche_style_hint(
+            video_path=p,
+            transcript="",
+            trending_hashtags=["#pets"],
+        )
+        assert "animals" in hint
+
+    def test_parse_metadata_json_response_with_wrapper_text(self):
+        from pipeline.ai import _parse_metadata_json_response
+
+        raw = (
+            "Вот результат:\\n"
+            "```json\\n"
+            "[{\"title\":\"T\",\"description\":\"D\",\"tags\":[\"a\"]}]\\n"
+            "```\\n"
+            "Спасибо!"
+        )
+        parsed = _parse_metadata_json_response(raw)
+        assert isinstance(parsed, list)
+        assert parsed[0]["title"] == "T"
+
+    def test_parse_metadata_json_response_dict_variants(self):
+        from pipeline.ai import _parse_metadata_json_response
+
+        raw = "{\"variants\":[{\"title\":\"T2\",\"description\":\"D2\"}]}"
+        parsed = _parse_metadata_json_response(raw)
+        assert isinstance(parsed, list)
+        assert parsed[0]["title"] == "T2"
+
+    def test_salvage_metadata_from_raw_text(self, tmp_path):
+        from pipeline.ai import _salvage_metadata_from_raw_text
+
+        p = tmp_path / "sample.mp4"
+        raw = "Вот кратко: Кот открыл кран и устроил потоп. Хозяин в шоке."
+        out = _salvage_metadata_from_raw_text(raw, p)
+        assert isinstance(out, list) and out
+        assert len(out[0]["title"]) >= 8
+        assert len(out[0]["description"]) >= 20
+
+    def test_salvage_strips_im_tokens(self, tmp_path):
+        from pipeline.ai import _salvage_metadata_from_raw_text
+
+        p = tmp_path / "cat_toilet_video.mp4"
+        raw = "<|im_start|> assistant <|im_end|>"
+        out = _salvage_metadata_from_raw_text(raw, p, transcript="Кот открыл кран и вода потекла.")
+        assert out and "<|" not in out[0]["title"]
+        assert "Кот" in out[0]["description"] or "кот" in out[0]["description"]
+
+    def test_enrich_metadata_variant_fills_behavior_fields(self, tmp_path):
+        from pipeline.ai import _enrich_metadata_variant
+
+        p = tmp_path / "cat_toilet_scene.mp4"
+        src = {
+            "title": "<|im_start|>",
+            "description": "",
+            "tags": [],
+            "thumbnail_idea": "",
+            "hook_text": "",
+            "overlays": [],
+            "loop_prompt": "",
+            "best_segment": None,
+        }
+        out = _enrich_metadata_variant(
+            src,
+            p,
+            transcript="Кот открыл кран в туалете и вода льется.",
+            trending_hashtags=["#cats", "#petlife"],
+        )
+        assert out["title"] and "<|" not in out["title"]
+        assert len(out["description"]) >= 20
+        assert isinstance(out["tags"], list) and len(out["tags"]) >= 1
+        assert out["thumbnail_idea"]
+        assert out["hook_text"]
+        assert isinstance(out["overlays"], list) and len(out["overlays"]) >= 1
+        assert out["loop_prompt"]
+
+
+class TestTtsLangOverride:
+    def test_tts_text_for_clip_override_ru_falls_back_to_detected_en(self):
+        from pipeline.tts_utils import tts_text_for_clip
+
+        text, lang = tts_text_for_clip(
+            {"title": "Amazing short about cat"},
+            lang_override="ru",
+        )
+        assert text is not None
+        assert lang.startswith("en")
+
+    def test_tts_text_for_clip_force_override_keeps_ru(self):
+        from pipeline.tts_utils import tts_text_for_clip
+
+        text, lang = tts_text_for_clip(
+            {"title": "Amazing short about cat"},
+            lang_override="ru",
+            force_lang_override=True,
+        )
+        assert text is not None
+        assert lang == "ru"

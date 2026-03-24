@@ -1,6 +1,7 @@
 # ai.py
 import concurrent.futures
 import hashlib
+import io
 import json
 import logging
 from pipeline import config
@@ -14,6 +15,7 @@ from typing import Dict, List, Optional, Tuple
 import cv2
 import ollama
 import requests
+from PIL import Image
 
 from pipeline.config import (
     OLLAMA_MODEL, AI_NUM_FRAMES,
@@ -168,18 +170,62 @@ def load_trending_hashtags() -> List[str]:
 # Извлечение кадров
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _scene_aware_frame_indices(cap: cv2.VideoCapture, total_frames: int, num_frames: int) -> List[int]:
+    """Подбирает индексы кадров: равномерные якоря + пики изменений между сценами."""
+    if total_frames <= 0 or num_frames <= 0:
+        return []
+
+    # Равномерные якоря по всей длине ролика (гарантируют охват таймлайна).
+    anchors: List[int] = []
+    for i in range(num_frames):
+        idx = min(int(round(i * (total_frames - 1) / max(1, num_frames - 1))), total_frames - 1)
+        anchors.append(idx)
+
+    # Детект резких изменений по sampled-кадрам.
+    sample_step = max(1, total_frames // max(24, num_frames * 10))
+    diffs: List[Tuple[float, int]] = []
+    prev_gray = None
+    pos = 0
+    while pos < total_frames:
+        cap.set(cv2.CAP_PROP_POS_FRAMES, pos)
+        ok, frame = cap.read()
+        if not ok:
+            break
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        if prev_gray is not None:
+            score = float(cv2.mean(cv2.absdiff(gray, prev_gray))[0])
+            diffs.append((score, pos))
+        prev_gray = gray
+        pos += sample_step
+
+    scene_slots = max(0, num_frames - len(anchors) // 2)
+    scene_points = [p for _, p in sorted(diffs, key=lambda x: x[0], reverse=True)[:scene_slots]]
+
+    merged = sorted(set(anchors + scene_points))
+    if len(merged) > num_frames:
+        # Нормализуем обратно до нужного количества, сохраняя порядок по таймлайну.
+        step = len(merged) / num_frames
+        merged = [merged[min(int(i * step), len(merged) - 1)] for i in range(num_frames)]
+        merged = sorted(set(merged))
+    while len(merged) < num_frames:
+        merged.append(min(total_frames - 1, merged[-1] + 1 if merged else 0))
+    return merged[:num_frames]
+
+
 def extract_frames(video_path: Path, num_frames: int = AI_NUM_FRAMES) -> List[bytes]:
-    """Извлекает равномерно распределённые кадры из видео (raw JPEG bytes для VL-модели)."""
+    """Извлекает кадры для VL: scene-aware выборка + охват всего таймлайна."""
     cap = cv2.VideoCapture(str(video_path))
     if not cap.isOpened():
         raise ValueError(f"Не удалось открыть видео: {video_path}")
 
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    if total_frames <= 0:
+        cap.release()
+        raise ValueError(f"Видео не содержит кадров: {video_path}")
 
-    step = max(1, total_frames // num_frames)
-    frames = []
-    for i in range(num_frames):
-        frame_num = min(i * step, total_frames - 1)
+    frame_indices = _scene_aware_frame_indices(cap, total_frames, num_frames)
+    frames: List[bytes] = []
+    for frame_num in frame_indices:
         cap.set(cv2.CAP_PROP_POS_FRAMES, frame_num)
         ret, frame = cap.read()
         if not ret:
@@ -198,6 +244,7 @@ def ollama_generate_with_timeout(
     model: str,
     prompt: str,
     images: Optional[List[bytes]] = None,
+    response_format: Optional[str] = None,
     timeout: int = OLLAMA_TIMEOUT,
 ) -> Dict:
     """Генерирует ответ Ollama VL-модели с таймаутом.
@@ -211,12 +258,805 @@ def ollama_generate_with_timeout(
     kwargs: Dict = dict(model=model, prompt=prompt)
     if images:
         kwargs["images"] = images
+    if response_format:
+        kwargs["format"] = response_format
     with concurrent.futures.ThreadPoolExecutor() as executor:
         future = executor.submit(ollama.generate, **kwargs)
         try:
             return future.result(timeout=timeout)
         except concurrent.futures.TimeoutError:
             raise TimeoutError(f"Ollama timeout after {timeout}s")
+
+
+_HF_QWEN_MODEL = None
+_HF_QWEN_PROCESSOR = None
+_HF_QWEN_VIDEO_HELPER = None
+_HF_QWEN_LOCK = threading.Lock()
+
+
+def _use_transformers_vl() -> bool:
+    return getattr(config, "VL_BACKEND", "ollama") == "transformers"
+
+
+def _load_hf_qwen_components():
+    """Ленивая загрузка Qwen2.5-VL через transformers."""
+    global _HF_QWEN_MODEL, _HF_QWEN_PROCESSOR, _HF_QWEN_VIDEO_HELPER
+    if _HF_QWEN_MODEL is not None and _HF_QWEN_PROCESSOR is not None and _HF_QWEN_VIDEO_HELPER is not None:
+        return _HF_QWEN_MODEL, _HF_QWEN_PROCESSOR, _HF_QWEN_VIDEO_HELPER
+    with _HF_QWEN_LOCK:
+        if _HF_QWEN_MODEL is not None and _HF_QWEN_PROCESSOR is not None and _HF_QWEN_VIDEO_HELPER is not None:
+            return _HF_QWEN_MODEL, _HF_QWEN_PROCESSOR, _HF_QWEN_VIDEO_HELPER
+        from transformers import Qwen2_5_VLForConditionalGeneration, AutoProcessor
+        from qwen_vl_utils import process_vision_info
+        model_id = getattr(config, "QWEN_VL_MODEL_ID", "Qwen/Qwen2.5-VL-7B-Instruct")
+        common_kwargs: Dict = {
+            "torch_dtype": "auto",
+            "device_map": "auto",
+        }
+        if getattr(config, "QWEN_VL_FLASH_ATTN", True):
+            common_kwargs["attn_implementation"] = "flash_attention_2"
+        try:
+            model = Qwen2_5_VLForConditionalGeneration.from_pretrained(model_id, **common_kwargs)
+        except Exception:
+            # Fallback без flash attention для сред, где он недоступен.
+            common_kwargs.pop("attn_implementation", None)
+            model = Qwen2_5_VLForConditionalGeneration.from_pretrained(model_id, **common_kwargs)
+        processor = AutoProcessor.from_pretrained(model_id)
+        _HF_QWEN_MODEL = model
+        _HF_QWEN_PROCESSOR = processor
+        _HF_QWEN_VIDEO_HELPER = process_vision_info
+        return _HF_QWEN_MODEL, _HF_QWEN_PROCESSOR, _HF_QWEN_VIDEO_HELPER
+
+
+def _hf_qwen_video_generate(
+    video_path: Path,
+    prompt: str,
+    max_new_tokens: Optional[int] = None,
+    temperature: Optional[float] = None,
+) -> str:
+    """Генерация через Qwen2.5-VL (transformers) с входом типа video."""
+    model, processor, process_vision_info = _load_hf_qwen_components()
+    fps = float(getattr(config, "QWEN_VL_VIDEO_FPS", 1.0))
+    max_pixels = int(getattr(config, "QWEN_VL_MAX_PIXELS", 360 * 420))
+    max_new = int(max_new_tokens or getattr(config, "QWEN_VL_MAX_NEW_TOKENS", 512))
+    temp = float(temperature if temperature is not None else getattr(config, "QWEN_VL_TEMPERATURE", 0.4))
+    messages = [{
+        "role": "user",
+        "content": [
+            {
+                "type": "video",
+                "video": str(video_path.resolve()),
+                "fps": fps,
+                "max_pixels": max_pixels,
+            },
+            {"type": "text", "text": prompt},
+        ],
+    }]
+    text = processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+    image_inputs, video_inputs, video_kwargs = process_vision_info(messages, return_video_kwargs=True)
+    inputs = processor(
+        text=[text],
+        images=image_inputs,
+        videos=video_inputs,
+        padding=True,
+        return_tensors="pt",
+        **video_kwargs,
+    )
+    device = getattr(model, "device", None)
+    if device is not None:
+        inputs = inputs.to(device)
+    do_sample = temp > 0
+    gen_kwargs: Dict = {
+        "max_new_tokens": max_new,
+        "do_sample": do_sample,
+    }
+    if do_sample:
+        gen_kwargs["temperature"] = temp
+    generated_ids = model.generate(**inputs, **gen_kwargs)
+    out = processor.batch_decode(
+        [ids[len(inputs.input_ids[0]):] for ids in generated_ids],
+        skip_special_tokens=True,
+        clean_up_tokenization_spaces=False,
+    )[0]
+    return out
+
+
+def _hf_qwen_images_generate(
+    frames: List[bytes],
+    prompt: str,
+    max_new_tokens: Optional[int] = None,
+    temperature: Optional[float] = None,
+) -> str:
+    """Генерация через Qwen2.5-VL по набору изображений в хронологическом порядке."""
+    if not frames:
+        return ""
+    model, processor, _ = _load_hf_qwen_components()
+    max_new = int(max_new_tokens or getattr(config, "QWEN_VL_MAX_NEW_TOKENS", 512))
+    temp = float(temperature if temperature is not None else getattr(config, "QWEN_VL_TEMPERATURE", 0.4))
+    pil_images: List[Image.Image] = []
+    for b in frames:
+        try:
+            pil_images.append(Image.open(io.BytesIO(b)).convert("RGB"))
+        except Exception:
+            continue
+    if not pil_images:
+        return ""
+    messages = [{
+        "role": "user",
+        "content": ([{"type": "image"} for _ in pil_images] + [{"type": "text", "text": prompt}]),
+    }]
+    text = processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+    inputs = processor(
+        text=[text],
+        images=pil_images,
+        padding=True,
+        return_tensors="pt",
+    )
+    device = getattr(model, "device", None)
+    if device is not None:
+        inputs = inputs.to(device)
+    do_sample = temp > 0
+    gen_kwargs: Dict = {
+        "max_new_tokens": max_new,
+        "do_sample": do_sample,
+    }
+    if do_sample:
+        gen_kwargs["temperature"] = temp
+    generated_ids = model.generate(**inputs, **gen_kwargs)
+    out = processor.batch_decode(
+        [ids[len(inputs.input_ids[0]):] for ids in generated_ids],
+        skip_special_tokens=True,
+        clean_up_tokenization_spaces=False,
+    )[0]
+    return out
+
+
+def _video_vl_generate_with_fallback(
+    video_path: Path,
+    prompt: str,
+    frames: Optional[List[bytes]] = None,
+    response_format: Optional[str] = None,
+) -> str:
+    """Пробует transformers-backend, при ошибке откатывается на Ollama."""
+    if _use_transformers_vl():
+        try:
+            if frames:
+                return _hf_qwen_images_generate(frames, prompt)
+            return _hf_qwen_video_generate(video_path, prompt)
+        except Exception as exc:
+            logger.warning("Transformers VL failed, fallback to Ollama: %s", exc)
+    response = ollama_generate_with_timeout(
+        OLLAMA_MODEL,
+        prompt,
+        images=frames,
+        response_format=response_format,
+    )
+    return response.get("response", "")
+
+
+def _dump_meta_debug_response(video_path: Path, attempt: int, reason: str, raw_text: str) -> None:
+    """Сохраняет сырой ответ Ollama для диагностики невалидного/пустого JSON."""
+    try:
+        dbg_dir = config.BASE_DIR / "data" / "ollama_meta_debug"
+        dbg_dir.mkdir(parents=True, exist_ok=True)
+        stamp = int(time.time())
+        out = dbg_dir / f"{video_path.stem}_{stamp}_attempt{attempt}.txt"
+        payload = (
+            f"video={video_path.name}\n"
+            f"attempt={attempt}\n"
+            f"reason={reason}\n"
+            f"model={OLLAMA_MODEL}\n"
+            "---- RAW RESPONSE ----\n"
+            f"{raw_text or ''}\n"
+        )
+        out.write_text(payload, encoding="utf-8")
+    except Exception as exc:
+        logger.debug("meta debug dump failed: %s", exc)
+
+
+_GENERIC_META_PATTERNS = [
+    r"subscribe\s+for\s+more",
+    r"#shorts\b",
+    r"#viral\b",
+    r"#trending\b",
+    r"смотри\s+как",
+    r"это\s+видео",
+    r"<\|im_start\|>",
+    r"<\|im_end\|>",
+    r"\bassistant\b",
+    r"\buser\b",
+    r"^название$",
+    r"^описание$",
+    r"^тег\d*$",
+    r"^tag\d*$",
+    r"^оверлей\d*$",
+    r"^overlay\d*$",
+    r"идея\s+для\s+миниатюры",
+    r"текст\s+привлечения\s+внимания",
+    r"повторяющийся\s+текст",
+    r"ключевой\s+момент\s+из\s+видео",
+    r"яркий\s+момент",
+    r"интересный\s+момент",
+    r"сюжет\s+собран\s+по\s+ключевым\s+кадрам",
+]
+
+_NICHE_STYLE_PROFILES = {
+    "animals": (
+        "Стиль animals/pets: эмоциональный, тёплый, с акцентом на поведение животного и неожиданную реакцию."
+    ),
+    "gaming": (
+        "Стиль gaming: динамика момента, конкретный игровой эпизод, короткие формулировки без жаргона ради жаргона."
+    ),
+    "tech": (
+        "Стиль tech: конкретная польза/факт, без громких обещаний, понятные формулировки для широкой аудитории."
+    ),
+    "crypto": (
+        "Стиль crypto/finance: осторожные формулировки, без обещаний дохода, акцент на событие и риск."
+    ),
+    "motivation": (
+        "Стиль motivation: энергичная, поддерживающая подача, но без абстрактной воды."
+    ),
+    "food": (
+        "Стиль food: упор на вкус/процесс/результат, конкретные детали кадра."
+    ),
+    "travel": (
+        "Стиль travel: место + конкретная эмоция/ситуация, минимум клише."
+    ),
+}
+
+
+def _clean_meta_text(value: str, max_len: int) -> str:
+    """Лёгкая очистка title/description после LLM."""
+    if not isinstance(value, str):
+        return ""
+    text = re.sub(r"\s+", " ", value).strip()
+    text = re.sub(r"<\|im_(?:start|end)\|>", " ", text, flags=re.IGNORECASE)
+    text = re.sub(r"\b(?:assistant|user|system)\b\s*:?", " ", text, flags=re.IGNORECASE)
+    text = text.strip("\"'`")
+    text = re.sub(r"\s+", " ", text).strip()
+    if len(text) > max_len:
+        text = text[:max_len].rstrip()
+    return text
+
+
+def _is_generic_meta_text(text: str) -> bool:
+    if not text:
+        return True
+    low = text.lower()
+    return any(re.search(p, low) for p in _GENERIC_META_PATTERNS)
+
+
+def _normalize_meta_variant(v: Dict) -> Dict:
+    """Нормализует и подчищает один вариант метаданных."""
+    title = _clean_meta_text(v.get("title", ""), 60)
+    description = _clean_meta_text(v.get("description", ""), 150)
+    hook_text = _clean_meta_text(v.get("hook_text", ""), 80)
+    loop_prompt = _clean_meta_text(v.get("loop_prompt", ""), 80)
+    thumbnail_idea = _clean_meta_text(v.get("thumbnail_idea", ""), 120)
+
+    tags_raw = v.get("tags", [])
+    if isinstance(tags_raw, str):
+        tags = [t.strip() for t in re.split(r"[,;]", tags_raw) if t.strip()]
+    elif isinstance(tags_raw, list):
+        tags = [str(t).strip() for t in tags_raw if str(t).strip()]
+    else:
+        tags = []
+
+    overlays_raw = v.get("overlays", [])
+    overlays = overlays_raw if isinstance(overlays_raw, list) else []
+
+    return {
+        "title": title,
+        "description": description,
+        "tags": tags[:10],
+        "thumbnail_idea": thumbnail_idea,
+        "hook_text": hook_text,
+        "best_segment": v.get("best_segment"),
+        "overlays": overlays,
+        "loop_prompt": loop_prompt,
+    }
+
+
+def _meta_quality_ok(v: Dict) -> bool:
+    """Быстрая эвристика качества title/description."""
+    title = v.get("title", "").strip()
+    desc = v.get("description", "").strip()
+    if len(title) < 8 or len(desc) < 20:
+        return False
+    if "<|" in title or "<|" in desc:
+        return False
+    if _is_generic_meta_text(title) or _is_generic_meta_text(desc):
+        return False
+    return True
+
+
+def _derive_tags(
+    title: str,
+    description: str,
+    transcript: str,
+    trending_hashtags: Optional[List[str]],
+) -> List[str]:
+    tags: List[str] = []
+    if trending_hashtags:
+        for h in trending_hashtags[:5]:
+            t = re.sub(r"^#+", "", str(h).strip()).lower()
+            t = re.sub(r"\s+", "", t)
+            if t and t not in tags:
+                tags.append(t)
+    text_words = re.findall(r"[a-zA-Zа-яА-ЯёЁ]{4,}", f"{title} {description} {transcript}")
+    for w in text_words[:8]:
+        lw = w.lower()
+        if lw not in tags:
+            tags.append(lw)
+    return tags[:10]
+
+
+def _normalize_tags(tags_raw: object) -> List[str]:
+    tags: List[str] = []
+    if isinstance(tags_raw, list):
+        for t in tags_raw:
+            txt = _clean_meta_text(str(t), 30).lower()
+            txt = re.sub(r"^#+", "", txt).strip()
+            if not txt or _is_generic_meta_text(txt):
+                continue
+            if txt not in tags:
+                tags.append(txt)
+    return tags[:10]
+
+
+def _derive_hook_text(title: str, description: str, transcript: str) -> str:
+    # 3-7 слов: берём сильный фрагмент title/description/transcript.
+    base = title or description
+    if not base:
+        base = transcript
+    words = re.findall(r"[^\s]+", base)
+    if len(words) >= 3:
+        return " ".join(words[:7]).strip(" .,!?:;")
+    return "Смотри, что происходит"
+
+
+def _derive_loop_prompt(description: str, hook_text: str) -> str:
+    src = description or hook_text
+    if "?" in src:
+        q = src.split("?")[0].strip()
+        if q:
+            return (q + "?")[:80]
+    return "Чем это закончится?"[:80]
+
+
+def _summarize_video_context_vl(
+    video_path: Path,
+    frames: List[bytes],
+    transcript: str,
+) -> str:
+    """Короткая сводка сюжета по КАДРАМ (и транскрипту), без использования имени файла."""
+    if not frames:
+        return ""
+    transcript_hint = f"\nТранскрипт (если релевантно): {transcript[:400]}\n" if transcript else ""
+    prompt = (
+        "Ниже кадры ОДНОГО видео в хронологическом порядке (от начала к концу).\n"
+        "Собери storyboard и опиши, как развивается событие в ролике.\n"
+        "Нужно 3 пункта: (1) кто/что в кадре, (2) ключевое действие, (3) чем цепляет момент.\n"
+        "Пиши кратко, по фактам, без фантазий и без упоминания имени файла."
+        f"{transcript_hint}"
+    )
+    try:
+        raw = _video_vl_generate_with_fallback(
+            video_path=video_path,
+            prompt=prompt,
+            frames=frames,
+            response_format=None,
+        )
+        return _clean_meta_text(raw, 500)
+    except Exception as exc:
+        logger.debug("VL context summary failed: %s", exc)
+        return ""
+
+
+def _caption_keyframes_vl(
+    frames: List[bytes],
+    transcript: str = "",
+    video_path: Optional[Path] = None,
+) -> List[str]:
+    """Обязательный caption-pass: краткое описание каждого ключевого кадра."""
+    captions: List[str] = []
+    transcript_hint = f"\nТранскрипт (если уместно): {transcript[:300]}" if transcript else ""
+    if _use_transformers_vl() and video_path is not None:
+        try:
+            prompt = (
+                "Сделай caption-per-frame для ключевых моментов видео.\n"
+                f"Нужно {max(3, min(len(frames), 12))} коротких пунктов по хронологии (по одному действию на пункт).\n"
+                "Формат: каждый пункт с новой строки, без нумерации и без воды."
+                f"{transcript_hint}"
+            )
+            raw = _hf_qwen_images_generate(frames, prompt, max_new_tokens=350, temperature=0.2)
+            for line in re.split(r"[\r\n]+", raw):
+                txt = _clean_meta_text(re.sub(r"^\s*[-*•\d\.\)]\s*", "", line), 120)
+                if txt and not _is_generic_meta_text(txt):
+                    captions.append(txt)
+            if captions:
+                return captions[:12]
+        except Exception as exc:
+            logger.debug("video caption-per-frame via transformers failed: %s", exc)
+
+    for idx, frame in enumerate(frames, start=1):
+        prompt = (
+            f"Кадр #{idx}. Кратко опиши только то, что реально видно в кадре: "
+            "кто/что в кадре и какое действие/состояние. 1 короткая фраза, без воды."
+            f"{transcript_hint}"
+        )
+        try:
+            r = ollama_generate_with_timeout(
+                OLLAMA_MODEL,
+                prompt,
+                images=[frame],
+                timeout=max(15, min(OLLAMA_TIMEOUT, 60)),
+            )
+            txt = _clean_meta_text(r.get("response", ""), 120)
+            if txt and not _is_generic_meta_text(txt):
+                captions.append(txt)
+        except Exception as exc:
+            logger.debug("keyframe caption failed idx=%s: %s", idx, exc)
+    return captions
+
+
+def _build_deterministic_meta_seed(
+    frame_captions: List[str],
+    transcript: str,
+    context_summary: str,
+) -> Dict[str, str]:
+    """Детерминированная основа title/description из caption-per-frame."""
+    joined = " ".join(frame_captions[:8]).strip()
+    tr = _clean_meta_text(transcript or "", 220)
+    ctx = _clean_meta_text(context_summary or "", 220)
+    src = joined or tr or ctx
+    words = re.findall(r"[а-яА-ЯёЁa-zA-Z0-9]{3,}", src)
+    uniq: List[str] = []
+    for w in words:
+        lw = w.lower()
+        if lw not in uniq:
+            uniq.append(lw)
+        if len(uniq) >= 18:
+            break
+    title = _clean_meta_text(" ".join(uniq[:8]), 60)
+    desc_seed = _clean_meta_text(" ".join(uniq[:24]), 150)
+    description = desc_seed if len(desc_seed) >= 35 else _clean_meta_text(src, 150)
+    # Детерминированное «человеческое» описание из реальных caption'ов.
+    if frame_captions:
+        c1 = _clean_meta_text(frame_captions[0], 85)
+        c2 = _clean_meta_text(frame_captions[1], 85) if len(frame_captions) > 1 else ""
+        c3 = _clean_meta_text(frame_captions[2], 85) if len(frame_captions) > 2 else ""
+        parts = [x for x in [c1, c2, c3] if x]
+        if len(parts) >= 2:
+            description = _clean_meta_text(
+                f"В кадре {parts[0].lower()}, затем {parts[1].lower()}" + (f", после этого {parts[2].lower()}." if c3 else "."),
+                150,
+            )
+        elif parts:
+            description = _clean_meta_text(f"В кадре {parts[0].lower()}.", 150)
+    if len(title) < 12:
+        title = "Сюжет по ключевым кадрам"
+    if len(description) < 35:
+        if frame_captions:
+            joined = _clean_meta_text("; ".join(frame_captions[:3]), 150)
+            if joined:
+                description = joined
+            else:
+                description = "В видео показано действие персонажа и развитие сцены в нескольких последовательных кадрах."
+        else:
+            description = "В видео показано действие персонажа и развитие сцены в нескольких последовательных кадрах."
+    return {"title": title, "description": description}
+
+
+def _variant_too_generic(v: Dict) -> bool:
+    """Жёсткий фильтр общих ответов для автоперегенерации."""
+    title = _clean_meta_text(v.get("title", ""), 80).lower()
+    desc = _clean_meta_text(v.get("description", ""), 180).lower()
+    if _is_generic_meta_text(title) or _is_generic_meta_text(desc):
+        return True
+    bad_phrases = [
+        "ключевой момент",
+        "яркий момент",
+        "интересный момент",
+        "в этом видео",
+        "в ролике показан",
+    ]
+    if any(p in title for p in bad_phrases):
+        return True
+    if any(p in desc for p in bad_phrases) and len(re.findall(r"[а-яa-z0-9]{4,}", desc)) < 10:
+        return True
+    return False
+
+
+def _enrich_metadata_variant(
+    v: Dict,
+    video_path: Path,
+    transcript: str,
+    trending_hashtags: Optional[List[str]],
+    context_summary: str = "",
+    deterministic_seed: Optional[Dict[str, str]] = None,
+) -> Dict:
+    """Дозаполняет пустые поля метаданных осмысленными значениями."""
+    title = _clean_meta_text(v.get("title", ""), 60)
+    desc = _clean_meta_text(v.get("description", ""), 150)
+    seed_title = _clean_meta_text((deterministic_seed or {}).get("title", ""), 60)
+    seed_desc = _clean_meta_text((deterministic_seed or {}).get("description", ""), 150)
+
+    if len(title) < 8 or _is_generic_meta_text(title):
+        if seed_title:
+            title = seed_title
+        else:
+            src = _clean_meta_text(context_summary or transcript, 120)
+            words = re.findall(r"[^\s]+", src)
+            title = _clean_meta_text(" ".join(words[:8]) if words else "Сюжет по ключевым кадрам", 60)
+
+    if len(desc) < 20 or _is_generic_meta_text(desc):
+        if seed_desc:
+            desc = seed_desc
+        else:
+            tr = _clean_meta_text(transcript or "", 150)
+            if len(tr) >= 25:
+                desc = tr
+            else:
+                ctx = _clean_meta_text(context_summary, 150)
+                if len(ctx) >= 25:
+                    desc = ctx
+                else:
+                    desc = "В видео показано действие персонажа и развитие сцены в нескольких последовательных кадрах."
+
+    tags = _normalize_tags(v.get("tags"))
+    if not tags:
+        tags = _derive_tags(title, desc, transcript, trending_hashtags)
+
+    thumbnail_idea = _clean_meta_text(v.get("thumbnail_idea", ""), 120)
+    if not thumbnail_idea or _is_generic_meta_text(thumbnail_idea):
+        thumbnail_idea = _clean_meta_text(f"Крупный план ключевого момента: {title}", 120)
+
+    hook_text = _clean_meta_text(v.get("hook_text", ""), 80)
+    if not hook_text or _is_generic_meta_text(hook_text):
+        hook_text = _derive_hook_text(title, desc, transcript or context_summary)
+
+    overlays = v.get("overlays")
+    if isinstance(overlays, list):
+        normalized_overlays: List[Dict] = []
+        for item in overlays:
+            if isinstance(item, dict):
+                txt = _clean_meta_text(str(item.get("text", "")), 60)
+                if txt and not _is_generic_meta_text(txt):
+                    normalized_overlays.append({
+                        "text": txt,
+                        "start": int(item.get("start", 0) or 0),
+                        "duration": int(item.get("duration", OVERLAY_DEFAULT_DURATION) or OVERLAY_DEFAULT_DURATION),
+                    })
+            elif isinstance(item, str):
+                txt = _clean_meta_text(item, 60)
+                if txt and not _is_generic_meta_text(txt):
+                    normalized_overlays.append({
+                        "text": txt,
+                        "start": 0,
+                        "duration": OVERLAY_DEFAULT_DURATION,
+                    })
+        overlays = normalized_overlays
+    if not isinstance(overlays, list) or not overlays:
+        overlays = [{"text": hook_text[:40], "start": 0, "duration": 2}]
+
+    loop_prompt = _clean_meta_text(v.get("loop_prompt", ""), 80)
+    if not loop_prompt or _is_generic_meta_text(loop_prompt):
+        loop_prompt = _derive_loop_prompt(desc, hook_text)
+
+    out = dict(v)
+    out.update({
+        "title": title,
+        "description": desc,
+        "tags": tags[:10],
+        "thumbnail_idea": thumbnail_idea,
+        "hook_text": hook_text,
+        "overlays": overlays,
+        "loop_prompt": loop_prompt,
+    })
+    return out
+
+
+def _infer_niche_style_hint(
+    video_path: Path,
+    transcript: str,
+    trending_hashtags: Optional[List[str]],
+    context_summary: str = "",
+) -> str:
+    """Определяет нишу по контенту кадра/транскрипту/хэштегам и возвращает style-hint."""
+    bag = " ".join(
+        x for x in [
+            (context_summary or "").lower(),
+            (transcript or "").lower(),
+            " ".join(trending_hashtags or []).lower(),
+        ] if x
+    )
+    rules = [
+        ("animals", ["cat", "dog", "pet", "кот", "кошка", "собака", "животн"]),
+        ("gaming", ["game", "gaming", "minecraft", "cs2", "dota", "игр", "гейм"]),
+        ("tech", ["ai", "chatgpt", "tech", "python", "code", "код", "тех", "нейросет"]),
+        ("crypto", ["btc", "bitcoin", "eth", "crypto", "крипт", "биткоин", "эфир"]),
+        ("motivation", ["motivation", "discipline", "успех", "привычк", "мотивац"]),
+        ("food", ["recipe", "cook", "food", "еда", "рецепт", "кухн", "готов"]),
+        ("travel", ["travel", "trip", "city", "страна", "путеш", "поездк"]),
+    ]
+    for niche, keys in rules:
+        if any(k in bag for k in keys):
+            return _NICHE_STYLE_PROFILES[niche]
+    return ""
+
+
+def _extract_first_json_array(raw: str) -> Optional[str]:
+    """Пытается вырезать первый JSON-массив [...] из «грязного» текста."""
+    if not raw:
+        return None
+    start = raw.find("[")
+    if start < 0:
+        return None
+    depth = 0
+    in_str = False
+    esc = False
+    for i in range(start, len(raw)):
+        ch = raw[i]
+        if in_str:
+            if esc:
+                esc = False
+            elif ch == "\\":
+                esc = True
+            elif ch == "\"":
+                in_str = False
+            continue
+        if ch == "\"":
+            in_str = True
+            continue
+        if ch == "[":
+            depth += 1
+        elif ch == "]":
+            depth -= 1
+            if depth == 0:
+                return raw[start:i + 1]
+    return None
+
+
+def _parse_metadata_json_response(raw_text: str) -> List[Dict]:
+    """Устойчиво парсит ответ LLM в список словарей метаданных."""
+    raw = (raw_text or "").strip()
+    raw = re.sub(r"^```(?:json)?\s*", "", raw)
+    raw = re.sub(r"\s*```$", "", raw)
+
+    candidates = [raw]
+    extracted = _extract_first_json_array(raw)
+    if extracted and extracted != raw:
+        candidates.append(extracted)
+
+    last_exc: Optional[Exception] = None
+    for candidate in candidates:
+        try:
+            parsed = json.loads(candidate)
+            if isinstance(parsed, list):
+                return [x for x in parsed if isinstance(x, dict)]
+            if isinstance(parsed, dict):
+                # Некоторые модели возвращают один объект вместо массива.
+                if any(k in parsed for k in ("title", "description", "hook_text", "tags")):
+                    return [parsed]
+                for key in ("variants", "items", "data", "result"):
+                    val = parsed.get(key)
+                    if isinstance(val, list):
+                        return [x for x in val if isinstance(x, dict)]
+        except Exception as exc:
+            last_exc = exc
+
+    if last_exc:
+        raise last_exc
+    raise ValueError("Не удалось распарсить JSON-массив метаданных")
+
+
+def _repair_metadata_json_with_llm(raw_text: str) -> List[Dict]:
+    """Пытается восстановить валидный JSON-массив из неструктурированного ответа."""
+    repair_prompt = (
+        "Ниже невалидный ответ модели. Преобразуй его в ВАЛИДНЫЙ JSON-массив объектов.\n"
+        "Сохрани только поля: title, description, tags, thumbnail_idea, hook_text, best_segment, overlays, loop_prompt.\n"
+        "Ответ — только JSON-массив, без markdown и комментариев.\n\n"
+        f"INPUT:\n{(raw_text or '')[:4000]}"
+    )
+    response = ollama_generate_with_timeout(
+        OLLAMA_MODEL,
+        repair_prompt,
+        images=None,
+        response_format="json",
+    )
+    return _parse_metadata_json_response(response.get("response", ""))
+
+
+def _generate_metadata_from_context_with_llm(
+    context_summary: str,
+    transcript: str,
+    trending_hashtags: Optional[List[str]],
+    num_variants: int,
+    frame_captions: Optional[List[str]] = None,
+) -> List[Dict]:
+    """Запасной путь: генерирует metadata JSON из уже собранного контекста (без картинок)."""
+    ctx = _clean_meta_text(context_summary or "", 700)
+    tr = _clean_meta_text(transcript or "", 700)
+    hashtags = ", ".join((trending_hashtags or [])[:10])
+    captions = "\n- ".join((frame_captions or [])[:12])
+    captions_block = f"Caption-per-frame:\n- {captions}\n" if captions else ""
+    prompt = (
+        "Сформируй метаданные короткого вертикального видео.\n"
+        "Используй только контекст ниже. Не выдумывай факты и не используй имя файла.\n"
+        f"Контекст по кадрам: {ctx or 'нет'}\n"
+        f"{captions_block}"
+        f"Транскрипт: {tr or 'нет'}\n"
+        f"Хэштеги-контекст: {hashtags or 'нет'}\n\n"
+        f"Верни {num_variants} вариантов.\n"
+        "Ответ — только валидный JSON-массив объектов (без markdown и комментариев).\n"
+        "Поля каждого объекта: title, description, tags, thumbnail_idea, hook_text, best_segment, overlays, loop_prompt.\n"
+    )
+    response = ollama_generate_with_timeout(
+        OLLAMA_MODEL,
+        prompt,
+        images=None,
+        response_format="json",
+        timeout=max(20, min(OLLAMA_TIMEOUT, 90)),
+    )
+    return _parse_metadata_json_response(response.get("response", ""))
+
+
+def _salvage_metadata_from_raw_text(
+    raw_text: str,
+    video_path: Path,
+    transcript: str = "",
+    context_summary: str = "",
+    deterministic_seed: Optional[Dict[str, str]] = None,
+) -> List[Dict]:
+    """Минимальный salvage, если модель не дала валидный JSON."""
+    text = re.sub(r"\s+", " ", (raw_text or "")).strip()
+    if not text:
+        return []
+
+    # Пробуем вытащить кандидат title из кавычек или первого фрагмента.
+    quoted = re.findall(r"[\"“](.{10,120}?)[\"”]", text)
+    title = quoted[0] if quoted else text[:60]
+    title = _clean_meta_text(title, 60)
+
+    # Description: первые 1-2 предложения из ответа.
+    parts = [p.strip() for p in re.split(r"[.!?]+", text) if p.strip()]
+    desc = ". ".join(parts[:2]) if parts else text
+    desc = _clean_meta_text(desc, 150)
+
+    seed_title = _clean_meta_text((deterministic_seed or {}).get("title", ""), 60)
+    seed_desc = _clean_meta_text((deterministic_seed or {}).get("description", ""), 150)
+
+    if len(title) < 8 or "<|" in title or _is_generic_meta_text(title):
+        if seed_title:
+            title = seed_title
+        else:
+            src = _clean_meta_text(context_summary or transcript, 120)
+            words = re.findall(r"[^\s]+", src)
+            title = _clean_meta_text(" ".join(words[:8]) if words else "Сюжет по ключевым кадрам", 60)
+
+    transcript_short = _clean_meta_text(transcript or "", 150)
+    context_short = _clean_meta_text(context_summary or "", 150)
+    if len(desc) < 20 or "<|" in desc or _is_generic_meta_text(desc):
+        if seed_desc:
+            desc = seed_desc
+        elif len(transcript_short) >= 30:
+            desc = transcript_short
+        elif len(context_short) >= 30:
+            desc = context_short
+        else:
+            desc = "В видео показано действие персонажа и развитие сцены в нескольких последовательных кадрах."
+
+    return [{
+        "title": title,
+        "description": desc,
+        "tags": [],
+        "thumbnail_idea": "",
+        "hook_text": "",
+        "best_segment": None,
+        "overlays": [],
+        "loop_prompt": "",
+    }]
 
 
 def generate_video_metadata(
@@ -245,6 +1085,7 @@ def generate_video_metadata(
 
         # Whisper-транскрипция аудио (ФИЧА 2) — улучшает релевантность метаданных
         transcript_hint = ""
+        transcript = ""
         if config.META_WHISPER_ENABLED:
             try:
                 from pipeline.transcript import transcribe_for_metadata
@@ -259,14 +1100,57 @@ def generate_video_metadata(
             except Exception as _te:
                 logger.warning("Транскрипция для meta не удалась: %s", _te)
 
+        context_summary = _summarize_video_context_vl(
+            video_path=video_path,
+            frames=frames,
+            transcript=transcript,
+        )
+        frame_captions = _caption_keyframes_vl(
+            frames,
+            transcript=transcript,
+            video_path=video_path,
+        )
+        deterministic_seed = _build_deterministic_meta_seed(
+            frame_captions=frame_captions,
+            transcript=transcript,
+            context_summary=context_summary,
+        )
+        context_hint = f"Сводка по кадрам: {context_summary}\n" if context_summary else ""
+        captions_hint = (
+            "Ключевые кадры (caption-per-frame):\n- "
+            + "\n- ".join(frame_captions[:12])
+            + "\n"
+        ) if frame_captions else ""
+        deterministic_hint = (
+            f"Опора для конкретики: title_seed='{deterministic_seed.get('title', '')}', "
+            f"description_seed='{deterministic_seed.get('description', '')}'.\n"
+        )
+
+        niche_style_hint = _infer_niche_style_hint(
+            video_path=video_path,
+            transcript=transcript,
+            trending_hashtags=trending_hashtags,
+            context_summary=context_summary,
+        )
+        niche_style_block = f"Стилевой профиль: {niche_style_hint}\n" if niche_style_hint else ""
+
         prompt = (
             f"Ты анализируешь вертикальное короткое видео (YouTube Shorts / TikTok / Reels).\n"
             f"Тебе показаны {len(frames)} равномерно распределённых кадров из видео.\n"
             f"{hashtag_hint}"
             f"{transcript_hint}"
+            f"{context_hint}"
+            f"{captions_hint}"
+            f"{deterministic_hint}"
+            f"{niche_style_block}"
             f"Создай {num_variants} варианта метаданных для вирального Shorts.\n\n"
+            "КРИТИЧНО: НИКОГДА не используй имя файла, путь, технические токены и служебные метки.\n"
+            "Опирайся только на визуальный контент кадров, речь в видео и контекст хэштегов.\n"
+            "ЗАПРЕЩЕНЫ общие формулировки: 'ключевой момент', 'яркий момент', 'интересный момент'.\n"
             "Требования к hook_text: интрига, вопрос или неожиданный факт — 3–7 слов.\n"
-            "Требования к title: цепляет с первых слов, без 'смотри как' и 'это видео'.\n\n"
+            "Требования к title: 35–60 символов, конкретика кадра/действия, без кликбейта-пустышек.\n"
+            "Требования к description: 90–150 символов, 1-2 простых предложения по сути кадра, без воды.\n"
+            "НЕЛЬЗЯ использовать шаблоны: 'Subscribe for more', '#shorts #viral #trending', 'смотри как', 'это видео'.\n\n"
             "Ответ — ТОЛЬКО валидный JSON-массив (без markdown, без пояснений):\n"
             '[\n'
             '  {\n'
@@ -282,11 +1166,131 @@ def generate_video_metadata(
             ']'
         )
 
-        response = ollama_generate_with_timeout(OLLAMA_MODEL, prompt, images=frames)
-        raw = response["response"].strip()
-        raw = re.sub(r"^```(?:json)?\s*", "", raw)
-        raw = re.sub(r"\s*```$", "", raw)
-        variants = json.loads(raw)
+        variants: List[Dict] = []
+        last_exc: Optional[Exception] = None
+        last_raw_response = ""
+        quality_min = max(1, num_variants // 2)
+
+        for attempt in range(3):
+            local_prompt = prompt
+            if attempt == 1:
+                local_prompt += (
+                    "\nПОВТОР: в предыдущем ответе были слабые шаблонные формулировки.\n"
+                    "Сделай title/description более конкретными по кадрам и действиям в видео.\n"
+                    "Используй caption-per-frame и избегай общих фраз.\n"
+                )
+            elif attempt == 2:
+                local_prompt += (
+                    "\nКРИТИЧНО: верни ТОЛЬКО валидный JSON-массив. "
+                    "Не добавляй префиксы, комментарии, markdown и пояснения.\n"
+                    "Если вариант звучит общо, перефразируй его с конкретикой действия.\n"
+                )
+
+            try:
+                raw_response = _video_vl_generate_with_fallback(
+                    video_path=video_path,
+                    prompt=local_prompt,
+                    frames=frames,
+                    response_format="json",
+                )
+                last_raw_response = raw_response or last_raw_response
+                try:
+                    parsed = _parse_metadata_json_response(raw_response)
+                except Exception:
+                    # Последняя попытка: просим модель «починить» формат JSON.
+                    _dump_meta_debug_response(video_path, attempt, "parse_failed", raw_response)
+                    parsed = _repair_metadata_json_with_llm(raw_response)
+                normalized = [
+                    _normalize_meta_variant(x) for x in parsed if isinstance(x, dict)
+                ]
+                normalized = [
+                    _enrich_metadata_variant(
+                        x,
+                        video_path,
+                        transcript,
+                        trending_hashtags,
+                        context_summary=context_summary,
+                        deterministic_seed=deterministic_seed,
+                    )
+                    for x in normalized
+                ]
+                if normalized:
+                    variants = normalized[:num_variants]
+                    good = sum(
+                        1 for x in variants
+                        if _meta_quality_ok(x) and not _variant_too_generic(x)
+                    )
+                    if good >= quality_min:
+                        break
+                    # Жёсткая браковка «слишком общих» вариантов.
+                    if attempt < 2:
+                        continue
+                else:
+                    _dump_meta_debug_response(video_path, attempt, "parsed_empty", raw_response)
+            except Exception as exc:
+                last_exc = exc
+                _dump_meta_debug_response(video_path, attempt, f"attempt_exception: {exc}", last_raw_response)
+
+        if not variants:
+            # Запасной шанс: генерируем JSON из storyboard-контекста и транскрипта без изображений.
+            if context_summary or transcript:
+                try:
+                    from_context = _generate_metadata_from_context_with_llm(
+                        context_summary=context_summary,
+                        transcript=transcript,
+                        trending_hashtags=trending_hashtags,
+                        num_variants=num_variants,
+                        frame_captions=frame_captions,
+                    )
+                    normalized_ctx = [
+                        _normalize_meta_variant(x) for x in from_context if isinstance(x, dict)
+                    ]
+                    normalized_ctx = [
+                        _enrich_metadata_variant(
+                            x,
+                            video_path,
+                            transcript,
+                            trending_hashtags,
+                            context_summary=context_summary,
+                            deterministic_seed=deterministic_seed,
+                        )
+                        for x in normalized_ctx
+                    ]
+                    if normalized_ctx:
+                        variants = normalized_ctx[:num_variants]
+                except Exception as ctx_exc:
+                    logger.debug("metadata from context failed: %s", ctx_exc)
+
+        if not variants:
+            salvaged = _salvage_metadata_from_raw_text(
+                last_raw_response,
+                video_path,
+                transcript=transcript,
+                context_summary=context_summary,
+                deterministic_seed=deterministic_seed,
+            )
+            if salvaged:
+                logger.warning("AI metadata salvage: использую минимально восстановленный вариант.")
+                variants = [_normalize_meta_variant(salvaged[0])]
+                variants = [
+                    _enrich_metadata_variant(
+                        x,
+                        video_path,
+                        transcript,
+                        trending_hashtags,
+                        context_summary=context_summary,
+                        deterministic_seed=deterministic_seed,
+                    )
+                    for x in variants
+                ]
+            else:
+                _dump_meta_debug_response(video_path, 99, "empty_variants_after_retries", last_raw_response)
+                if last_exc is not None:
+                    raise last_exc
+                raise ValueError("LLM вернул пустой список метаданных")
+
+        while len(variants) < num_variants:
+            variants.append(dict(variants[-1]))
 
         try:
             dur_meta = probe_video(video_path)["duration"]
@@ -518,10 +1522,10 @@ def refine_disputed_cut_boundaries(
 def _fallback_meta(video_path: Path, num_variants: int) -> List[Dict]:
     """Возвращает заглушку метаданных при недоступном AI."""
     base = {
-        "title":          f"Amazing Short #{video_path.stem[:40]}",
-        "description":    "Subscribe for more! 🔔 #shorts #viral #trending",
-        "tags":           ["shorts", "viral", "trending"],
-        "thumbnail_idea": "A key moment from the video.",
+        "title":          "Ключевой момент из видео",
+        "description":    "Короткий динамичный эпизод с фокусом на главном действии в кадре.",
+        "tags":           ["shorts", "video", "moment"],
+        "thumbnail_idea": "Крупный план ключевого действия в кадре.",
         "hook_text":      "",
         "best_segment":   None,
         "overlays":       [],

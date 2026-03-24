@@ -597,6 +597,7 @@ class Editor(BaseAgent):
 
         tts_paths: List[Optional[Path]] = []
         lang_override = getattr(config, "TTS_DEFAULT_LANG", None)
+        force_lang_override = getattr(config, "TTS_FORCE_LANG_OVERRIDE", False)
 
         for i, clip in enumerate(clips):
             # Выбираем метаданные для этого клипа
@@ -608,7 +609,11 @@ class Editor(BaseAgent):
             # Инжекция "Часть 2:" если видео относится к серийному контенту
             meta = _apply_serial_hook(meta)
 
-            text, lang = tts_text_for_clip(meta, lang_override)
+            text, lang = tts_text_for_clip(
+                meta,
+                lang_override,
+                force_lang_override=force_lang_override,
+            )
 
             if not text:
                 logger.debug("[EDITOR] Нет текста для TTS клипа %s", clip.name)

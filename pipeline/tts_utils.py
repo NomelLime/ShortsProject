@@ -157,7 +157,11 @@ def pick_tts_text(meta: dict) -> Optional[str]:
     return None
 
 
-def tts_text_for_clip(meta: dict, lang_override: Optional[str] = None) -> tuple[Optional[str], str]:
+def tts_text_for_clip(
+    meta: dict,
+    lang_override: Optional[str] = None,
+    force_lang_override: bool = False,
+) -> tuple[Optional[str], str]:
     """
     Возвращает (текст, язык) для синтеза.
     Язык определяется автоматически если не передан lang_override.
@@ -166,5 +170,16 @@ def tts_text_for_clip(meta: dict, lang_override: Optional[str] = None) -> tuple[
     if not text:
         return None, "en"
 
-    lang = lang_override or detect_language(text)
+    detected = detect_language(text)
+    if lang_override:
+        ov = (lang_override or "").lower().strip()
+        if force_lang_override:
+            lang = ov
+        # Защита от "ru" для англ. fallback-текста и наоборот.
+        elif (ov == "ru" and detected.startswith("en")) or (ov.startswith("en") and detected == "ru"):
+            lang = detected
+        else:
+            lang = ov
+    else:
+        lang = detected
     return text, lang
