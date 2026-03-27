@@ -45,7 +45,7 @@ def send_telegram(message: str, parse_mode: str = "HTML", critical: bool = False
     """
     Отправляет сообщение в Telegram с rate limiting.
     - Не чаще 1 сообщения в 2 сек (лимит Telegram API ~30/сек для ботов)
-    - Дедупликация: одно и то же сообщение не чаще раза в 5 мин
+    - Дедупликация: одно и то же сообщение не чаще раза в 5 мин (запись в кеш только после HTTP 200)
 
     Args:
         critical: если True — отправляется всегда (даже при SP_TELEGRAM_CRITICAL_ONLY=true).
@@ -60,12 +60,19 @@ def send_telegram(message: str, parse_mode: str = "HTML", critical: bool = False
         logger.debug("Telegram: пропущено (SP_TELEGRAM_CRITICAL_ONLY=true, critical=False)")
         return True  # не ошибка — Orchestrator возьмёт эти данные напрямую
 
+    msg_hash = hashlib.md5(message[:200].encode()).hexdigest()
+
     with _tg_lock:
         global _tg_last_send_ts
 
-        # Дедупликация по первым 200 символам (ключевой смысл)
-        msg_hash = hashlib.md5(message[:200].encode()).hexdigest()
         now = time.monotonic()
+        # Чистим старые записи из кеша (старше 10 мин)
+        cutoff = now - 600
+        expired = [k for k, v in _tg_dedup_cache.items() if v < cutoff]
+        for k in expired:
+            del _tg_dedup_cache[k]
+
+        # Дедупликация по первым 200 символам (только после успешной отправки ниже)
         last_for_msg = _tg_dedup_cache.get(msg_hash, 0.0)
         if now - last_for_msg < _tg_dedup_window:
             logger.debug("Telegram: дубль сообщения пропущен (cooldown %ds)", _tg_dedup_window)
@@ -77,13 +84,6 @@ def send_telegram(message: str, parse_mode: str = "HTML", critical: bool = False
             time.sleep(wait)
 
         _tg_last_send_ts = time.monotonic()
-        _tg_dedup_cache[msg_hash] = _tg_last_send_ts
-
-        # Чистим старые записи из кеша (старше 10 мин)
-        cutoff = _tg_last_send_ts - 600
-        expired = [k for k, v in _tg_dedup_cache.items() if v < cutoff]
-        for k in expired:
-            del _tg_dedup_cache[k]
 
     try:
         url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
@@ -95,7 +95,11 @@ def send_telegram(message: str, parse_mode: str = "HTML", critical: bool = False
         ok = resp.status_code == 200
         if not ok:
             logger.warning("Telegram вернул %d: %s", resp.status_code, resp.text[:200])
-        return ok
+            return False
+        # Успех — фиксируем дедуп (при ошибке сети кеш не трогаем, повтор возможен)
+        with _tg_lock:
+            _tg_dedup_cache[msg_hash] = time.monotonic()
+        return True
     except Exception as e:
         logger.error("Ошибка отправки в Telegram: %s", e)
         return False

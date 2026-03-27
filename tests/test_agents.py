@@ -59,9 +59,10 @@ class TestGPUManager:
     """GPUResourceManager: очередь приоритетов, параллелизм, статистика."""
 
     def setup_method(self):
-        # Создаём свежий экземпляр (не синглтон)
+        # Создаём свежий экземпляр (не синглтон); без файлового lock — только in-process
         from pipeline.agents.gpu_manager import GPUResourceManager
-        self.gpu = GPUResourceManager(max_concurrent=1)
+
+        self.gpu = GPUResourceManager(max_concurrent=1, use_cross_process_lock=False)
         self.gpu.start()
 
     def teardown_method(self):
@@ -144,7 +145,7 @@ class TestGPUManager:
         result = my_task()
         assert result == 42
         # После выполнения нет активных задач
-        assert self.gpu.status().get("active_tasks", 0) == 0
+        assert len(self.gpu.status().get("active", {})) == 0
 
 
 # ===========================================================================

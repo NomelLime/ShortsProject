@@ -25,7 +25,8 @@ imagehash
 # Утилиты
 requests
 python-dotenv
-portalocker       # кросс-процессные GPU-блокировки (shared_gpu_lock.py)
+portalocker       # кросс-процессные GPU-блокировки (пакет shared_gpu_lock)
+-e ../shared_gpu_lock
 
 # Для работы с датами и т.д.
 
