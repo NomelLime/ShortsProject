@@ -72,9 +72,11 @@ def send_telegram(message: str, parse_mode: str = "HTML", critical: bool = False
         for k in expired:
             del _tg_dedup_cache[k]
 
-        # Дедупликация по первым 200 символам (только после успешной отправки ниже)
-        last_for_msg = _tg_dedup_cache.get(msg_hash, 0.0)
-        if now - last_for_msg < _tg_dedup_window:
+        # Дедупликация по первым 200 символам (только после успешной отправки ниже).
+        # Нельзя использовать .get(msg_hash, 0.0): при отсутствии ключа 0.0 даёт
+        # now - 0 < 300 в первые ~5 мин после старта процесса — ложный «дубль».
+        last_for_msg = _tg_dedup_cache.get(msg_hash)
+        if last_for_msg is not None and now - last_for_msg < _tg_dedup_window:
             logger.debug("Telegram: дубль сообщения пропущен (cooldown %ds)", _tg_dedup_window)
             return True
 
