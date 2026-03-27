@@ -12,6 +12,16 @@ https://github.com/NomelLime/ShortsProject
 
 ---
 
+### Сессия 16 (27.03.2026) — Launcher: весь crew одним скриптом
+
+| Файл | Назначение |
+|------|------------|
+| **`start_shorts_agents.py`** (корень репо) | Запуск **всех** агентов ShortsProject (crew) в фоне — эквивалент **`python run_crew.py --daemon`**. Доп. аргументы пробрасываются в `run_crew` (например `--cmd`, `--no-telegram`). |
+
+**Связка с другими репо:** в корне GitHub есть **`start_local_stack.ps1` / `.cmd`** — на одной Windows-машине поднимают Orchestrator + `start_shorts_agents` + ContentHub `run-all`; PreLend на VPS отдельно. Подробно: `RUNBOOK_4_PROJECTS.md` (п.20–21).
+
+---
+
 ### Сессия 15 (27.03.2026) — Content locale в пайплайне и интеграция с PreLend
 
 **Цель:** синхронизировать язык AI-контента с локалью трафика и обеспечить сквозную передачу `content_locale` в генерацию метаданных/роликов.
