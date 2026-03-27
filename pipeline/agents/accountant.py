@@ -58,6 +58,7 @@ class Accountant(BaseAgent):
 
     def _check_limits(self) -> None:
         self._set_status(AgentStatus.RUNNING, "проверка лимитов")
+        self.set_human_detail("Считаю дневные лимиты загрузок по аккаунтам и платформам")
         self._cycle_count += 1
         cycle = self._cycle_count
         try:

@@ -58,6 +58,7 @@ class Strategist(BaseAgent):
 
     def _analysis_cycle(self) -> None:
         self._set_status(AgentStatus.RUNNING, "анализ аналитики")
+        self.set_human_detail("Анализирую метрики, A/B, расписание и рекомендации для агентов")
         self._cycle_count += 1
         cycle = self._cycle_count
         try:

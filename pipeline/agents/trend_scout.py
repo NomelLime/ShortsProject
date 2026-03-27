@@ -62,6 +62,7 @@ class TrendScout(BaseAgent):
             return
 
         self._set_status(AgentStatus.RUNNING, "сбор трендов")
+        self.set_human_detail("Собираю трендовые ключевые слова из внешних источников")
         try:
             sources_str = str(getattr(cfg, "TREND_SCOUT_SOURCES", "google,yt,tiktok"))
             sources = [s.strip() for s in sources_str.split(",") if s.strip()]

@@ -114,6 +114,27 @@ class AgentMemory:
         with self._lock:
             return dict(self._agents)
 
+    def set_human_detail(self, agent_name: str, detail: str) -> None:
+        """
+        Человекочитаемое «что сейчас делает агент» для панели (ContentHub).
+        Хранится в kv.agent_human_detail[AGENT], персистится на диск.
+        """
+        key = "agent_human_detail"
+        with self._lock:
+            bucket = self._kv.get(key)
+            if not isinstance(bucket, dict):
+                bucket = {}
+            bucket[agent_name.upper()] = (detail or "")[:500]
+            self._kv[key] = bucket
+            self._save()
+
+    def get_human_detail(self, agent_name: str) -> str:
+        with self._lock:
+            bucket = self._kv.get("agent_human_detail")
+            if isinstance(bucket, dict):
+                return str(bucket.get(agent_name.upper(), "") or "")
+            return ""
+
     # ── Лог событий ─────────────────────────────────────────────────────────
 
     def log_event(

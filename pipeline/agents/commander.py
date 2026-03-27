@@ -194,8 +194,12 @@ class Commander(BaseAgent):
                 else:
                     cmd = None
             if cmd:
+                self.set_human_detail(f"Разбираю команду: {cmd[:80]}{'…' if len(cmd) > 80 else ''}")
                 result = self.handle_command(cmd)
                 self._send(result)
+                self.set_human_detail("Жду следующую команду в Telegram или CLI")
+            else:
+                self.set_human_detail("Жду команды оператора")
             self.sleep(1.0)
 
     def enqueue(self, command: str) -> None:

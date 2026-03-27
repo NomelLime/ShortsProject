@@ -65,6 +65,7 @@ class Narrator(BaseAgent):
         self._init_model()
         while not self.should_stop:
             self._set_status(AgentStatus.IDLE)
+            self.set_human_detail("Озвучка готова (Kokoro), жду запросы от EDITOR")
             self.sleep(60.0)
 
     # ------------------------------------------------------------------
@@ -145,6 +146,7 @@ class Narrator(BaseAgent):
         Returns:
             Path к .wav файлу или None при ошибке
         """
+        self.set_human_detail("Синтезирую речь для озвучки ролика")
         # ── 1. Попытка через Voice Cloning ───────────────────────────────
         try:
             from pipeline import config as cfg

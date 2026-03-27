@@ -132,6 +132,7 @@ class Publisher(BaseAgent):
 
     def _upload_cycle(self) -> None:
         self._set_status(AgentStatus.RUNNING, "сканирование очередей")
+        self.set_human_detail("Смотрю очереди загрузки по аккаунтам и платформам")
         try:
             from pipeline.utils import get_all_accounts, get_upload_queue
 
@@ -142,6 +143,7 @@ class Publisher(BaseAgent):
             if not accounts:
                 logger.debug("[PUBLISHER] Нет аккаунтов")
                 self._set_status(AgentStatus.IDLE)
+                self.set_human_detail("Нет аккаунтов — настройте accounts/")
                 return
 
             # Строим список задач: [(account, platform, items), ...]
@@ -149,10 +151,12 @@ class Publisher(BaseAgent):
             if not tasks:
                 logger.debug("[PUBLISHER] Все очереди пусты или заблокированы")
                 self._set_status(AgentStatus.IDLE)
+                self.set_human_detail("Очереди загрузки пусты — жду ролики")
                 return
 
             logger.info("[PUBLISHER] Задач загрузки: %d", len(tasks))
             self._set_status(AgentStatus.RUNNING, f"загрузка ({len(tasks)} задач)")
+            self.set_human_detail(f"Загружаю ролики в очереди ({len(tasks)} задач)")
 
             # Параллельная загрузка
             results = self._run_parallel(tasks)

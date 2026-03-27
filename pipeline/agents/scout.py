@@ -49,6 +49,7 @@ class Scout(BaseAgent):
 
     def _crawl_cycle(self) -> None:
         self._set_status(AgentStatus.RUNNING, "поиск URL")
+        self.set_human_detail("Ищу новые ссылки по ключевым словам и трендам")
         self._cycle_count += 1
         cycle = self._cycle_count
         try:

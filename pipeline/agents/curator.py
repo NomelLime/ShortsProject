@@ -61,6 +61,7 @@ class Curator(BaseAgent):
 
     def _scan_cycle(self) -> None:
         self._set_status(AgentStatus.RUNNING, "сканирование")
+        self.set_human_detail("Отбираю видео: длительность, дедуп, целостность файлов")
         try:
             from pipeline import config
             from pipeline.utils import probe_video, is_duplicate
@@ -68,6 +69,7 @@ class Curator(BaseAgent):
             preparing_dir = Path(config.PREPARING_DIR)
             if not preparing_dir.exists():
                 self._set_status(AgentStatus.IDLE)
+                self.set_human_detail("Папка preparing пуста или ещё не создана — жду видео")
                 return
 
             video_files = [
@@ -78,6 +80,7 @@ class Curator(BaseAgent):
 
             if not video_files:
                 self._set_status(AgentStatus.IDLE)
+                self.set_human_detail("Нет новых файлов для отбора — жду загрузки")
                 return
 
             accepted_this_cycle = 0

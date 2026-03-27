@@ -69,6 +69,7 @@ class Sentinel(BaseAgent):
 
     def _monitor_cycle(self) -> None:
         self._set_status(AgentStatus.RUNNING, "мониторинг")
+        self.set_human_detail("Проверяю CPU, RAM, диск, GPU и состояние агентов")
         metrics = {}
         alerts  = []
 

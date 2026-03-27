@@ -103,6 +103,7 @@ class Guardian(BaseAgent):
         self._session_cycle()
 
         while not self.should_stop:
+            self.set_human_detail("Фоновый контроль: прокси, сессии, отпечатки, прогрев")
             now = time.monotonic()
 
             if now - self._last_proxy_check >= _PROXY_CHECK_INTERVAL:
@@ -134,6 +135,7 @@ class Guardian(BaseAgent):
     def _proxy_cycle(self) -> None:
         self._last_proxy_check = time.monotonic()
         self._set_status(AgentStatus.RUNNING, "проверка прокси")
+        self.set_human_detail("Проверяю здоровье прокси у аккаунтов")
         bad_proxies = []
 
         try:
@@ -201,6 +203,7 @@ class Guardian(BaseAgent):
         Предупреждает если timezone fingerprint не совпадает с GEO прокси —
         это один из главных сигналов антидетекта TikTok/Instagram.
         """
+        self.set_human_detail("Сверяю GEO и отпечаток браузера с прокси")
         try:
             from pipeline.utils import get_all_accounts
             from pipeline.fingerprint.geo import get_geo_params
@@ -255,6 +258,7 @@ class Guardian(BaseAgent):
         """
         self._last_profile_check = time.monotonic()
         self._set_status(AgentStatus.RUNNING, "проверка ссылок в профилях")
+        self.set_human_detail("Проверяю PreLend-ссылки в bio профилей")
         missing_links: list = []
 
         try:
@@ -313,6 +317,7 @@ class Guardian(BaseAgent):
     def _session_cycle(self) -> None:
         self._last_session_check = time.monotonic()
         self._set_status(AgentStatus.RUNNING, "проверка сессий")
+        self.set_human_detail("Проверяю актуальность сессий браузеров")
         stale = []
 
         try:

@@ -150,6 +150,7 @@ class Editor(BaseAgent):
 
     def _process_cycle(self) -> None:
         self._set_status(AgentStatus.RUNNING, "проверка очереди")
+        self.set_human_detail("Проверяю очередь: монтаж, эффекты, метаданные")
         # Сбрасываем кэш фонов — он живёт только один цикл
         self._bg_cache.clear()
         try:
@@ -158,6 +159,7 @@ class Editor(BaseAgent):
             preparing_dir = Path(config.PREPARING_DIR)
             if not preparing_dir.exists():
                 self._set_status(AgentStatus.IDLE)
+                self.set_human_detail("Очередь монтажа пуста — жду ролики")
                 return
 
             # Ищем необработанные видео файлы
@@ -169,6 +171,7 @@ class Editor(BaseAgent):
 
             if not video_files:
                 self._set_status(AgentStatus.IDLE)
+                self.set_human_detail("Нет роликов в preparing — жду контент от CURATOR")
                 return
 
             logger.info("[EDITOR] Найдено %d видео для обработки", len(video_files))

@@ -64,6 +64,7 @@ class Visionary(BaseAgent):
         self._check_ollama()
         while not self.should_stop:
             self._set_status(AgentStatus.IDLE)
+            self.set_human_detail("Готов сгенерировать заголовки и описания по запросу EDITOR")
             self.sleep(60.0)
 
     # ------------------------------------------------------------------
@@ -98,6 +99,7 @@ class Visionary(BaseAgent):
             logger.error("[VISIONARY] Файл не найден: %s", video_path)
             return []
 
+        self.set_human_detail(f"Генерирую метаданные и хуки для «{video_path.name}»")
         return self._generate_metadata_routed(
             video_path, num_variants, ab_variant, account_cfg, target_platform,
             acquire_gpu=True,
@@ -117,6 +119,7 @@ class Visionary(BaseAgent):
             logger.error("[VISIONARY] Файл не найден: %s", video_path)
             return []
 
+        self.set_human_detail(f"Генерирую метаданные для «{video_path.name}» (внутри EDITOR)")
         return self._generate_metadata_routed(
             video_path, num_variants, ab_variant, account_cfg, target_platform,
             acquire_gpu=False,

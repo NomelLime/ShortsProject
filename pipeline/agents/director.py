@@ -169,6 +169,7 @@ class Director(BaseAgent):
                 break
 
     def _watchdog(self) -> None:
+        self.set_human_detail("Слежу за агентами и перезапускаю при ошибках")
         # 0. Сбрасываем счётчики перезапуска раз в час (чтобы временные сбои не блокировали навсегда)
         if time.monotonic() - self._restart_count_reset_ts >= self._RESTART_COUNT_RESET_SEC:
             if self._restart_count:
