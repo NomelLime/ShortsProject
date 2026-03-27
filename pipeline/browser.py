@@ -22,7 +22,7 @@ logger = logging.getLogger(__name__)
 _geo_cache: dict = {}
 
 
-def _get_proxy_country(proxy: dict, timeout: int = 8) -> Optional[str]:
+def get_proxy_country(proxy: dict, timeout: int = 8) -> Optional[str]:
     """
     Определяет страну прокси через ip-api.com.
     Возвращает двухбуквенный countryCode (напр. "US") или None при ошибке.
@@ -137,7 +137,7 @@ def resolve_working_proxy(account_cfg: dict) -> dict | None:
 
         # GEO-проверка: если для аккаунта задана страна — прокси должен совпадать
         if required_country:
-            proxy_country = _get_proxy_country(proxy)
+            proxy_country = get_proxy_country(proxy)
             if proxy_country and proxy_country != required_country:
                 logger.warning(
                     "[proxy] GEO-несоответствие: прокси %s → %s, аккаунт требует %s — пропускаем",

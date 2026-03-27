@@ -75,6 +75,8 @@ class Visionary(BaseAgent):
         video_path: Path,
         num_variants: int = 2,
         ab_variant: Optional[str] = None,
+        account_cfg: Optional[Dict] = None,
+        target_platform: str = "youtube",
     ) -> List[Dict]:
         """
         Генерирует метаданные для видео через Ollama VL (модель видит реальные кадры).
@@ -96,26 +98,64 @@ class Visionary(BaseAgent):
             logger.error("[VISIONARY] Файл не найден: %s", video_path)
             return []
 
-        # Читаем рекомендации из памяти
+        return self._generate_metadata_routed(
+            video_path, num_variants, ab_variant, account_cfg, target_platform,
+            acquire_gpu=True,
+        )
+
+    def generate_metadata_no_acquire(
+        self,
+        video_path: Path,
+        num_variants: int = 2,
+        ab_variant: Optional[str] = None,
+        account_cfg: Optional[Dict] = None,
+        target_platform: str = "youtube",
+    ) -> List[Dict]:
+        """Как generate_metadata, но без захвата GPU (внутри уже удержанного EDITOR lock)."""
+        video_path = Path(video_path)
+        if not video_path.exists():
+            logger.error("[VISIONARY] Файл не найден: %s", video_path)
+            return []
+
+        return self._generate_metadata_routed(
+            video_path, num_variants, ab_variant, account_cfg, target_platform,
+            acquire_gpu=False,
+        )
+
+    def _generate_metadata_routed(
+        self,
+        video_path: Path,
+        num_variants: int,
+        ab_variant: Optional[str],
+        account_cfg: Optional[Dict],
+        target_platform: str,
+        acquire_gpu: bool,
+    ) -> List[Dict]:
         strategist_rec = self.memory.read_recommendation("strategist", "visionary")
         scout_rec      = self.memory.read_recommendation("scout",      "visionary")
 
-        # Детектируем конфликт и выбираем режим генерации
         conflict = self._detect_conflict(strategist_rec, scout_rec)
 
         if conflict and ab_variant is None:
             logger.info(
                 "[VISIONARY] Конфликт STRATEGIST vs SCOUT — активирован A/B режим"
             )
-            return self._generate_ab(video_path, num_variants, strategist_rec, scout_rec)
+            return self._generate_ab(
+                video_path, num_variants, strategist_rec, scout_rec,
+                account_cfg=account_cfg, target_platform=target_platform,
+                acquire_gpu=acquire_gpu,
+            )
 
-        # Обычный режим — единый контекст (STRATEGIST приоритетен)
         context_hashtags = self._extract_context_hashtags(
             strategist_rec if ab_variant != "scout" else scout_rec,
             scout_rec      if ab_variant != "scout" else None,
         )
         tag = ab_variant or ("strategist" if strategist_rec else None)
-        return self._run_generation(video_path, num_variants, context_hashtags, tag)
+        return self._run_generation(
+            video_path, num_variants, context_hashtags, tag,
+            account_cfg=account_cfg, target_platform=target_platform,
+            acquire_gpu=acquire_gpu,
+        )
 
     # ------------------------------------------------------------------
     # A/B генерация при конфликте рекомендаций
@@ -127,6 +167,9 @@ class Visionary(BaseAgent):
         num_variants: int,
         strategist_rec: Optional[Dict],
         scout_rec: Optional[Dict],
+        account_cfg: Optional[Dict] = None,
+        target_platform: str = "youtube",
+        acquire_gpu: bool = True,
     ) -> List[Dict]:
         """Генерирует две группы вариантов — по STRATEGIST и по SCOUT."""
         # Делим варианты: минимум 1 на каждую сторону
@@ -136,8 +179,16 @@ class Visionary(BaseAgent):
         strategist_tags = self._extract_context_hashtags(strategist_rec, None)
         scout_tags      = self._extract_context_hashtags(scout_rec, None)
 
-        variants_a = self._run_generation(video_path, n_strategist, strategist_tags, "strategist")
-        variants_b = self._run_generation(video_path, n_scout,      scout_tags,      "scout")
+        variants_a = self._run_generation(
+            video_path, n_strategist, strategist_tags, "strategist",
+            account_cfg=account_cfg, target_platform=target_platform,
+            acquire_gpu=acquire_gpu,
+        )
+        variants_b = self._run_generation(
+            video_path, n_scout, scout_tags, "scout",
+            account_cfg=account_cfg, target_platform=target_platform,
+            acquire_gpu=acquire_gpu,
+        )
 
         all_variants = variants_a + variants_b
         logger.info(
@@ -155,7 +206,6 @@ class Visionary(BaseAgent):
     # Детектор конфликта рекомендаций
     # ------------------------------------------------------------------
 
-    @staticmethod
     @staticmethod
     def _detect_conflict(
         strategist_rec: Optional[Dict],
@@ -264,18 +314,30 @@ class Visionary(BaseAgent):
         num_variants: int,
         context_hashtags: List[str],
         ab_variant: Optional[str],
+        account_cfg: Optional[Dict] = None,
+        target_platform: str = "youtube",
+        acquire_gpu: bool = True,
     ) -> List[Dict]:
-        """Запускает generate_video_metadata с GPU lock и тегирует результат."""
+        """Запускает generate_video_metadata; опционально с GPU lock."""
         self._set_status(AgentStatus.WAITING, "ожидание GPU")
         try:
-            with self._gpu.acquire("VISIONARY", GPUPriority.LLM):
+            from pipeline.ai import generate_video_metadata
+
+            def _call() -> List[Dict]:
                 self._set_status(AgentStatus.RUNNING, f"генерация meta для {video_path.name}")
-                from pipeline.ai import generate_video_metadata
-                variants = generate_video_metadata(
+                return generate_video_metadata(
                     video_path,
                     trending_hashtags=context_hashtags or None,
                     num_variants=num_variants,
+                    account_cfg=account_cfg,
+                    target_platform=target_platform,
                 )
+
+            if acquire_gpu:
+                with self._gpu.acquire("VISIONARY", GPUPriority.LLM):
+                    variants = _call()
+            else:
+                variants = _call()
 
             # Тегируем каждый вариант
             if ab_variant:

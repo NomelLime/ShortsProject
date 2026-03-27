@@ -29,6 +29,19 @@ logger = logging.getLogger(__name__)
 
 _SCAN_INTERVAL = 120  # секунды между проверками очереди
 
+
+def _target_platform_from_account(acc_cfg: Optional[dict]) -> str:
+    """Первая платформа из config аккаунта — для platform_meta_hint в AI."""
+    if not acc_cfg:
+        return "youtube"
+    plats = acc_cfg.get("platforms", ["youtube"])
+    if isinstance(plats, str):
+        plats = [plats]
+    p = (plats[0] if plats else "youtube").lower()
+    if p in ("youtube", "tiktok", "instagram"):
+        return p
+    return "youtube"
+
 # Максимальная длина строки из внешних источников (заголовков, рекомендаций) в промпте
 _MAX_PROMPT_FIELD_LEN = 300
 
@@ -383,11 +396,16 @@ class Editor(BaseAgent):
         """Генерирует метаданные через Visionary если он подключён."""
         from pipeline import config
 
+        acc_cfg = self._get_account_config_for_video(video_path)
+        tp = _target_platform_from_account(acc_cfg)
+
         if self._visionary is not None:
             try:
                 variants = self._visionary.generate_metadata(
                     video_path,
                     num_variants=getattr(config, "AI_NUM_VARIANTS", 2),
+                    account_cfg=acc_cfg,
+                    target_platform=tp,
                 )
                 if variants:
                     logger.info("[EDITOR] Метаданные от VISIONARY: %d вариант(ов)", len(variants))
@@ -402,6 +420,8 @@ class Editor(BaseAgent):
                 variants = generate_video_metadata(
                     video_path,
                     num_variants=getattr(config, "AI_NUM_VARIANTS", 2),
+                    account_cfg=acc_cfg,
+                    target_platform=tp,
                 )
             logger.info("[EDITOR] Метаданные (direct): %d вариант(ов)", len(variants))
             return variants
@@ -419,11 +439,16 @@ class Editor(BaseAgent):
         Использовать только внутри `with self._gpu.acquire(...)` блока.
         """
         from pipeline import config
+        acc_cfg = self._get_account_config_for_video(video_path)
+        tp = _target_platform_from_account(acc_cfg)
+
         if self._visionary is not None:
             try:
                 variants = self._visionary.generate_metadata_no_acquire(
                     video_path,
                     num_variants=getattr(config, "AI_NUM_VARIANTS", 2),
+                    account_cfg=acc_cfg,
+                    target_platform=tp,
                 )
                 if variants:
                     logger.info("[EDITOR] Метаданные от VISIONARY (no-acquire): %d вариант(ов)", len(variants))
@@ -436,6 +461,8 @@ class Editor(BaseAgent):
             variants = generate_video_metadata(
                 video_path,
                 num_variants=getattr(config, "AI_NUM_VARIANTS", 2),
+                account_cfg=acc_cfg,
+                target_platform=tp,
             )
             logger.info("[EDITOR] Метаданные (direct, no-acquire): %d вариант(ов)", len(variants))
             return variants
@@ -889,6 +916,39 @@ class Editor(BaseAgent):
         except Exception as exc:
             logger.debug("[EDITOR] _get_account_visual_filter ошибка: %s", exc)
             return ""
+
+    def _get_account_config_for_video(self, video_path: Path) -> Optional[dict]:
+        """
+        Загружает config.json аккаунта, которому принадлежит видео (путь под SP_ACCOUNTS_DIR),
+        иначе — первый доступный аккаунт с config.json.
+        """
+        from pipeline import config as _cfg
+        import json as _json
+
+        try:
+            accounts_root = _cfg.SP_ACCOUNTS_DIR
+            if not accounts_root.exists():
+                return None
+            vp = str(video_path.resolve())
+            first_cfg: Optional[dict] = None
+            for acc_dir in sorted(accounts_root.iterdir()):
+                if not acc_dir.is_dir():
+                    continue
+                cfg_path = acc_dir / "config.json"
+                if not cfg_path.exists():
+                    continue
+                try:
+                    acc_cfg = _json.loads(cfg_path.read_text(encoding="utf-8"))
+                except Exception:
+                    continue
+                if first_cfg is None:
+                    first_cfg = acc_cfg
+                if vp.startswith(str(acc_dir.resolve())):
+                    return acc_cfg
+            return first_cfg
+        except Exception as exc:
+            logger.debug("[EDITOR] _get_account_config_for_video: %s", exc)
+            return None
 
     def _pick_banner(self) -> Optional[Path]:
         """Случайный баннер из assets/banners/."""
