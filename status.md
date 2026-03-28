@@ -12,6 +12,16 @@ https://github.com/NomelLime/ShortsProject
 
 ---
 
+### Сессия 19 (28.03.2026) — AgentMemory: время статуса для ContentHub
+
+| Файл | Изменение |
+|------|-----------|
+| **`pipeline/agent_memory.py`** | При **`set_agent_status`** обновляется **`kv.agent_status_updated_at[AGENT]`** (ISO) и вызывается **`_save()`**. ContentHub помечает устаревшие **RUNNING/WAITING** без свежих обновлений (см. `ContentHub/backend/services/agent_controller.py`, env **`SP_AGENT_STATUS_STALE_MINUTES`**). |
+
+**Тесты:** `pytest tests/test_agents.py::TestAgentMemory` — ✅
+
+---
+
 ### Сессия 18 (28.03.2026) — Пакет `shared_gpu_lock`: GPU менеджер + кросс-процессный file-lock
 
 **Цель:** одна реализация `GPUResourceManager` и файлового GPU-lock для локальных репозиториев под `GitHub` (ShortsProject, Orchestrator и др.); PreLend на VPS не затрагивается.
