@@ -98,6 +98,14 @@ def run_processing(dry_run: bool = False) -> List[Path]:
         return []
 
     logger.info("Найдено исходных видео: %d", len(source_files))
+    if len(source_files) > 1:
+        try:
+            from pipeline.vl_warm import warm_vl_model
+
+            warm_vl_model()
+        except Exception as exc:
+            logger.debug("VL warm перед батчем: %s", exc)
+
     all_ready_shorts: List[Path] = []
 
     for video_path in source_files:

@@ -501,6 +501,13 @@ def run_activity_vl(
     """
     account_cfg = account["config"]
 
+    try:
+        from pipeline.vl_warm import warm_vl_model
+
+        warm_vl_model()
+    except Exception as exc:
+        logger.debug("[VL-Activity] warm_vl_model: %s", exc)
+
     urls = PLATFORM_URLS.get(platform, {})
     feed_url = (
         urls.get("shorts")

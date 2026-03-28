@@ -10,6 +10,8 @@ pipeline/uploader.py – Загрузка видео на YouTube, TikTok, Insta
 
 import logging
 import random
+
+import requests
 import shutil
 import subprocess
 import time
@@ -605,6 +607,27 @@ def upload_all(dry_run: bool = False) -> List[Dict]:
                             meta=meta,
                             ab_variant=meta.get("ab_variant"),
                         )
+                        if config.PRELEND_AUTO_LINK and video_url:
+                            try:
+                                headers = {"Content-Type": "application/json"}
+                                if config.PRELEND_API_KEY:
+                                    headers["X-API-Key"] = config.PRELEND_API_KEY
+                                resp = requests.post(
+                                    f"{config.PRELEND_API_URL}/register_video",
+                                    headers=headers,
+                                    json={
+                                        "video_stem": video_path.stem,
+                                        "platform": platform,
+                                        "video_url": video_url,
+                                        "account": acc_name,
+                                    },
+                                    timeout=5,
+                                )
+                                if resp.ok:
+                                    tracking = resp.json().get("tracking_url", "")
+                                    logger.info("[Uploader] PreLend tracking URL: %s", tracking)
+                            except Exception as e:
+                                logger.warning("[Uploader] PreLend register_video failed: %s", e)
                         results.append({
                             "status": "uploaded", "platform": platform,
                             "account_id": acc_name, "source_path": str(video_path),

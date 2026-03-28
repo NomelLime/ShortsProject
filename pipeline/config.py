@@ -9,9 +9,10 @@ from pathlib import Path
 from typing import Any
 from dotenv import load_dotenv
 
-load_dotenv()
-
-BASE_DIR = Path(__file__).parent.parent
+BASE_DIR = Path(__file__).resolve().parent.parent
+_github_root = BASE_DIR.parent
+load_dotenv(_github_root / ".secrets.env", override=False)
+load_dotenv(BASE_DIR / ".env", override=True)
 
 # ----------------------------------------------------------------------
 # Пути к папкам
@@ -208,6 +209,11 @@ SCOUT_VL_THUMBNAIL_FILTER = os.getenv("SCOUT_VL_FILTER",    "1") == "1"
 SCOUT_VL_MIN_SCORE        = int(os.getenv("SCOUT_VL_MIN_SCORE",  "7"))   # 1-10
 SCOUT_VL_MAX_PER_CYCLE    = int(os.getenv("SCOUT_VL_MAX_CYCLE",  "20"))  # макс. проверок за цикл
 VL_CACHE_FILE             = BASE_DIR / "data" / "vl_cache.json"
+
+# PreLend Internal API — авто-линк трекинга после upload
+PRELEND_AUTO_LINK = os.getenv("PRELEND_AUTO_LINK", "false").lower() == "true"
+PRELEND_API_URL = os.getenv("PRELEND_API_URL", "http://localhost:9090").rstrip("/")
+PRELEND_API_KEY = os.getenv("PRELEND_API_KEY", "")
 
 # ----------------------------------------------------------------------
 # Дедупликация видео (perceptual hash + Hamming distance)
