@@ -75,8 +75,11 @@ def is_stage_done(stage: str) -> bool:
 
 
 def get_next_stage() -> str | None:
+    # [FIX] Один вызов load_state() вместо до 6 (по одному на каждый этап)
+    state = load_state()
+    stages = state.get("stages", {})
     for s in STAGE_ORDER:
-        if not is_stage_done(s):
+        if stages.get(s, {}).get("status") != "done":
             return s
     return None
 

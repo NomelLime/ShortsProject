@@ -1,0 +1,33 @@
+diff --git a/pipeline/pipeline_state.py b/pipeline/pipeline_state.py
+index e68a7ab..ec3cb91 100644
+--- a/pipeline/pipeline_state.py
++++ b/pipeline/pipeline_state.py
+@@ -75,8 +75,11 @@ def is_stage_done(stage: str) -> bool:
+ 
+ 
+ def get_next_stage() -> str | None:
++    # [FIX] Один вызов load_state() вместо до 6 (по одному на каждый этап)
++    state = load_state()
++    stages = state.get("stages", {})
+     for s in STAGE_ORDER:
+-        if not is_stage_done(s):
++        if stages.get(s, {}).get("status") != "done":
+             return s
+     return None
+ 
+diff --git a/status.md b/status.md
+index 71db1ce..13e95b9 100644
+--- a/status.md
++++ b/status.md
+@@ -1076,3 +1076,11 @@ curl -s -o /dev/null -w "%{http_code}" https://DOMAIN/t/test_acc  # ожидае
+ **Статус тестов (после изменений):** `pytest tests/test_pipeline.py tests/test_slicer_cut_utils.py tests/test_animatediff_bg.py` — зелёные; полный `pytest tests` — уточнять локально (зависимости).
+ 
+ ---
++
++### Сессия 23 (29.03.2026) — Code Review: Pipeline State Fix
++
++| Область | Изменение |
++|---------|-----------|
++| **`pipeline/pipeline_state.py`** | **[MEDIUM]** `get_next_stage()`: `load_state()` вызывается 1 раз вместо до 6 (по одному на каждый этап в цикле). Результат переиспользуется через локальную переменную `stages`. |
++
++**Контекст:** Часть полного code review экосистемы.

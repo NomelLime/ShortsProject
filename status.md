@@ -1076,3 +1076,11 @@ curl -s -o /dev/null -w "%{http_code}" https://DOMAIN/t/test_acc  # ожидае
 **Статус тестов (после изменений):** `pytest tests/test_pipeline.py tests/test_slicer_cut_utils.py tests/test_animatediff_bg.py` — зелёные; полный `pytest tests` — уточнять локально (зависимости).
 
 ---
+
+### Сессия 23 (29.03.2026) — Code Review: Pipeline State Fix
+
+| Область | Изменение |
+|---------|-----------|
+| **`pipeline/pipeline_state.py`** | **[MEDIUM]** `get_next_stage()`: `load_state()` вызывается 1 раз вместо до 6 (по одному на каждый этап в цикле). Результат переиспользуется через локальную переменную `stages`. |
+
+**Контекст:** Часть полного code review экосистемы.
