@@ -64,6 +64,13 @@ MOBILEPROXY_CHANGE_GEO = os.getenv("MOBILEPROXY_CHANGE_GEO", "1").strip().lower(
     "off",
 )
 MOBILEPROXY_POST_GEO_PAUSE_SEC = float(os.getenv("MOBILEPROXY_POST_GEO_PAUSE_SEC", "8.0"))
+# Проверка exit-IP в IPGuardian через API (proxy_ip / change_equipment с check_spam=true)
+MOBILEPROXY_CHECK_SPAM = os.getenv("MOBILEPROXY_CHECK_SPAM", "1").strip().lower() not in (
+    "0",
+    "false",
+    "no",
+    "off",
+)
 # Ручной маппинг {"US":1,"DE":2} если get_id_country недоступен
 MOBILEPROXY_ISO_TO_ID_JSON = os.getenv("MOBILEPROXY_ISO_TO_ID_JSON", "").strip()
 # Порядок обхода аккаунтов: сначала батчем по country (меньше смен гео)

@@ -231,11 +231,33 @@ def _ensure_under_lock(
         ip = utils.fetch_exit_ip_via_proxy(active_proxy)
         return ip, _country_matches(account_cfg, ip)
 
+    def maybe_rotate_if_spam() -> bool:
+        """IPGuardian (proxy_ip&check_spam=true): при спаме — ротация и True."""
+        nonlocal total_rotations
+        if not getattr(config, "MOBILEPROXY_CHECK_SPAM", True):
+            return False
+        if not config.MOBILEPROXY_API_KEY or not config.MOBILEPROXY_PROXY_ID:
+            return False
+        from pipeline.mobileproxy_api import fetch_proxy_ip_with_spam_check, spam_check_requires_rotation
+
+        data = fetch_proxy_ip_with_spam_check()
+        if not spam_check_requires_rotation(data):
+            return False
+        logger.warning(
+            "[proxy_ip_registry] %s: IP в спам-базе IPGuardian — ротация",
+            account_id,
+        )
+        _do_rotate(change_url, active_proxy)
+        total_rotations += 1
+        return True
+
     while total_rotations < max_total:
         cur_ip, country_ok = snapshot()
 
         # 1) Запомненный exit и гео совпадают — готово
         if remembered and cur_ip == remembered and country_ok:
+            if maybe_rotate_if_spam():
+                continue
             logger.info(
                 "[proxy_ip_registry] %s: активен запомненный IP %s",
                 account_id,
@@ -246,6 +268,8 @@ def _ensure_under_lock(
         # 2) Первая привязка: нет истории — фиксируем любой чистый при корректной стране
         if remembered is None and cur_ip and country_ok:
             if _is_ip_clean_for_account(cur_ip, account_id, reg):
+                if maybe_rotate_if_spam():
+                    continue
                 accounts[account_id] = {"ip": cur_ip}
                 _save_registry(reg)
                 logger.info(
@@ -261,6 +285,8 @@ def _ensure_under_lock(
                     account_id,
                     cur_ip,
                 )
+                if maybe_rotate_if_spam():
+                    continue
                 accounts[account_id] = {"ip": cur_ip}
                 _save_registry(reg)
                 return
@@ -284,6 +310,8 @@ def _ensure_under_lock(
         # 5) Страна ок — ищем чистый IP (или общий после многих попыток)
         if cur_ip and country_ok:
             if _is_ip_clean_for_account(cur_ip, account_id, reg):
+                if maybe_rotate_if_spam():
+                    continue
                 accounts[account_id] = {"ip": cur_ip}
                 _save_registry(reg)
                 logger.info("[proxy_ip_registry] %s: закреплён чистый IP %s", account_id, cur_ip)
@@ -295,6 +323,8 @@ def _ensure_under_lock(
                     account_id,
                     cur_ip,
                 )
+                if maybe_rotate_if_spam():
+                    continue
                 accounts[account_id] = {"ip": cur_ip}
                 _save_registry(reg)
                 return

@@ -47,6 +47,22 @@ def test_ensure_equipment_calls_change_when_diff(monkeypatch):
         chg.assert_called_once_with(5)
 
 
+def test_spam_check_requires_rotation():
+    from pipeline.mobileproxy_api import spam_check_requires_rotation
+
+    assert spam_check_requires_rotation(None) is False
+    assert spam_check_requires_rotation({"status": "fail"}) is False
+    assert spam_check_requires_rotation(
+        {"status": "ok", "ipguardian.net": {"spam": True}}
+    ) is True
+    assert spam_check_requires_rotation(
+        {"status": "ok", "ipguardian.net": {"listed": "1"}}
+    ) is True
+    assert spam_check_requires_rotation(
+        {"status": "ok", "ipguardian.net": {}}
+    ) is False
+
+
 def test_sort_accounts_by_country():
     from pipeline.utils import sort_accounts_by_country
 

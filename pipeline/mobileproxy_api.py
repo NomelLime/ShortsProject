@@ -3,6 +3,8 @@
 
 Используется для выравнивания страны линии (id_country) под config.json аккаунта
 перед ротацией exit-IP. Лимиты API: см. MOBILEPROXY_API_MIN_INTERVAL_SEC.
+
+Проверка спам-баз (IPGuardian): параметр check_spam=true у proxy_ip и change_equipment.
 """
 
 from __future__ import annotations
@@ -174,6 +176,60 @@ def mobileproxy_geo_enabled(account_cfg: Optional[dict] = None) -> bool:
     return True
 
 
+def _check_spam_param() -> Dict[str, str]:
+    """Параметры для API, если включена проверка IPGuardian."""
+    if not getattr(config, "MOBILEPROXY_CHECK_SPAM", True):
+        return {}
+    return {"check_spam": "true"}
+
+
+def fetch_proxy_ip_with_spam_check(proxy_id: Optional[int] = None) -> Optional[Dict[str, Any]]:
+    """
+    command=proxy_ip с check_spam=true — текущий exit-IP и данные IPGuardian.net.
+    """
+    if not config.MOBILEPROXY_CHECK_SPAM:
+        return None
+    if not config.MOBILEPROXY_API_KEY or not config.MOBILEPROXY_PROXY_ID:
+        return None
+    pid = proxy_id
+    if pid is None:
+        try:
+            pid = int(config.MOBILEPROXY_PROXY_ID)
+        except ValueError:
+            return None
+    if not pid:
+        return None
+    params: Dict[str, Any] = {"proxy_id": str(pid), "check_spam": "true"}
+    return _api_get("proxy_ip", **params)
+
+
+def spam_check_requires_rotation(data: Optional[Dict[str, Any]]) -> bool:
+    """
+    True — IP отмечен в спам-базе, нужна смена IP.
+    При ошибке API или отсутствии блока ipguardian — False (не блокируем пайплайн).
+    """
+    if not data or str(data.get("status", "")).lower() != "ok":
+        return False
+    ig = data.get("ipguardian.net") or data.get("ipguardian")
+    if ig is None:
+        return False
+    if isinstance(ig, dict):
+        for k in ("spam", "is_spam", "listed", "blacklisted", "in_blacklist", "is_blacklisted"):
+            v = ig.get(k)
+            if v in (True, 1, "1", "yes", "true", "True"):
+                return True
+        st = str(ig.get("status", "") or "").lower()
+        if st in ("spam", "listed", "bad", "blacklist", "blacklisted"):
+            return True
+        score = ig.get("spam_score") or ig.get("risk") or ig.get("score")
+        try:
+            if score is not None and float(score) >= 80.0:
+                return True
+        except (TypeError, ValueError):
+            pass
+    return False
+
+
 def change_equipment_to_country(id_country: int, proxy_id: Optional[int] = None) -> bool:
     """change_equipment: переключение на другую страну (id_country)."""
     pid = proxy_id
@@ -184,12 +240,13 @@ def change_equipment_to_country(id_country: int, proxy_id: Optional[int] = None)
             return False
     if not pid:
         return False
-    data = _api_get(
-        "change_equipment",
-        proxy_id=str(pid),
-        id_country=str(id_country),
-        check_after_change="true",
-    )
+    params: Dict[str, Any] = {
+        "proxy_id": str(pid),
+        "id_country": str(id_country),
+        "check_after_change": "true",
+    }
+    params.update(_check_spam_param())
+    data = _api_get("change_equipment", **params)
     return bool(data)
 
 
