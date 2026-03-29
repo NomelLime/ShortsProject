@@ -15,11 +15,22 @@ from playwright_stealth import Stealth
 from pipeline import config as cfg
 from pipeline import utils
 from pipeline.fingerprint.generator import ensure_fingerprint
+from pipeline.proxy_ip_registry import (
+    account_id_from,
+    ensure_exit_ip_for_account,
+    proxy_ip_registry_enabled,
+)
 
 logger = logging.getLogger(__name__)
 
 # Кэш GEO-проверок: "host:port" → "US" — не ходим в ip-api.com повторно
 _geo_cache: dict = {}
+
+
+def invalidate_proxy_geo_cache(proxy: dict) -> None:
+    """Сбрасывает кэш GEO после смены exit-IP на том же host:port."""
+    key = f"{proxy.get('host')}:{proxy.get('port')}"
+    _geo_cache.pop(key, None)
 
 
 def get_proxy_country(proxy: dict, timeout: int = 8) -> Optional[str]:
@@ -292,6 +303,12 @@ def launch_browser(
         raise RuntimeError(
             "Все прокси аккаунта недоступны (основной + резервные). "
             "Запуск браузера отменён."
+        )
+    if active_proxy and proxy_ip_registry_enabled(account_cfg):
+        ensure_exit_ip_for_account(
+            account_id_from(profile_dir, account_cfg),
+            account_cfg,
+            active_proxy,
         )
     proxy_config = _build_proxy_config(active_proxy) if active_proxy else None
 

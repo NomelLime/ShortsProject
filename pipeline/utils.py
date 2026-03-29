@@ -276,6 +276,62 @@ def check_proxy_health(proxy_cfg: dict, timeout: int = 10) -> bool:
         return False
 
 
+def fetch_exit_ip_via_proxy(proxy_cfg: dict, timeout: float = 15.0) -> Optional[str]:
+    """
+    Внешний IPv4/IPv6 через HTTP-прокси (httpbin.org/ip).
+    Используется реестром exit-IP без импорта browser.py.
+    """
+    import json as _json
+    import urllib.request
+
+    if not proxy_cfg or not proxy_cfg.get("host"):
+        return None
+    host = proxy_cfg["host"]
+    port = proxy_cfg.get("port", 8080)
+    username = proxy_cfg.get("username", "")
+    password = proxy_cfg.get("password", "")
+    proxy_url = f"http://{host}:{port}"
+    proxy_handler = urllib.request.ProxyHandler({"http": proxy_url, "https": proxy_url})
+    if username:
+        password_mgr = urllib.request.HTTPPasswordMgrWithDefaultRealm()
+        password_mgr.add_password(None, proxy_url, username, password)
+        auth_handler = urllib.request.ProxyBasicAuthHandler(password_mgr)
+        opener = urllib.request.build_opener(proxy_handler, auth_handler)
+    else:
+        opener = urllib.request.build_opener(proxy_handler)
+    try:
+        req = urllib.request.Request(
+            "http://httpbin.org/ip",
+            headers={"User-Agent": "Mozilla/5.0"},
+        )
+        with opener.open(req, timeout=timeout) as resp:
+            data = _json.loads(resp.read().decode())
+            origin = data.get("origin", "") or ""
+            return origin.split(",")[0].strip() or None
+    except Exception as exc:
+        get_logger("utils").debug("fetch_exit_ip_via_proxy: %s", exc)
+        return None
+
+
+def fetch_country_for_ip(external_ip: str, timeout: float = 8.0) -> Optional[str]:
+    """countryCode по IP (ip-api.com), без прокси."""
+    import json as _json
+    import urllib.request
+
+    if not external_ip:
+        return None
+    try:
+        geo_req = urllib.request.Request(
+            f"http://ip-api.com/json/{external_ip}?fields=countryCode",
+            headers={"User-Agent": "Mozilla/5.0"},
+        )
+        with urllib.request.urlopen(geo_req, timeout=timeout) as resp:
+            geo_data = _json.loads(resp.read().decode())
+            return (geo_data.get("countryCode") or "").upper() or None
+    except Exception:
+        return None
+
+
 def unique_lines(path: Path) -> List[str]:
     """Читает файл и возвращает уникальные непустые строки (порядок сохраняется)."""
     if not path.exists():
@@ -304,6 +360,18 @@ def merge_and_save_urls(new_urls: List[str], urls_file: Path) -> int:
 # Работа с аккаунтами и очередями загрузки
 # ----------------------------------------------------------------------
 
+def sort_accounts_by_country(accounts: List[Dict]) -> List[Dict]:
+    """
+    Стабильная сортировка: ISO country (config), затем имя папки.
+    Аккаунты без country — в конце (меньше переключений change_equipment при общем прокси).
+    """
+    def key(acc: Dict) -> tuple:
+        c = (acc.get("config") or {}).get("country") or ""
+        cu = str(c).upper().strip()
+        return (cu if cu else "\uffff", acc.get("name") or "")
+    return sorted(accounts, key=key)
+
+
 def get_all_accounts() -> List[Dict]:
     """Собирает все аккаунты из ACCOUNTS_ROOT."""
     accounts = []
@@ -321,6 +389,8 @@ def get_all_accounts() -> List[Dict]:
                     "config": acc_cfg,
                     "platforms": acc_cfg.get("platforms", [acc_cfg.get("platform", "youtube")]),
                 })
+    if getattr(config, "SHORTS_ACCOUNT_ORDER_BY_COUNTRY", True):
+        accounts = sort_accounts_by_country(accounts)
     return accounts
 
 

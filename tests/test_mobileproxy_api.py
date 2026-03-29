@@ -1,0 +1,59 @@
+"""Тесты mobileproxy_api (без реальной сети)."""
+
+from __future__ import annotations
+
+from unittest.mock import patch
+
+import pytest
+
+from pipeline import config
+from pipeline import mobileproxy_api as mpa
+
+
+def test_resolve_iso_manual(monkeypatch):
+    monkeypatch.setattr(config, "MOBILEPROXY_ISO_TO_ID_JSON", '{"US": 99, "DE": 7}')
+    mpa._iso_to_id_cache = None
+    assert mpa.resolve_iso_to_id_country("US") == 99
+    assert mpa.resolve_iso_to_id_country("de") == 7
+
+
+def test_ensure_equipment_noop_when_current_matches(monkeypatch):
+    monkeypatch.setattr(config, "MOBILEPROXY_API_KEY", "k")
+    monkeypatch.setattr(config, "MOBILEPROXY_PROXY_ID", "1")
+    monkeypatch.setattr(config, "MOBILEPROXY_ISO_TO_ID_JSON", '{"XX": 5}')
+    mpa._iso_to_id_cache = None
+    mpa.invalidate_my_proxy_cache()
+    with patch.object(
+        mpa,
+        "get_my_proxy_row",
+        return_value={"proxy_id": 1, "id_country": 5},
+    ):
+        mpa.ensure_equipment_country_for_iso("XX")  # no raise
+
+
+def test_ensure_equipment_calls_change_when_diff(monkeypatch):
+    monkeypatch.setattr(config, "MOBILEPROXY_API_KEY", "k")
+    monkeypatch.setattr(config, "MOBILEPROXY_PROXY_ID", "1")
+    monkeypatch.setattr(config, "MOBILEPROXY_ISO_TO_ID_JSON", '{"XX": 5}')
+    monkeypatch.setattr(config, "MOBILEPROXY_POST_GEO_PAUSE_SEC", 0.0)
+    mpa._iso_to_id_cache = None
+    mpa.invalidate_my_proxy_cache()
+    with patch.object(
+        mpa,
+        "get_my_proxy_row",
+        return_value={"proxy_id": 1, "id_country": 1},
+    ), patch.object(mpa, "change_equipment_to_country", return_value=True) as chg:
+        mpa.ensure_equipment_country_for_iso("XX")
+        chg.assert_called_once_with(5)
+
+
+def test_sort_accounts_by_country():
+    from pipeline.utils import sort_accounts_by_country
+
+    accs = [
+        {"name": "z", "config": {"country": "US"}},
+        {"name": "a", "config": {"country": "DE"}},
+        {"name": "m", "config": {}},
+    ]
+    s = sort_accounts_by_country(accs)
+    assert [x["name"] for x in s] == ["a", "z", "m"]

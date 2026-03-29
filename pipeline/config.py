@@ -41,6 +41,38 @@ ANALYTICS_FILE        = BASE_DIR / "data" / "analytics.json"
 SESSION_HEALTH_FILE   = BASE_DIR / "data" / "session_health.json"
 CONFIG_JSON          = BASE_DIR / "config.json"
 ACCOUNTS_ROOT        = os.getenv("ACCOUNTS_ROOT", "accounts")
+
+# Реестр exit-IP (один mobileproxy, ротация IP) — data/proxy_ip_registry.json
+PROXY_IP_REGISTRY_FILE = BASE_DIR / "data" / "proxy_ip_registry.json"
+PROXY_IP_ROTATION_LOCK_FILE = BASE_DIR / "data" / "proxy_ip_rotation.lock"
+# Включить: SHORTS_PROXY_IP_REGISTRY=1 или задан MOBILEPROXY_CHANGE_IP_URL / (MOBILEPROXY_API_KEY + MOBILEPROXY_PROXY_ID)
+SHORTS_PROXY_IP_REGISTRY = os.getenv("SHORTS_PROXY_IP_REGISTRY", "").strip().lower() in ("1", "true", "yes", "on")
+MOBILEPROXY_API_KEY = os.getenv("MOBILEPROXY_API_KEY", "").strip()
+MOBILEPROXY_PROXY_ID = os.getenv("MOBILEPROXY_PROXY_ID", "").strip()
+MOBILEPROXY_CHANGE_IP_URL = os.getenv("MOBILEPROXY_CHANGE_IP_URL", "").strip()
+MOBILEPROXY_API_BASE = os.getenv("MOBILEPROXY_API_BASE", "https://mobileproxy.space/api.html").strip()
+# Лимит доки API: идентичные запросы не чаще 5 с; пауза после смены IP (сеть)
+MOBILEPROXY_API_MIN_INTERVAL_SEC = float(os.getenv("MOBILEPROXY_API_MIN_INTERVAL_SEC", "5.0"))
+PROXY_IP_POST_ROTATE_PAUSE_SEC = float(os.getenv("PROXY_IP_POST_ROTATE_PAUSE_SEC", "2.5"))
+PROXY_IP_MAX_ROTATIONS = max(10, int(os.getenv("PROXY_IP_MAX_ROTATIONS", "120")))
+PROXY_IP_MAX_STICKY_ATTEMPTS = max(5, int(os.getenv("PROXY_IP_MAX_STICKY_ATTEMPTS", "40")))
+# Смена страны линии (change_equipment) перед ротацией IP; пауза после смены оборудования
+MOBILEPROXY_CHANGE_GEO = os.getenv("MOBILEPROXY_CHANGE_GEO", "1").strip().lower() not in (
+    "0",
+    "false",
+    "no",
+    "off",
+)
+MOBILEPROXY_POST_GEO_PAUSE_SEC = float(os.getenv("MOBILEPROXY_POST_GEO_PAUSE_SEC", "8.0"))
+# Ручной маппинг {"US":1,"DE":2} если get_id_country недоступен
+MOBILEPROXY_ISO_TO_ID_JSON = os.getenv("MOBILEPROXY_ISO_TO_ID_JSON", "").strip()
+# Порядок обхода аккаунтов: сначала батчем по country (меньше смен гео)
+SHORTS_ACCOUNT_ORDER_BY_COUNTRY = os.getenv("SHORTS_ACCOUNT_ORDER_BY_COUNTRY", "1").strip().lower() not in (
+    "0",
+    "false",
+    "no",
+    "off",
+)
 LOG_FILE          = BASE_DIR / "data" / "pipeline.log"
 
 # Куки-файлы
