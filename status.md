@@ -6,9 +6,28 @@ https://github.com/NomelLime/ShortsProject
 
 # ShortsProject — Status
 
-**Дата последнего обновления:** 28.03.2026  
+**Дата последнего обновления:** 29.03.2026  
 **Ветка:** `main`  
 **Репозиторий:** `NomelLime/ShortsProject` (private)
+
+---
+
+### Сессия 20 (29.03.2026) — Mobileproxy: реестр exit-IP, смена страны линии, IPGuardian, батчинг аккаунтов
+
+**Цель:** один купленный прокси mobileproxy.space с ротацией IP; закрепление IP по аккаунту; при необходимости выравнивание страны оборудования (`change_equipment`); проверка спам-баз (IPGuardian через `check_spam`); меньше переключений гео за счёт порядка обхода аккаунтов.
+
+| Файл | Назначение |
+|------|------------|
+| **`pipeline/proxy_ip_registry.py`** | Реестр `data/proxy_ip_registry.json` (IP на аккаунт: sticky → чистый → крайний случай общий IP). Под тем же файловым lock, что и ротация (`data/proxy_ip_rotation.lock`, `portalocker`): сначала `ensure_equipment_country_for_iso` (если включено), затем подбор exit-IP ротациями до успеха по стране. |
+| **`pipeline/mobileproxy_api.py`** | `get_my_proxy_row`, `change_equipment` + `check_spam`, `fetch_proxy_ip_with_spam_check` (`proxy_ip` + `check_spam=true`), `spam_check_requires_rotation`, `resolve_iso_to_id_country` / `get_id_country`, пауза `MOBILEPROXY_POST_GEO_PAUSE_SEC` после смены линии. |
+| **`pipeline/browser.py`** | `invalidate_proxy_geo_cache`; перед контекстом — `ensure_exit_ip_for_account` при включённом реестре. |
+| **`pipeline/utils.py`** | `fetch_exit_ip_via_proxy`, `fetch_country_for_ip`; `sort_accounts_by_country`; `get_all_accounts()` сортирует по `country` при `SHORTS_ACCOUNT_ORDER_BY_COUNTRY=1`. |
+| **`pipeline/config.py`** | Env: `SHORTS_PROXY_IP_REGISTRY`, `MOBILEPROXY_*`, `PROXY_IP_*`, `MOBILEPROXY_CHANGE_GEO`, `MOBILEPROXY_POST_GEO_PAUSE_SEC`, `MOBILEPROXY_ISO_TO_ID_JSON`, `SHORTS_ACCOUNT_ORDER_BY_COUNTRY`, `MOBILEPROXY_CHECK_SPAM`. |
+| **`tests/test_proxy_ip_registry.py`**, **`tests/test_mobileproxy_api.py`** | Реестр, ISO-маппинг, смена equipment, спам-флаг, сортировка аккаунтов. |
+
+**Поведение:** при `MOBILEPROXY_CHECK_SPAM=1` перед фиксацией IP вызывается `proxy_ip` с проверкой IPGuardian; при «спаме» — ротация в рамках лимита. Смена страны линии — только при заданном `country` в аккаунте и ключе API; ручной маппинг ISO→`id_country` через `MOBILEPROXY_ISO_TO_ID_JSON`, если `get_id_country` недоступен.
+
+**Тесты:** `pytest tests/test_proxy_ip_registry.py tests/test_mobileproxy_api.py` — ✅
 
 ---
 
