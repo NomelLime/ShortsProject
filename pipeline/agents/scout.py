@@ -54,7 +54,7 @@ class Scout(BaseAgent):
         cycle = self._cycle_count
         try:
             from pipeline import config
-            from pipeline.utils import load_keywords, merge_and_save_urls
+            from pipeline.utils import load_keywords, merge_and_save_urls, resolve_pipeline_account_name
 
             override = self.memory.get("scout_keywords_override")
             if override:
@@ -80,33 +80,38 @@ class Scout(BaseAgent):
                 return
 
             logger.info("[SCOUT] Ключевых слов: %d", len(keywords))
-            expanded = self._expand_keywords(keywords)
 
-            new_urls = self._search_ytdlp(expanded)
-            if self.memory.get("scout_browser_enabled", True):
-                new_urls = list(dict.fromkeys(new_urls + self._search_browser(expanded)))
+            from pipeline.pipeline_account_rotation import scout_pipeline_cycle_account
 
-            if not new_urls:
-                logger.info("[SCOUT] Новых URL не найдено")
-                return
+            with scout_pipeline_cycle_account(self.memory):
+                expanded = self._expand_keywords(keywords)
 
-            # VL thumbnail pre-filter: отклоняем мусор до скачивания
-            new_urls = self._vl_filter_urls(new_urls)
+                new_urls = self._search_ytdlp(expanded)
+                if self.memory.get("scout_browser_enabled", True):
+                    new_urls = list(dict.fromkeys(new_urls + self._search_browser(expanded)))
 
-            saved = merge_and_save_urls(new_urls, config.URLS_FILE)
-            self._total_found += saved
-            logger.info("[SCOUT] Сохранено %d новых URL (сессия: %d)", saved, self._total_found)
+                if not new_urls:
+                    logger.info("[SCOUT] Новых URL не найдено")
+                    return
 
-            self.memory.log_event("SCOUT", "crawl_done", {
-                "found": len(new_urls), "saved_new": saved,
-                "total_session": self._total_found,
-            })
-            self.report({"last_saved": saved, "total_found": self._total_found})
-            if saved > 0:
-                self._send(f"🔍 [SCOUT] Найдено {saved} новых URL (сессия: {self._total_found})")
+                # VL thumbnail pre-filter: отклоняем мусор до скачивания
+                new_urls = self._vl_filter_urls(new_urls)
 
-            # Записываем тренд для STRATEGIST если есть значимый результат
-            self._write_trend_recommendation(expanded, len(new_urls), saved, cycle)
+                saved = merge_and_save_urls(new_urls, config.URLS_FILE)
+                self._total_found += saved
+                logger.info("[SCOUT] Сохранено %d новых URL (сессия: %d)", saved, self._total_found)
+
+                self.memory.log_event("SCOUT", "crawl_done", {
+                    "found": len(new_urls), "saved_new": saved,
+                    "total_session": self._total_found,
+                    "pipeline_account": resolve_pipeline_account_name(),
+                })
+                self.report({"last_saved": saved, "total_found": self._total_found})
+                if saved > 0:
+                    self._send(f"🔍 [SCOUT] Найдено {saved} новых URL (сессия: {self._total_found})")
+
+                # Записываем тренд для STRATEGIST если есть значимый результат
+                self._write_trend_recommendation(expanded, len(new_urls), saved, cycle)
 
         except Exception as e:
             logger.error("[SCOUT] Ошибка: %s", e)

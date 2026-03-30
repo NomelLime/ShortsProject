@@ -15,7 +15,7 @@ import time
 from datetime import date, timedelta
 from pathlib import Path
 from threading import Lock
-from typing import Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 import ffmpeg
 from PIL import Image
@@ -126,9 +126,14 @@ def detect_encoder() -> Tuple[str, Optional[Dict]]:
 # Человекоподобные задержки
 # ----------------------------------------------------------------------
 
-def human_sleep(min_sec: float, max_sec: float) -> None:
-    """Случайная задержка для имитации человека."""
-    time.sleep(random.uniform(min_sec, max_sec))
+def human_sleep(min_sec: float, max_sec: float, **kwargs: Any) -> None:
+    """
+    Случайная задержка для имитации человека.
+    kwargs → pipeline.humanize.human_pause (account_cfg, agent, memory, risk, context).
+    """
+    from pipeline.humanize import human_pause
+
+    human_pause(min_sec, max_sec, **kwargs)
 
 
 def type_humanlike(page: Page, selector: str, text: str) -> None:
@@ -224,10 +229,110 @@ def load_keywords() -> List[str]:
     return out
 
 
+def proxy_cfg_to_http_url(proxy_cfg: dict) -> str:
+    """
+    Строка URL для yt-dlp и Playwright (поле server) из dict
+    host / port / username / password.
+    """
+    from urllib.parse import quote
+
+    host = proxy_cfg["host"]
+    port = int(proxy_cfg.get("port", 8080))
+    user = (proxy_cfg.get("username") or "").strip()
+    pwd = (proxy_cfg.get("password") or "").strip()
+    if user:
+        return (
+            f"http://{quote(user, safe='')}:{quote(pwd, safe='')}@{host}:{port}"
+        )
+    return f"http://{host}:{port}"
+
+
+def _accounts_root_path() -> Path:
+    r = Path(config.ACCOUNTS_ROOT)
+    return r if r.is_absolute() else (Path(config.BASE_DIR) / r)
+
+
+def resolve_pipeline_account_name() -> Optional[str]:
+    """
+    Имя каталога в accounts/ для подготовки контента: поиск (downloader),
+    cookies yt-dlp (download), TrendScout YouTube.
+
+    Приоритет:
+      1) SHORTS_PIPELINE_ACCOUNT или YTDLP_COOKIES_ACCOUNT (фиксированный аккаунт);
+      2) контекст цикла SCOUT при PIPELINE_ACCOUNT_ROTATION=1 (см. pipeline_account_rotation).
+    """
+    raw = (
+        os.getenv("SHORTS_PIPELINE_ACCOUNT", "").strip()
+        or os.getenv("YTDLP_COOKIES_ACCOUNT", "").strip()
+    )
+    if raw:
+        acc_dir = _accounts_root_path() / raw
+        if not (acc_dir / "config.json").is_file():
+            logger.warning(
+                "SHORTS_PIPELINE_ACCOUNT / YTDLP_COOKIES_ACCOUNT=%s: нет %s",
+                raw,
+                acc_dir / "config.json",
+            )
+            return None
+        return raw
+
+    try:
+        from pipeline.pipeline_account_rotation import get_active_pipeline_account_name
+
+        active = get_active_pipeline_account_name()
+        if active:
+            return active
+    except Exception as exc:
+        logger.debug("resolve_pipeline_account_name: контекст ротации: %s", exc)
+
+    return None
+
+
+def get_pipeline_account_bundle() -> Optional[Dict[str, Any]]:
+    """
+    Словарь с ключами name, dir, config — конфиг залогиненного аккаунта для пайплайна подготовки.
+    """
+    name = resolve_pipeline_account_name()
+    if not name:
+        return None
+    acc_dir = _accounts_root_path() / name
+    cfg_path = acc_dir / "config.json"
+    try:
+        acc_cfg = json.loads(cfg_path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        logger.warning("get_pipeline_account_bundle: не читается %s: %s", cfg_path, exc)
+        return None
+    return {"name": name, "dir": acc_dir, "config": acc_cfg}
+
+
+def requests_proxies_from_proxy_url(proxy_url: Optional[str]) -> Optional[Dict[str, str]]:
+    """Словарь proxies для requests / urllib, если задан URL прокси (как у load_proxy)."""
+    if not proxy_url:
+        return None
+    return {"http": proxy_url, "https": proxy_url}
+
+
 def load_proxy() -> Optional[str]:
-    """Загружает прокси из .env или возвращает None."""
-    proxy = os.environ.get("PROXY")
-    return proxy if proxy else None
+    """
+    Прокси для yt-dlp, download.py, SCOUT, downloader.search_and_save.
+
+    Приоритет:
+      1. Переменная окружения PROXY (явный override).
+      2. Иначе — HTTP-прокси из mobileproxy API (MOBILEPROXY_API_KEY + MOBILEPROXY_PROXY_ID)
+         и кэш data/mobileproxy_http_cache.json (см. mobileproxy_connection).
+    """
+    explicit = (os.environ.get("PROXY") or "").strip()
+    if explicit:
+        return explicit
+    try:
+        from pipeline.mobileproxy_connection import fetch_mobileproxy_http_proxy
+
+        p = fetch_mobileproxy_http_proxy(force_refresh=False, use_cache_on_api_fail=True)
+        if p and p.get("host"):
+            return proxy_cfg_to_http_url(p)
+    except Exception as exc:
+        logger.debug("load_proxy: mobileproxy недоступен: %s", exc)
+    return None
 
 
 def check_proxy_health(proxy_cfg: dict, timeout: int = 10) -> bool:

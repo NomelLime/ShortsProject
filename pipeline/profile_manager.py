@@ -20,15 +20,32 @@ VL-fallback graceful: если Ollama недоступен — работает 
 """
 from __future__ import annotations
 
+import contextvars
 import logging
 import random
 import re
 import time
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Dict, Iterator, Optional
 
 logger = logging.getLogger(__name__)
+
+# Конфиг аккаунта для humanize (GEO-окна) на время setup_all_links / verify_all_links
+_profile_humanize_cfg: contextvars.ContextVar[Optional[Dict]] = contextvars.ContextVar(
+    "profile_humanize_cfg",
+    default=None,
+)
+
+
+@contextmanager
+def _profile_humanize_scope(account_cfg: Optional[Dict]) -> Iterator[None]:
+    tok = _profile_humanize_cfg.set(account_cfg)
+    try:
+        yield
+    finally:
+        _profile_humanize_cfg.reset(tok)
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Утилиты ввода / пауз
@@ -41,9 +58,18 @@ def _human_type(page, text: str) -> None:
         time.sleep(random.uniform(0.04, 0.14))
 
 
-def _human_pause(lo: float = 1.0, hi: float = 3.0) -> None:
-    """Пауза как у живого человека."""
-    time.sleep(random.uniform(lo, hi))
+def _human_pause(lo: float = 1.0, hi: float = 3.0, *, ctx: str = "") -> None:
+    """Пауза как у живого человека (humanize + GEO аккаунта)."""
+    from pipeline.humanize import HumanizeRisk, human_pause
+
+    human_pause(
+        lo,
+        hi,
+        account_cfg=_profile_humanize_cfg.get(),
+        agent="PROFILE",
+        context=ctx,
+        risk=HumanizeRisk.MEDIUM,
+    )
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -800,30 +826,31 @@ def setup_all_links(
         if not acquired:
             return {p: False for p in platforms}
 
-        for platform in platforms:
-            try:
-                pw, context = launch_browser(account_cfg, profile_dir, platform=platform)
-            except Exception as exc:
-                logger.error("[profile] Браузер не запустился для %s: %s", platform, exc)
-                results[platform] = False
-                continue
+        with _profile_humanize_scope(account_cfg):
+            for platform in platforms:
+                try:
+                    pw, context = launch_browser(account_cfg, profile_dir, platform=platform)
+                except Exception as exc:
+                    logger.error("[profile] Браузер не запустился для %s: %s", platform, exc)
+                    results[platform] = False
+                    continue
 
-            try:
-                # Per-platform URL с UTM (приоритет) → fallback на общий prelend_url
-                url_for_platform = prelend_urls.get(platform) or prelend_url
-                platform_bio     = account_cfg.get(f"bio_text_{platform}", bio_text)
+                try:
+                    # Per-platform URL с UTM (приоритет) → fallback на общий prelend_url
+                    url_for_platform = prelend_urls.get(platform) or prelend_url
+                    platform_bio     = account_cfg.get(f"bio_text_{platform}", bio_text)
 
-                logger.info("[profile] Установка ссылки: %s → %s", platform, url_for_platform)
+                    logger.info("[profile] Установка ссылки: %s → %s", platform, url_for_platform)
 
-                ok = setup_profile_link(context, platform, url_for_platform, platform_bio)
-                results[platform] = ok
+                    ok = setup_profile_link(context, platform, url_for_platform, platform_bio)
+                    results[platform] = ok
 
-                status = "✅" if ok else "❌"
-                logger.info("[profile][%s] %s Ссылка %s", platform, status,
-                            "установлена" if ok else "НЕ установлена")
-                _human_pause(3, 6)
-            finally:
-                close_browser(pw, context)
+                    status = "✅" if ok else "❌"
+                    logger.info("[profile][%s] %s Ссылка %s", platform, status,
+                                "установлена" if ok else "НЕ установлена")
+                    _human_pause(3, 6, ctx="between_platforms")
+                finally:
+                    close_browser(pw, context)
 
     return results
 
@@ -858,21 +885,22 @@ def verify_all_links(
         if not acquired:
             return {p: False for p in platforms}
 
-        for platform in platforms:
-            try:
-                pw, context = launch_browser(account_cfg, profile_dir, platform=platform)
-            except Exception as exc:
-                logger.error("[profile] Браузер не запустился для verify %s: %s", platform, exc)
-                results[platform] = False
-                continue
+        with _profile_humanize_scope(account_cfg):
+            for platform in platforms:
+                try:
+                    pw, context = launch_browser(account_cfg, profile_dir, platform=platform)
+                except Exception as exc:
+                    logger.error("[profile] Браузер не запустился для verify %s: %s", platform, exc)
+                    results[platform] = False
+                    continue
 
-            try:
-                # Per-platform URL с UTM → fallback на общий
-                expected = prelend_urls.get(platform) or prelend_url
-                ok = verify_profile_link(context, platform, expected)
-                results[platform] = ok
-                _human_pause(2, 4)
-            finally:
-                close_browser(pw, context)
+                try:
+                    # Per-platform URL с UTM → fallback на общий
+                    expected = prelend_urls.get(platform) or prelend_url
+                    ok = verify_profile_link(context, platform, expected)
+                    results[platform] = ok
+                    _human_pause(2, 4, ctx="verify_between_platforms")
+                finally:
+                    close_browser(pw, context)
 
     return results

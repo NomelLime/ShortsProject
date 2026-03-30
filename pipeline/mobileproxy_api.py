@@ -66,6 +66,12 @@ def invalidate_my_proxy_cache() -> None:
     """Сброс кэша карточки прокси (после change_equipment)."""
     global _my_proxy_row_cache
     _my_proxy_row_cache = None
+    try:
+        from pipeline.mobileproxy_connection import invalidate_mobileproxy_http_cache
+
+        invalidate_mobileproxy_http_cache()
+    except Exception:
+        pass
 
 
 def get_my_proxy_row(force_refresh: bool = False) -> Optional[Dict[str, Any]]:

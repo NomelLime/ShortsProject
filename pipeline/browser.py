@@ -15,6 +15,7 @@ from playwright_stealth import Stealth
 from pipeline import config as cfg
 from pipeline import utils
 from pipeline.fingerprint.generator import ensure_fingerprint
+from pipeline.mobileproxy_connection import fetch_mobileproxy_http_proxy
 from pipeline.proxy_ip_registry import (
     account_id_from,
     ensure_exit_ip_for_account,
@@ -109,8 +110,10 @@ def resolve_working_proxy(account_cfg: dict) -> dict | None:
     Возвращает первый работающий прокси для аккаунта.
 
     Порядок проверки:
-      1. Основной прокси: account_cfg["proxy"]
-      2. Резервные прокси: account_cfg["fallback_proxies"] (список)
+      1. Основной прокси: account_cfg["proxy"] (если задан host — ручной override)
+      2. Иначе — HTTP-прокси из mobileproxy API (MOBILEPROXY_API_KEY + MOBILEPROXY_PROXY_ID),
+         с кэшем в data/mobileproxy_http_cache.json
+      3. Резервные прокси: account_cfg["fallback_proxies"] (список)
 
     Если рабочий прокси найден — обновляет account_cfg["_active_proxy"]
     для использования в этой сессии. Возвращает dict прокси или None.
@@ -129,6 +132,10 @@ def resolve_working_proxy(account_cfg: dict) -> dict | None:
     primary = account_cfg.get("proxy", {})
     if primary and primary.get("host"):
         candidates.append(primary)
+    else:
+        mp = fetch_mobileproxy_http_proxy(force_refresh=False, use_cache_on_api_fail=True)
+        if mp:
+            candidates.append(mp)
 
     for fb in account_cfg.get("fallback_proxies", []):
         if fb and fb.get("host"):

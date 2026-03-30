@@ -416,6 +416,9 @@ class Publisher(BaseAgent):
                 # Антибан задержка
                 delay = self._guardian.get_safe_delay(acc_name) if self._guardian else 30.0
                 logger.debug("[PUBLISHER] Антибан пауза: %.0f сек", delay)
+                from pipeline.humanize import log_throttle_wait
+
+                log_throttle_wait(self.memory, "PUBLISHER", delay, "antiban_between_uploads")
                 time.sleep(delay)
 
                 clean_path = clean_video_metadata(Path(video_path))

@@ -8,6 +8,7 @@ pipeline/uploader.py – Загрузка видео на YouTube, TikTok, Insta
   - Фича D:  карантин — интеграция quarantine.mark_error / mark_success
 """
 
+import contextvars
 import logging
 import random
 
@@ -15,12 +16,14 @@ import requests
 import shutil
 import subprocess
 import time
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, Iterator, List, Optional
 
 from rebrowser_playwright.sync_api import BrowserContext, Page
 
 from pipeline import config, utils
+from pipeline.humanize import HumanizeRisk, human_pause
 from pipeline.activity import run_activity
 from pipeline.browser import launch_browser, close_browser, check_session_valid
 from pipeline.notifications import check_and_handle_captcha, send_telegram
@@ -30,6 +33,37 @@ from pipeline.quarantine import is_quarantined, mark_error as q_mark_error, mark
 from pipeline.upload_warmup import is_upload_blocked, is_upload_warmup_active
 
 logger = logging.getLogger(__name__)
+
+_uploader_h_cfg: contextvars.ContextVar[Optional[Dict]] = contextvars.ContextVar(
+    "uploader_humanize_cfg",
+    default=None,
+)
+
+
+@contextmanager
+def _uploader_humanize_scope(account_cfg: Optional[Dict]) -> Iterator[None]:
+    tok = _uploader_h_cfg.set(account_cfg)
+    try:
+        yield
+    finally:
+        _uploader_h_cfg.reset(tok)
+
+
+def _up_pause(
+    lo: float,
+    hi: float,
+    *,
+    ctx: str = "",
+    risk: HumanizeRisk = HumanizeRisk.MEDIUM,
+) -> None:
+    human_pause(
+        lo,
+        hi,
+        account_cfg=_uploader_h_cfg.get(),
+        agent="UPLOADER",
+        context=ctx,
+        risk=risk,
+    )
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -89,7 +123,7 @@ def _upload_youtube(page: Page, video_path: Path, meta: Dict) -> str:
     description = raw_desc[:4990]
 
     page.goto("https://studio.youtube.com", wait_until="domcontentloaded", timeout=30_000)
-    time.sleep(random.uniform(2, 4))
+    _up_pause(2, 4, ctx="yt_studio_open")
     check_and_handle_captcha(page, "youtube")
 
     for sel in ["ytcp-button#create-icon", "button[aria-label*='reate']", "#create-icon"]:
@@ -98,7 +132,7 @@ def _upload_youtube(page: Page, video_path: Path, meta: Dict) -> str:
                 page.locator(sel).first.click(); break
         except Exception:
             continue
-    time.sleep(random.uniform(1, 2))
+    _up_pause(1, 2, ctx="yt_after_create_click")
 
     for sel in ["tp-yt-paper-item#text-item-0", "[test-id='upload-beta']",
                 "tp-yt-paper-listbox tp-yt-paper-item:first-child"]:
@@ -107,13 +141,13 @@ def _upload_youtube(page: Page, video_path: Path, meta: Dict) -> str:
                 page.locator(sel).first.click(); break
         except Exception:
             continue
-    time.sleep(random.uniform(1, 2))
+    _up_pause(1, 2, ctx="yt_after_upload_item")
 
     page.locator("input[type=file]").first.set_input_files(str(video_path))
     page.wait_for_selector(
         "#title-textarea, ytcp-social-suggestions-textbox#title-textarea", timeout=60_000
     )
-    time.sleep(random.uniform(1, 2))
+    _up_pause(1, 2, ctx="yt_after_file_selected")
 
     for sel in ["#title-textarea div[contenteditable='true']",
                 "ytcp-social-suggestions-textbox#title-textarea div[contenteditable]"]:
@@ -123,7 +157,7 @@ def _upload_youtube(page: Page, video_path: Path, meta: Dict) -> str:
                 el.click(); page.keyboard.press("Control+a"); _human_type(page, title); break
         except Exception:
             continue
-    time.sleep(random.uniform(0.5, 1.5))
+    _up_pause(0.5, 1.5, ctx="yt_after_title")
 
     if description:
         for sel in ["#description-textarea div[contenteditable='true']",
@@ -134,7 +168,7 @@ def _upload_youtube(page: Page, video_path: Path, meta: Dict) -> str:
                     el.click(); _human_type(page, description); break
             except Exception:
                 continue
-        time.sleep(0.5)
+        _up_pause(0.4, 0.65, ctx="yt_after_description")
 
     try:
         el = page.locator("tp-yt-paper-radio-button[name='VIDEO_MADE_FOR_KIDS_NOT_MFK']").first
@@ -149,7 +183,7 @@ def _upload_youtube(page: Page, video_path: Path, meta: Dict) -> str:
                     page.locator(sel).first.click(); break
             except Exception:
                 continue
-        time.sleep(random.uniform(1.5, 2.5))
+        _up_pause(1.5, 2.5, ctx="yt_wizard_next")
         check_and_handle_captcha(page, "youtube")
 
     # Ждём завершения загрузки файла
@@ -163,9 +197,10 @@ def _upload_youtube(page: Page, video_path: Path, meta: Dict) -> str:
             if done.is_visible(timeout=3_000): break
         except Exception:
             pass
-        time.sleep(5)
+        _up_pause(4.2, 5.8, ctx="yt_upload_progress_poll")
 
     # Публикация
+    _up_pause(0.7, 1.4, ctx="yt_before_publish", risk=HumanizeRisk.HIGH)
     for sel in ["ytcp-button#done-button", "ytcp-button[test-id='publish-button']",
                 "button[aria-label*='ublish']", "button[aria-label*='ave']"]:
         try:
@@ -173,6 +208,7 @@ def _upload_youtube(page: Page, video_path: Path, meta: Dict) -> str:
                 page.locator(sel).first.click(); break
         except Exception:
             continue
+    _up_pause(0, 0, ctx="yt_after_publish_click", risk=HumanizeRisk.CRITICAL)
 
     # Ждём диалога успеха и захватываем URL видео
     video_url = ""
@@ -196,7 +232,7 @@ def _upload_youtube(page: Page, video_path: Path, meta: Dict) -> str:
         try:
             page.goto("https://studio.youtube.com/videos/shorts", timeout=15_000,
                       wait_until="domcontentloaded")
-            time.sleep(2)
+            _up_pause(1.7, 2.3, ctx="yt_fallback_shorts_list")
             video_url = _try_get_url(
                 page,
                 ["ytd-grid-video-renderer a#video-title", "a[href*='/shorts/']"],
@@ -205,7 +241,7 @@ def _upload_youtube(page: Page, video_path: Path, meta: Dict) -> str:
         except Exception:
             pass
 
-    time.sleep(random.uniform(2, 3))
+    _up_pause(2, 3, ctx="yt_finalize")
     logger.info("[youtube] Опубликовано: %s | URL: %s", video_path.name, video_url or "неизвестен")
     return video_url
 
@@ -222,7 +258,7 @@ def _upload_tiktok(page: Page, video_path: Path, meta: Dict) -> str:
     caption  = f"{title} {hashtags}".strip()[:2200]
 
     page.goto("https://www.tiktok.com/upload", wait_until="domcontentloaded", timeout=30_000)
-    time.sleep(random.uniform(2, 4))
+    _up_pause(2, 4, ctx="tiktok_upload_open")
     check_and_handle_captcha(page, "tiktok")
 
     for sel in ["input[type='file']", "input[accept*='video']"]:
@@ -241,8 +277,8 @@ def _upload_tiktok(page: Page, video_path: Path, meta: Dict) -> str:
         except Exception:
             pass
         check_and_handle_captcha(page, "tiktok")
-        time.sleep(4)
-    time.sleep(random.uniform(1, 2))
+        _up_pause(3.5, 4.5, ctx="tiktok_wait_editor")
+    _up_pause(1, 2, ctx="tiktok_editor_ready")
 
     if caption:
         for sel in [".public-DraftEditor-content",
@@ -254,8 +290,9 @@ def _upload_tiktok(page: Page, video_path: Path, meta: Dict) -> str:
                     el.click(); page.keyboard.press("Control+a"); _human_type(page, caption); break
             except Exception:
                 continue
-        time.sleep(random.uniform(0.5, 1.5))
+        _up_pause(0.5, 1.5, ctx="tiktok_after_caption")
 
+    _up_pause(0.7, 1.3, ctx="tiktok_before_post", risk=HumanizeRisk.HIGH)
     for sel in ["button.btn-post", "button[data-e2e='post_video_button']",
                 "button:has-text('Post')"]:
         try:
@@ -263,6 +300,7 @@ def _upload_tiktok(page: Page, video_path: Path, meta: Dict) -> str:
                 page.locator(sel).first.click(); break
         except Exception:
             continue
+    _up_pause(0, 0, ctx="tiktok_after_post", risk=HumanizeRisk.CRITICAL)
 
     # Ждём редиректа на страницу видео после публикации
     video_url = ""
@@ -285,7 +323,7 @@ def _upload_tiktok(page: Page, video_path: Path, meta: Dict) -> str:
         except Exception:
             pass
 
-    time.sleep(random.uniform(2, 3))
+    _up_pause(2, 3, ctx="tiktok_finalize")
     logger.info("[tiktok] Опубликовано: %s | URL: %s", video_path.name, video_url or "неизвестен")
     return video_url
 
@@ -309,7 +347,7 @@ def _upload_instagram(page: Page, video_path: Path, meta: Dict) -> str:
     )
 
     page.goto("https://www.instagram.com", wait_until="domcontentloaded", timeout=30_000)
-    time.sleep(random.uniform(2, 4))
+    _up_pause(2, 4, ctx="ig_home")
     check_and_handle_captcha(page, "instagram")
 
     for sel in ["svg[aria-label='New post']", "a[href='/create/select/']", "svg[aria-label='New Post']"]:
@@ -318,7 +356,7 @@ def _upload_instagram(page: Page, video_path: Path, meta: Dict) -> str:
                 page.locator(sel).first.click(); break
         except Exception:
             continue
-    time.sleep(random.uniform(1, 2))
+    _up_pause(1, 2, ctx="ig_after_new_post")
 
     try:
         page.locator("input[type='file']").first.set_input_files(str(video_path))
@@ -330,12 +368,12 @@ def _upload_instagram(page: Page, video_path: Path, meta: Dict) -> str:
                 fc.value.set_files(str(video_path))
             except Exception:
                 pass
-    time.sleep(random.uniform(2, 4))
+    _up_pause(2, 4, ctx="ig_after_file")
 
     try:
         if page.locator("button:has-text('Reels')").first.is_visible(timeout=5_000):
             page.locator("button:has-text('Reels')").first.click()
-            time.sleep(1)
+            _up_pause(0.85, 1.15, ctx="ig_reels_select")
     except Exception:
         pass
 
@@ -343,7 +381,8 @@ def _upload_instagram(page: Page, video_path: Path, meta: Dict) -> str:
         try:
             btn = page.locator("button:has-text('Next'), [aria-label='Next']").first
             if btn.is_visible(timeout=5_000):
-                btn.click(); time.sleep(random.uniform(1, 2))
+                btn.click()
+                _up_pause(1, 2, ctx="ig_wizard_next")
                 check_and_handle_captcha(page, "instagram")
             else:
                 break
@@ -359,14 +398,16 @@ def _upload_instagram(page: Page, video_path: Path, meta: Dict) -> str:
                     el.click(); _human_type(page, caption); break
             except Exception:
                 continue
-        time.sleep(random.uniform(0.5, 1.5))
+        _up_pause(0.5, 1.5, ctx="ig_after_caption")
 
+    _up_pause(0.7, 1.3, ctx="ig_before_share", risk=HumanizeRisk.HIGH)
     for sel in ["button:has-text('Share')", "button:has-text('Поделиться')", "[aria-label='Share']"]:
         try:
             if page.locator(sel).first.is_visible(timeout=5_000):
                 page.locator(sel).first.click(); break
         except Exception:
             continue
+    _up_pause(0, 0, ctx="ig_after_share", risk=HumanizeRisk.CRITICAL)
 
     # Захватываем URL нового поста
     video_url = ""
@@ -387,14 +428,14 @@ def _upload_instagram(page: Page, video_path: Path, meta: Dict) -> str:
     if not video_url:
         try:
             page.goto("https://www.instagram.com/", wait_until="domcontentloaded", timeout=10_000)
-            time.sleep(2)
+            _up_pause(1.7, 2.3, ctx="ig_fallback_home")
             video_url = _try_get_url(
                 page, ["a[href*='/reel/']", "article a"], "https://www.instagram.com"
             )
         except Exception:
             pass
 
-    time.sleep(random.uniform(2, 3))
+    _up_pause(2, 3, ctx="ig_finalize")
     logger.info("[instagram] Опубликовано: %s | URL: %s", video_path.name, video_url or "неизвестен")
     return video_url
 
@@ -430,25 +471,27 @@ def upload_video(
 
     last_error: Optional[Exception] = None
 
-    for attempt in range(5):
-        page = context.new_page()
-        try:
-            video_url = uploader_fn(page, video_path, meta)
-            send_telegram(f"✅ Загружено <b>{video_path.name}</b> на <b>{platform}</b>")
-            return video_url or ""   # пустая строка = URL неизвестен, но успех
-        except Exception as e:
-            last_error = e
-            backoff = min(2 ** attempt * 60, 300)   # cap: 5 мин
-            logger.warning("[%s] Попытка %d/5: %s — пауза %.0f сек", platform, attempt + 1, e, backoff)
-            time.sleep(backoff)
-            send_telegram(
-                f"⚠️ Повтор {attempt+1}/5 <b>{video_path.name}</b> / <b>{platform}</b>: {str(e)[:100]}"
-            )
-        finally:
+    with _uploader_humanize_scope(account_cfg):
+        for attempt in range(5):
+            page = context.new_page()
             try:
-                page.close()
-            except Exception:
-                pass
+                video_url = uploader_fn(page, video_path, meta)
+                send_telegram(f"✅ Загружено <b>{video_path.name}</b> на <b>{platform}</b>")
+                return video_url or ""   # пустая строка = URL неизвестен, но успех
+            except Exception as e:
+                last_error = e
+                backoff = min(2 ** attempt * 60, 300)   # cap: 5 мин
+                logger.warning("[%s] Попытка %d/5: %s — пауза %.0f сек", platform, attempt + 1, e, backoff)
+                # Не human_pause: cap в humanize (_MAX_SINGLE_PAUSE_SEC) меньше backoff до 5 мин.
+                time.sleep(backoff)
+                send_telegram(
+                    f"⚠️ Повтор {attempt+1}/5 <b>{video_path.name}</b> / <b>{platform}</b>: {str(e)[:100]}"
+                )
+            finally:
+                try:
+                    page.close()
+                except Exception:
+                    pass
 
     failed_dir = Path(config.ACCOUNTS_ROOT) / account_name / "failed"
     failed_dir.mkdir(parents=True, exist_ok=True)

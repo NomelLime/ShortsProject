@@ -1755,7 +1755,10 @@ def vl_score_thumbnail(video_url: str) -> Optional[int]:
 
     thumbnail_url = f"https://img.youtube.com/vi/{video_id}/hqdefault.jpg"
     try:
-        resp = requests.get(thumbnail_url, timeout=10)
+        from pipeline import utils as _u
+
+        _px = _u.requests_proxies_from_proxy_url(_u.load_proxy())
+        resp = requests.get(thumbnail_url, timeout=10, proxies=_px)
         if resp.status_code != 200:
             return None
         img_bytes = resp.content

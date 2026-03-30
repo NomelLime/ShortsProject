@@ -2,14 +2,17 @@
 downloader.py — Этап «Поиск трендовых видео»
 
 Совмещает два подхода:
-  А) Playwright-браузер — имитирует живого пользователя, собирает URL с реальных страниц.
-  Б) yt-dlp — быстрый API-поиск, собирает основной массив ссылок.
+  А) Playwright — persistent-профиль залогиненного аккаунта (SHORTS_PIPELINE_ACCOUNT / ротация SCOUT).
+  Б) yt-dlp — быстрый поиск; cookies из того же аккаунта (get_ytdlp_cookie_options).
 
+Задайте SHORTS_PIPELINE_ACCOUNT или YTDLP_COOKIES_ACCOUNT, либо PIPELINE_ACCOUNT_ROTATION=1
+(пул: все accounts/* или PIPELINE_ACCOUNT_POOL) — см. pipeline_account_rotation.py.
 Дополнительно: AI-расширение ключевых слов через Ollama перед поиском.
 """
 
 from __future__ import annotations
 
+import copy
 import random
 import re
 import time
@@ -20,6 +23,7 @@ from yt_dlp import YoutubeDL
 
 from pipeline import config as cfg
 from pipeline import utils
+from pipeline.humanize import HumanizeRisk, human_pause, human_scroll_step
 
 log = utils.get_logger("downloader")
 
@@ -144,6 +148,11 @@ def _search_ytdlp(keywords: list[str], proxy: str | None) -> list[str]:
     total = len(all_queries)
     log.info("[yt-dlp] Всего запросов: %d", total)
 
+    _acc = None
+    _b = utils.get_pipeline_account_bundle()
+    if _b:
+        _acc = _b["config"]
+
     for idx, (platform_name, query) in enumerate(all_queries, start=1):
         log.info("[yt-dlp] [%d/%d] %-20s | %s", idx, total, platform_name, query)
         new_urls = _run_search_query(query, ydl_opts)
@@ -151,9 +160,14 @@ def _search_ytdlp(keywords: list[str], proxy: str | None) -> list[str]:
         found.update(new_urls)
         log.info("  → +%d новых | итого: %d", len(found) - before, len(found))
 
-        pause = random.uniform(cfg.SLEEP_MIN, cfg.SLEEP_MAX)
-        log.debug("Пауза %.1f с...", pause)
-        time.sleep(pause)
+        human_pause(
+            cfg.SLEEP_MIN,
+            cfg.SLEEP_MAX,
+            account_cfg=_acc,
+            agent="DOWNLOADER",
+            context="ytdlp_between_queries",
+            risk=HumanizeRisk.MEDIUM,
+        )
 
     return list(found)
 
@@ -166,6 +180,7 @@ def _browser_search_platform(
     page,
     platform: str,
     keyword: str,
+    account_cfg: dict | None = None,
 ) -> list[str]:
     """
     Ищет видео на одной платформе через реальный браузер.
@@ -183,14 +198,23 @@ def _browser_search_platform(
     try:
         log.info("[browser][%s] Открываю страницу поиска: «%s»", platform, keyword)
         page.goto(url, wait_until="domcontentloaded", timeout=30_000)
-        _human_pause(2, 5)
+        human_pause(
+            2,
+            5,
+            account_cfg=account_cfg,
+            agent="DOWNLOADER",
+            context="search_open",
+            risk=HumanizeRisk.LOW,
+        )
 
-        # Медленно прокручиваем страницу несколько раз — как живой человек
         scroll_rounds = random.randint(3, 6)
         for _ in range(scroll_rounds):
-            delta = random.randint(400, 900)
-            page.mouse.wheel(0, delta)
-            _human_pause(0.8, 2.5)
+            human_scroll_step(
+                page,
+                account_cfg=account_cfg,
+                agent="DOWNLOADER",
+                risk=HumanizeRisk.LOW,
+            )
 
         # Собираем ссылки в зависимости от платформы
         if platform == "youtube":
@@ -249,9 +273,8 @@ def _browser_search_platform(
         log.debug("[browser][%s] «Изучаем» результаты %.1f сек", platform, watch_time)
         time.sleep(watch_time)
 
-        # Случайно ставим лайк одному видео (с небольшой вероятностью)
         if random.random() < 0.25:
-            _try_like_first_result(page, platform)
+            _try_like_first_result(page, platform, account_cfg=account_cfg)
 
     except Exception as exc:
         log.warning("[browser][%s] Поиск «%s» не удался: %s", platform, keyword, exc)
@@ -261,7 +284,12 @@ def _browser_search_platform(
     return unique
 
 
-def _try_like_first_result(page, platform: str) -> None:
+def _try_like_first_result(
+    page,
+    platform: str,
+    *,
+    account_cfg: dict | None = None,
+) -> None:
     """Пытается поставить лайк первому видео в результатах поиска."""
     selectors = {
         "youtube":   "ytd-video-renderer #top-level-buttons button[aria-label*='like']",
@@ -276,82 +304,94 @@ def _try_like_first_result(page, platform: str) -> None:
         if btn.is_visible(timeout=2_000):
             btn.click()
             log.debug("[browser][%s] Лайк поставлен", platform)
-            _human_pause(1, 2)
+            human_pause(
+                1,
+                2,
+                account_cfg=account_cfg,
+                agent="DOWNLOADER",
+                context="search_like",
+                risk=HumanizeRisk.MEDIUM,
+            )
     except Exception:
         pass
 
 
-def _human_pause(lo: float, hi: float) -> None:
-    """Пауза с гауссовым шумом для имитации живого пользователя."""
-    delay = max(0.3, random.gauss(random.uniform(lo, hi), 0.3))
-    time.sleep(delay)
-
-
-def _search_browser(keywords: list[str], proxy: str | None) -> list[str]:
+def _search_browser(keywords: list[str], _proxy: str | None) -> list[str]:
     """
     Браузерный поиск (Вариант А).
-    Открывает Playwright, проходит по BROWSER_SEARCH_KEYWORDS_MAX ключевым словам
-    на YouTube и TikTok в реальном браузере.
+    Persistent-профиль залогиненного аккаунта: SHORTS_PIPELINE_ACCOUNT или
+    YTDLP_COOKIES_ACCOUNT (имя папки в accounts/). Прокси берётся из конфига аккаунта
+    (mobileproxy / resolve_working_proxy), а не из аргумента _proxy.
     """
     if not cfg.BROWSER_SEARCH_ENABLED:
         return []
 
-    try:
-        from rebrowser_playwright.sync_api import sync_playwright
-        from playwright_stealth import Stealth
-    except ImportError as e:
-        log.warning("[browser] rebrowser-playwright не установлен: %s", e)
+    bundle = utils.get_pipeline_account_bundle()
+    if not bundle:
+        log.error(
+            "[browser] Задайте SHORTS_PIPELINE_ACCOUNT (или YTDLP_COOKIES_ACCOUNT) — "
+            "имя аккаунта в accounts/ с залогиненным browser_profile."
+        )
         return []
 
-    # Берём подмножество keywords для браузерного поиска
+    from pipeline.browser import close_browser, launch_browser
+
+    stealth_apply = None
+    try:
+        from playwright_stealth import Stealth
+
+        stealth_apply = Stealth().apply_stealth_sync
+    except ImportError as e:
+        log.warning("[browser] playwright-stealth не установлен: %s", e)
+
+    acc_cfg = copy.deepcopy(bundle["config"])
+    _acc_for_search = acc_cfg
+    profile_dir = bundle["dir"] / "browser_profile"
+    plats = acc_cfg.get("platforms", ["youtube"])
+    if isinstance(plats, str):
+        plats = [plats]
+    plat0 = (plats[0] if plats else "youtube").lower()
+
     kws = keywords[:cfg.BROWSER_SEARCH_KEYWORDS_MAX]
     all_browser_urls: list[str] = []
 
-    launch_opts: dict = {
-        "headless": cfg.BROWSER_SEARCH_HEADLESS,
-        "args": ["--disable-blink-features=AutomationControlled", "--no-sandbox"],
-    }
-    if proxy:
-        launch_opts["proxy"] = {"server": proxy}
+    try:
+        pw, context = launch_browser(acc_cfg, profile_dir, platform=plat0)
+    except Exception as exc:
+        log.error("[browser] Не удалось запустить браузер аккаунта: %s", exc)
+        return []
 
-    stealth = Stealth()
-
-    with sync_playwright() as pw:
-        browser = pw.chromium.launch(**launch_opts)
-        context = browser.new_context(
-            user_agent=(
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/124.0.0.0 Safari/537.36"
-            ),
-            locale="en-US",
-            timezone_id="America/New_York",
-            viewport={"width": 1366, "height": 768},
-        )
-
-        # Применяем stealth ко всем новым страницам
-        context.on("page", lambda p: stealth.apply_stealth_sync(p))
-
+    try:
         page = context.new_page()
-        stealth.apply_stealth_sync(page)
+        if stealth_apply:
+            stealth_apply(page)
 
         for keyword in kws:
             for platform in ("youtube", "tiktok", "instagram"):
-                found = _browser_search_platform(page, platform, keyword)
+                found = _browser_search_platform(
+                    page, platform, keyword, account_cfg=_acc_for_search,
+                )
                 all_browser_urls.extend(found)
 
-                # Пауза между платформами — как живой человек
-                pause = random.uniform(cfg.SLEEP_MIN, cfg.SLEEP_MAX)
-                log.debug("[browser] Пауза между платформами %.1f с", pause)
-                time.sleep(pause)
+                human_pause(
+                    cfg.SLEEP_MIN,
+                    cfg.SLEEP_MAX,
+                    account_cfg=_acc_for_search,
+                    agent="DOWNLOADER",
+                    context="browser_between_platforms",
+                    risk=HumanizeRisk.LOW,
+                )
 
-            # Пауза между ключевыми словами
-            pause = random.uniform(cfg.SLEEP_MIN * 2, cfg.SLEEP_MAX * 2)
-            log.info("[browser] Пауза между keywords %.1f с", pause)
-            time.sleep(pause)
-
-        context.close()
-        browser.close()
+            human_pause(
+                cfg.SLEEP_MIN * 2,
+                cfg.SLEEP_MAX * 2,
+                account_cfg=_acc_for_search,
+                agent="DOWNLOADER",
+                context="browser_between_keywords",
+                risk=HumanizeRisk.MEDIUM,
+            )
+    finally:
+        close_browser(pw, context)
 
     unique = list(dict.fromkeys(all_browser_urls))
     log.info("[browser] Итого собрано: %d уникальных URL", len(unique))
@@ -380,6 +420,13 @@ def search_and_save() -> None:
       5. Объединяем и сохраняем все URL
     """
     log.info("═══ Поиск трендовых видео ═══")
+
+    pan = utils.resolve_pipeline_account_name()
+    if pan:
+        log.info(
+            "Подготовка контента под аккаунт «%s» (cookies yt-dlp + браузерный поиск)",
+            pan,
+        )
 
     keywords = utils.load_keywords()
     if not keywords:

@@ -181,11 +181,20 @@ class Guardian(BaseAgent):
             self._set_status(AgentStatus.IDLE)
 
     def _collect_proxies(self, acc_cfg: Dict) -> List[Dict]:
-        """Собирает все прокси аккаунта (основной + fallback)."""
+        """Собирает все прокси аккаунта (основной + mobileproxy API + fallback)."""
         proxies = []
         primary = acc_cfg.get("proxy", {})
         if primary and primary.get("host"):
             proxies.append(primary)
+        else:
+            try:
+                from pipeline.mobileproxy_connection import fetch_mobileproxy_http_proxy
+
+                mp = fetch_mobileproxy_http_proxy(force_refresh=False, use_cache_on_api_fail=True)
+                if mp:
+                    proxies.append(mp)
+            except Exception:
+                pass
         for fb in acc_cfg.get("fallback_proxies", []):
             if fb and fb.get("host"):
                 proxies.append(fb)

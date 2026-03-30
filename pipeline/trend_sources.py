@@ -12,7 +12,6 @@ TrendScout агрегирует их и взвешивает по частоте
 from __future__ import annotations
 
 import logging
-import subprocess
 import time
 from typing import List, Optional
 
@@ -82,36 +81,43 @@ def fetch_google_trends(
 
 def fetch_youtube_trending(max_results: int = 20) -> List[str]:
     """
-    Скачивает список trending-видео с YouTube через yt-dlp (без аутентификации).
-    Извлекает теги/категории как ключевые слова.
+    Trending YouTube через yt-dlp с cookies из get_ytdlp_cookie_options()
+    (фиксированный аккаунт в .env или контекст ротации в цикле TREND_SCOUT — см. pipeline_account_rotation).
     """
-    keywords = []
+    keywords: List[str] = []
     try:
-        result = subprocess.run(
-            [
-                "yt-dlp",
-                "--flat-playlist",
-                "--print", "%(title)s",
-                "--max-downloads", str(max_results),
-                "--no-warnings",
-                "--quiet",
+        from yt_dlp import YoutubeDL
+
+        from pipeline import config as _cfg
+
+        ydl_opts: dict = {
+            "quiet": True,
+            "no_warnings": True,
+            "extract_flat": True,
+            "skip_download": True,
+            "ignoreerrors": True,
+            "socket_timeout": 30,
+        }
+        ydl_opts.update(_cfg.get_ytdlp_cookie_options())
+        with YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(
                 "https://www.youtube.com/feed/trending",
-            ],
-            capture_output=True,
-            text=True,
-            timeout=30,
-        )
-        if result.returncode == 0:
-            titles = [t.strip() for t in result.stdout.strip().splitlines() if t.strip()]
-            # Превращаем заголовки в ключевые слова: берём первые 3 слова каждого
-            for title in titles[:max_results]:
-                words = title.split()
-                if len(words) >= 2:
-                    keywords.append(" ".join(words[:3]))
-        else:
-            logger.debug("[TrendSources] yt-dlp trending: code=%d", result.returncode)
-    except (subprocess.TimeoutExpired, FileNotFoundError, Exception) as exc:
-        logger.debug("[TrendSources] YouTube Trending ошибка: %s", exc)
+                download=False,
+            )
+        entries = info.get("entries") or []
+        for ent in entries[:max_results]:
+            title = ""
+            if isinstance(ent, dict):
+                title = (ent.get("title") or ent.get("fulltitle") or "").strip()
+            elif isinstance(ent, str):
+                title = ent.strip()
+            if not title:
+                continue
+            words = title.split()
+            if len(words) >= 2:
+                keywords.append(" ".join(words[:3]))
+    except Exception as exc:
+        logger.warning("[TrendSources] YouTube Trending ошибка: %s", exc)
 
     logger.debug("[TrendSources] YouTube Trending: %d ключевых слов", len(keywords))
     return keywords[:max_results]
@@ -121,25 +127,41 @@ def fetch_youtube_trending(max_results: int = 20) -> List[str]:
 
 def fetch_tiktok_trends(max_results: int = 20) -> List[str]:
     """
-    Получает трендовые хэштеги из TikTok Creative Center через публичный API.
+    Трендовые хэштеги TikTok Creative Center (публичный API).
+    Прокси — load_proxy() (тот же mobileproxy / PROXY, что и у пайплайна).
     """
     keywords = []
     try:
-        import urllib.request
-        url = "https://ads.tiktok.com/creative_radar_api/v1/popular_trend/hashtag/list?page=1&limit=50&period=7&country_code=US"
-        req = urllib.request.Request(url, headers={
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/124.0.0.0",
-            "Accept": "application/json",
-            "Referer": "https://ads.tiktok.com/",
-        })
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            import json
-            data = json.loads(resp.read().decode("utf-8"))
-            items = data.get("data", {}).get("list", [])
-            for item in items[:max_results]:
-                tag = item.get("hashtag_name", "")
-                if tag:
-                    keywords.append(tag)
+        import json
+
+        import requests
+
+        from pipeline import utils as u
+
+        url = (
+            "https://ads.tiktok.com/creative_radar_api/v1/popular_trend/hashtag/list"
+            "?page=1&limit=50&period=7&country_code=US"
+        )
+        proxies = u.requests_proxies_from_proxy_url(u.load_proxy())
+        resp = requests.get(
+            url,
+            headers={
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/124.0.0.0",
+                "Accept": "application/json",
+                "Referer": "https://ads.tiktok.com/",
+            },
+            timeout=15,
+            proxies=proxies,
+        )
+        if resp.status_code != 200:
+            logger.debug("[TrendSources] TikTok API HTTP %s", resp.status_code)
+            return keywords[:max_results]
+        data = resp.json()
+        items = data.get("data", {}).get("list", [])
+        for item in items[:max_results]:
+            tag = item.get("hashtag_name", "")
+            if tag:
+                keywords.append(tag)
     except Exception as exc:
         logger.debug("[TrendSources] TikTok Creative Center ошибка: %s", exc)
 

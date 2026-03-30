@@ -17,7 +17,10 @@ import time
 import traceback
 from abc import ABC, abstractmethod
 from enum import Enum, auto
-from typing import Any, Callable, Dict, Optional
+from typing import TYPE_CHECKING, Any, Callable, Dict, Optional
+
+if TYPE_CHECKING:
+    from pipeline.humanize import HumanizeRisk
 
 
 class AgentStatus(Enum):
@@ -132,6 +135,31 @@ class BaseAgent(ABC):
                 return  # агент остановлен
         """
         return not self._stop_event.wait(timeout=seconds)
+
+    def human_pause(
+        self,
+        lo: float,
+        hi: float,
+        *,
+        context: str = "",
+        account_cfg: Optional[Dict[str, Any]] = None,
+        risk: Optional["HumanizeRisk"] = None,
+    ) -> float:
+        """
+        Пауза humanize с agent=self.name и memory=self.memory (уровень из KV / env).
+        """
+        from pipeline.humanize import HumanizeRisk as HR, human_pause as hp
+
+        r = risk if risk is not None else HR.MEDIUM
+        return hp(
+            lo,
+            hi,
+            account_cfg=account_cfg,
+            agent=self.name,
+            memory=self.memory,
+            context=context,
+            risk=r,
+        )
 
     def get_uptime(self) -> Optional[float]:
         """Uptime агента в секундах или None если не запущен."""

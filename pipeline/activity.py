@@ -15,6 +15,7 @@ from pipeline.config import (
     CLICK_DELAY_MIN_SEC, CLICK_DELAY_MAX_SEC,
     PLATFORM_URLS,
 )
+from pipeline.humanize import human_scroll_burst
 from pipeline.utils import human_sleep
 from pipeline.notifications import check_and_handle_captcha
 
@@ -25,17 +26,27 @@ logger = logging.getLogger(__name__)
 # Вспомогательные функции
 # ──────────────────────────────────────────────────────────────
 
-def _random_scroll(page: Page, scrolls: int = None) -> None:
-    """Случайная прокрутка страницы вниз/вверх."""
-    count = scrolls or random.randint(3, 8)
-    for _ in range(count):
-        direction = random.choice([1, 1, 1, -1])       # чаще вниз
-        delta = random.randint(300, 900) * direction
-        page.mouse.wheel(0, delta)
-        time.sleep(random.uniform(0.4, 1.5))
+def _random_scroll(
+    page: Page,
+    scrolls: int = None,
+    *,
+    account_cfg: Optional[Dict] = None,
+) -> None:
+    """Случайная прокрутка страницы вниз/вверх (humanize)."""
+    human_scroll_burst(
+        page,
+        scrolls=scrolls,
+        account_cfg=account_cfg,
+        agent="ACTIVITY",
+    )
 
 
-def _try_like_video(page: Page, platform: str) -> None:
+def _try_like_video(
+    page: Page,
+    platform: str,
+    *,
+    account_cfg: Optional[Dict[str, Any]] = None,
+) -> None:
     """Пытается поставить лайк текущему видео. Молча игнорирует ошибки."""
     selectors = {
         "youtube":   "ytd-toggle-button-renderer#top-level-buttons-computed "
@@ -51,7 +62,7 @@ def _try_like_video(page: Page, platform: str) -> None:
         if btn.is_visible(timeout=3_000):
             btn.click()
             logger.debug(f"[{platform}] Лайк поставлен")
-            human_sleep(1, 3)
+            human_sleep(1, 3, account_cfg=account_cfg, agent="ACTIVITY", context="like_after")
     except Exception:
         pass
 
@@ -69,7 +80,13 @@ def _build_search_keywords(metadata: dict) -> list[str]:
     return bigrams if bigrams else words
 
 
-def _perform_search(page: Page, platform: str, keywords: list[str]) -> None:
+def _perform_search(
+    page: Page,
+    platform: str,
+    keywords: list[str],
+    *,
+    account_cfg: Optional[Dict[str, Any]] = None,
+) -> None:
     """Выполняет один поисковый запрос на основе ключевых слов из метаданных."""
     if not keywords:
         return
@@ -93,18 +110,18 @@ def _perform_search(page: Page, platform: str, keywords: list[str]) -> None:
 
     try:
         page.locator(sel).first.click(timeout=5_000)
-        human_sleep(0.5, 1.5)
+        human_sleep(0.5, 1.5, account_cfg=account_cfg, agent="ACTIVITY", context="search_focus")
         for char in query:
             page.keyboard.type(char)
             time.sleep(random.uniform(0.05, 0.18))
-        human_sleep(0.8, 2.0)
+        human_sleep(0.8, 2.0, account_cfg=account_cfg, agent="ACTIVITY", context="search_typed")
         sub = submit_selectors.get(platform)
         if sub:
             page.locator(sub).click()
         else:
             page.keyboard.press("Enter")
-        human_sleep(2, 4)
-        _random_scroll(page, scrolls=random.randint(2, 5))
+        human_sleep(2, 4, account_cfg=account_cfg, agent="ACTIVITY", context="search_submit")
+        _random_scroll(page, scrolls=random.randint(2, 5), account_cfg=account_cfg)
     except Exception as e:
         logger.warning(f"[{platform}] Поиск не выполнен: {e}")
 
@@ -162,7 +179,7 @@ def run_activity(
 
     try:
         page.goto(feed_url, wait_until="domcontentloaded", timeout=30_000)
-        human_sleep(2, 5)
+        human_sleep(2, 5, account_cfg=acc_cfg, agent="ACTIVITY", context="feed_open")
 
         deadline    = time.time() + duration
         search_done = False
@@ -172,24 +189,30 @@ def run_activity(
         while time.time() < deadline:
             check_and_handle_captcha(page, platform)
 
-            _random_scroll(page)
+            _random_scroll(page, account_cfg=acc_cfg)
 
             watch_time = random.randint(WATCH_TIME_MIN_SEC, WATCH_TIME_MAX_SEC)
             logger.debug(f"[{platform}] Просмотр видео ~{watch_time}с")
             time.sleep(watch_time)
 
             if like_budget > 0 and random.random() < 0.35:
-                _try_like_video(page, platform)
+                _try_like_video(page, platform, account_cfg=acc_cfg)
                 like_budget -= 1
 
             if not search_done and random.random() < 0.4:
-                _perform_search(page, platform, keywords)
+                _perform_search(page, platform, keywords, account_cfg=acc_cfg)
                 search_done = True
-                human_sleep(3, 6)
+                human_sleep(3, 6, account_cfg=acc_cfg, agent="ACTIVITY", context="after_search")
                 page.goto(feed_url, wait_until="domcontentloaded", timeout=30_000)
-                human_sleep(1, 3)
+                human_sleep(1, 3, account_cfg=acc_cfg, agent="ACTIVITY", context="back_to_feed")
 
-            human_sleep(CLICK_DELAY_MIN_SEC, CLICK_DELAY_MAX_SEC)
+            human_sleep(
+                CLICK_DELAY_MIN_SEC,
+                CLICK_DELAY_MAX_SEC,
+                account_cfg=acc_cfg,
+                agent="ACTIVITY",
+                context="activity_tick",
+            )
 
     except Exception as e:
         logger.error(f"[{platform}] Ошибка во время симуляции: {e}")

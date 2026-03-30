@@ -305,6 +305,23 @@ class TestBaseAgentLifecycle:
         # sleep был прерван → вернул False
         assert results and results[0] is False
 
+    def test_human_pause_forwards_to_humanize(self, tmp_path):
+        """BaseAgent.human_pause проксирует в pipeline.humanize с agent=self.name."""
+        from pipeline.agents.base_agent import BaseAgent
+        from pipeline.humanize import HumanizeRisk
+
+        agent = self._make_agent(tmp_path)
+
+        with patch("pipeline.humanize.human_pause", return_value=0.42) as hp:
+            d = agent.human_pause(1.0, 2.0, context="unit", risk=HumanizeRisk.HIGH)
+        assert d == 0.42
+        hp.assert_called_once()
+        kw = hp.call_args.kwargs
+        assert kw["agent"] == "TEST_AGENT"
+        assert kw["memory"] is agent.memory
+        assert kw["context"] == "unit"
+        assert kw["risk"] == HumanizeRisk.HIGH
+
     def test_error_captured(self, tmp_path):
         """Исключение в run() → status ERROR, _last_error заполнен."""
         from pipeline.agents.base_agent import AgentStatus

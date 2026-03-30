@@ -44,6 +44,7 @@ from pipeline.config import (
     CLICK_DELAY_MIN_SEC, CLICK_DELAY_MAX_SEC,
     PLATFORM_URLS, OLLAMA_MODEL, CAPTCHA_WAIT_TIMEOUT_SEC,
 )
+from pipeline.humanize import human_scroll_burst
 from pipeline.utils import human_sleep
 from pipeline.notifications import send_telegram_alert, check_and_handle_captcha
 from pipeline.ai import ollama_generate_with_timeout
@@ -351,16 +352,26 @@ def _handle_captcha_detected(page: Page, platform: str) -> None:
 # Interaction execution (VL decides, CSS executes)
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _scroll_to_rank(page: Page, rank: int) -> None:
+def _scroll_to_rank(
+    page: Page,
+    rank: int,
+    *,
+    account_cfg: Optional[Dict[str, Any]] = None,
+) -> None:
     """Scrolls the page to bring the video at the given rank into view."""
     if rank <= 1:
         return
     scroll_px = random.randint(400, 750) * (rank - 1)
     page.mouse.wheel(0, scroll_px)
-    time.sleep(random.uniform(0.5, 1.2))
+    human_sleep(0.5, 1.2, account_cfg=account_cfg, agent="ACTIVITY_VL", context="scroll_to_rank")
 
 
-def _try_like(page: Page, platform: str) -> bool:
+def _try_like(
+    page: Page,
+    platform: str,
+    *,
+    account_cfg: Optional[Dict[str, Any]] = None,
+) -> bool:
     """Clicks the like button using CSS selector. Returns True on success."""
     sel = _LIKE_SELECTORS.get(platform)
     if not sel:
@@ -369,7 +380,7 @@ def _try_like(page: Page, platform: str) -> bool:
         btn = page.locator(sel).first
         if btn.is_visible(timeout=3_000):
             btn.click()
-            human_sleep(0.5, 1.5)
+            human_sleep(0.5, 1.5, account_cfg=account_cfg, agent="ACTIVITY_VL", context="vl_like")
             logger.debug("[VL][%s] Like clicked", platform)
             return True
     except Exception:
@@ -377,7 +388,13 @@ def _try_like(page: Page, platform: str) -> bool:
     return False
 
 
-def _try_comment(page: Page, platform: str, comment_text: str) -> bool:
+def _try_comment(
+    page: Page,
+    platform: str,
+    comment_text: str,
+    *,
+    account_cfg: Optional[Dict[str, Any]] = None,
+) -> bool:
     """Types and submits a comment. Returns True on success."""
     input_sel = _COMMENT_INPUT_SELECTORS.get(platform)
     submit_sel = _COMMENT_SUBMIT_SELECTORS.get(platform)
@@ -388,16 +405,16 @@ def _try_comment(page: Page, platform: str, comment_text: str) -> bool:
         if not inp.is_visible(timeout=3_000):
             return False
         inp.click()
-        human_sleep(0.3, 0.8)
+        human_sleep(0.3, 0.8, account_cfg=account_cfg, agent="ACTIVITY_VL", context="comment_focus")
         for ch in comment_text:
             page.keyboard.type(ch)
             time.sleep(random.uniform(0.04, 0.12))
-        human_sleep(0.5, 1.5)
+        human_sleep(0.5, 1.5, account_cfg=account_cfg, agent="ACTIVITY_VL", context="comment_typed")
         if submit_sel:
             page.locator(submit_sel).first.click()
         else:
             page.keyboard.press("Enter")
-        human_sleep(1, 2)
+        human_sleep(1, 2, account_cfg=account_cfg, agent="ACTIVITY_VL", context="comment_submit")
         logger.info("[VL][%s] Comment posted: %s", platform, comment_text[:50])
         return True
     except Exception as e:
@@ -411,6 +428,8 @@ def _execute_interactions(
     interactions: List[Dict],
     like_budget: int,
     comment_done: bool,
+    *,
+    account_cfg: Optional[Dict[str, Any]] = None,
 ) -> Tuple[int, bool]:
     """
     Executes VL-decided interactions on the current feed state.
@@ -424,17 +443,17 @@ def _execute_interactions(
         if action == "skip":
             continue
 
-        _scroll_to_rank(page, rank)
-        human_sleep(0.3, 0.8)
+        _scroll_to_rank(page, rank, account_cfg=account_cfg)
+        human_sleep(0.3, 0.8, account_cfg=account_cfg, agent="ACTIVITY_VL", context="vl_after_scroll")
 
         if action == "like" and like_budget > 0:
-            if _try_like(page, platform):
+            if _try_like(page, platform, account_cfg=account_cfg):
                 like_budget -= 1
-                human_sleep(1, 2)
+                human_sleep(1, 2, account_cfg=account_cfg, agent="ACTIVITY_VL", context="vl_after_like")
 
         elif action == "comment" and not comment_done and comment_text:
             safe_comment = _sanitize_comment(comment_text)
-            if safe_comment and _try_comment(page, platform, safe_comment):
+            if safe_comment and _try_comment(page, platform, safe_comment, account_cfg=account_cfg):
                 comment_done = True
             elif not safe_comment:
                 logger.info("[VL][%s] Comment sanitized to empty — skipping", platform)
@@ -446,7 +465,13 @@ def _execute_interactions(
 # Search
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _perform_search(page: Page, platform: str, query: str) -> None:
+def _perform_search(
+    page: Page,
+    platform: str,
+    query: str,
+    *,
+    account_cfg: Optional[Dict[str, Any]] = None,
+) -> None:
     """Performs a search using the VL-suggested query."""
     sel = _SEARCH_INPUT_SELECTORS.get(platform)
     if not sel or not query:
@@ -454,30 +479,35 @@ def _perform_search(page: Page, platform: str, query: str) -> None:
     logger.info("[VL][%s] Searching: «%s»", platform, query)
     try:
         page.locator(sel).first.click(timeout=5_000)
-        human_sleep(0.4, 1.0)
+        human_sleep(0.4, 1.0, account_cfg=account_cfg, agent="ACTIVITY_VL", context="vl_search_focus")
         for ch in query:
             page.keyboard.type(ch)
             time.sleep(random.uniform(0.05, 0.15))
-        human_sleep(0.5, 1.5)
+        human_sleep(0.5, 1.5, account_cfg=account_cfg, agent="ACTIVITY_VL", context="vl_search_typed")
         sub = _SEARCH_SUBMIT_SELECTORS.get(platform)
         if sub:
             page.locator(sub).click()
         else:
             page.keyboard.press("Enter")
-        human_sleep(2, 4)
-        _random_scroll(page, scrolls=random.randint(2, 4))
+        human_sleep(2, 4, account_cfg=account_cfg, agent="ACTIVITY_VL", context="vl_search_submit")
+        _random_scroll(page, scrolls=random.randint(2, 4), account_cfg=account_cfg)
     except Exception as e:
         logger.warning("[VL][%s] Search failed: %s", platform, e)
 
 
-def _random_scroll(page: Page, scrolls: int = None) -> None:
+def _random_scroll(
+    page: Page,
+    scrolls: int = None,
+    *,
+    account_cfg: Optional[Dict[str, Any]] = None,
+) -> None:
     """Random human-like scroll."""
-    count = scrolls or random.randint(3, 7)
-    for _ in range(count):
-        direction = random.choice([1, 1, 1, -1])
-        delta = random.randint(300, 850) * direction
-        page.mouse.wheel(0, delta)
-        time.sleep(random.uniform(0.4, 1.3))
+    human_scroll_burst(
+        page,
+        scrolls=scrolls or random.randint(3, 7),
+        account_cfg=account_cfg,
+        agent="ACTIVITY_VL",
+    )
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -549,7 +579,7 @@ def run_activity_vl(
     page = context.new_page()
     try:
         page.goto(feed_url, wait_until="domcontentloaded", timeout=30_000)
-        human_sleep(2, 4)
+        human_sleep(2, 4, account_cfg=account_cfg, agent="ACTIVITY_VL", context="vl_feed_open")
 
         deadline = time.time() + duration
         like_budget = random.randint(1, 4)
@@ -573,7 +603,7 @@ def run_activity_vl(
                         break
                     # Re-navigate and re-analyze after CAPTCHA
                     page.goto(feed_url, wait_until="domcontentloaded", timeout=30_000)
-                    human_sleep(2, 4)
+                    human_sleep(2, 4, account_cfg=account_cfg, agent="ACTIVITY_VL", context="vl_after_captcha")
                     vl_result = None
                     iteration = 0
                     continue
@@ -584,6 +614,7 @@ def run_activity_vl(
                     page, platform,
                     vl_result["interactions"],
                     like_budget, comment_done,
+                    account_cfg=account_cfg,
                 )
                 vl_result["interactions"] = []  # consume — don't repeat on next loop
 
@@ -594,19 +625,25 @@ def run_activity_vl(
                 and vl_result.get("search_query")
                 and random.random() < 0.5
             ):
-                _perform_search(page, platform, vl_result["search_query"])
+                _perform_search(page, platform, vl_result["search_query"], account_cfg=account_cfg)
                 search_done = True
-                human_sleep(3, 6)
+                human_sleep(3, 6, account_cfg=account_cfg, agent="ACTIVITY_VL", context="vl_after_search")
                 page.goto(feed_url, wait_until="domcontentloaded", timeout=30_000)
-                human_sleep(1, 3)
+                human_sleep(1, 3, account_cfg=account_cfg, agent="ACTIVITY_VL", context="vl_back_feed")
                 vl_result = None  # re-analyze fresh feed after navigation
                 iteration = 0
                 continue
 
-            _random_scroll(page)
+            _random_scroll(page, account_cfg=account_cfg)
             watch_time = random.randint(WATCH_TIME_MIN_SEC, WATCH_TIME_MAX_SEC)
             time.sleep(watch_time)
-            human_sleep(CLICK_DELAY_MIN_SEC, CLICK_DELAY_MAX_SEC)
+            human_sleep(
+                CLICK_DELAY_MIN_SEC,
+                CLICK_DELAY_MAX_SEC,
+                account_cfg=account_cfg,
+                agent="ACTIVITY_VL",
+                context="vl_tick",
+            )
             iteration += 1
 
     except Exception as e:

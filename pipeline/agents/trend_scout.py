@@ -64,42 +64,46 @@ class TrendScout(BaseAgent):
         self._set_status(AgentStatus.RUNNING, "сбор трендов")
         self.set_human_detail("Собираю трендовые ключевые слова из внешних источников")
         try:
-            sources_str = str(getattr(cfg, "TREND_SCOUT_SOURCES", "google,yt,tiktok"))
-            sources = [s.strip() for s in sources_str.split(",") if s.strip()]
-            geo     = str(getattr(cfg, "TREND_SCOUT_GEO", ""))
-            top_n   = int(getattr(cfg, "TREND_SCOUT_TOP_N", 30))
+            from pipeline.pipeline_account_rotation import scout_pipeline_cycle_account
 
-            # Загружаем seed-ключевые слова из файла (для Google Related)
-            seed_keywords = self._load_seed_keywords(cfg)
+            # Тот же LRU/контекст, что у SCOUT → get_ytdlp_cookie_options() видит аккаунт при ротации
+            with scout_pipeline_cycle_account(self.memory):
+                sources_str = str(getattr(cfg, "TREND_SCOUT_SOURCES", "google,yt,tiktok"))
+                sources = [s.strip() for s in sources_str.split(",") if s.strip()]
+                geo     = str(getattr(cfg, "TREND_SCOUT_GEO", ""))
+                top_n   = int(getattr(cfg, "TREND_SCOUT_TOP_N", 30))
 
-            # Опрашиваем источники
-            all_keywords: List[str] = []
-            self._fetch_sources(sources, geo, seed_keywords, all_keywords)
+                # Загружаем seed-ключевые слова из файла (для Google Related)
+                seed_keywords = self._load_seed_keywords(cfg)
 
-            if not all_keywords:
-                logger.info("[TREND_SCOUT] Ни один источник не вернул данные")
-                self._set_status(AgentStatus.IDLE)
-                return
+                # Опрашиваем источники
+                all_keywords: List[str] = []
+                self._fetch_sources(sources, geo, seed_keywords, all_keywords)
 
-            # Взвешиваем по частоте
-            counter = Counter(kw.lower().strip() for kw in all_keywords if kw.strip())
-            trend_scores: Dict[str, int] = dict(counter.most_common(top_n))
+                if not all_keywords:
+                    logger.info("[TREND_SCOUT] Ни один источник не вернул данные")
+                    self._set_status(AgentStatus.IDLE)
+                    return
 
-            # Сохраняем в AgentMemory
-            self.memory.set("trend_scores", trend_scores)
-            self.memory.set("trend_scores_updated_at", __import__("datetime").datetime.utcnow().isoformat())
+                # Взвешиваем по частоте
+                counter = Counter(kw.lower().strip() for kw in all_keywords if kw.strip())
+                trend_scores: Dict[str, int] = dict(counter.most_common(top_n))
 
-            threshold = int(getattr(cfg, "TREND_SCOUT_THRESHOLD", 2))
-            top_trends = {k: v for k, v in trend_scores.items() if v >= threshold}
+                # Сохраняем в AgentMemory
+                self.memory.set("trend_scores", trend_scores)
+                self.memory.set("trend_scores_updated_at", __import__("datetime").datetime.utcnow().isoformat())
 
-            logger.info(
-                "[TREND_SCOUT] Обновлено: %d ключевых слов, %d выше порога %d",
-                len(trend_scores), len(top_trends), threshold,
-            )
+                threshold = int(getattr(cfg, "TREND_SCOUT_THRESHOLD", 2))
+                top_trends = {k: v for k, v in trend_scores.items() if v >= threshold}
 
-            if top_trends:
-                top_str = ", ".join(f"{k}({v})" for k, v in list(top_trends.items())[:10])
-                self._send(f"📈 [TrendScout] Топ-тренды: {top_str}")
+                logger.info(
+                    "[TREND_SCOUT] Обновлено: %d ключевых слов, %d выше порога %d",
+                    len(trend_scores), len(top_trends), threshold,
+                )
+
+                if top_trends:
+                    top_str = ", ".join(f"{k}({v})" for k, v in list(top_trends.items())[:10])
+                    self._send(f"📈 [TrendScout] Топ-тренды: {top_str}")
 
         except Exception as exc:
             logger.error("[TREND_SCOUT] Ошибка сбора трендов: %s", exc, exc_info=True)

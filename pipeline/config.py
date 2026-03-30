@@ -73,6 +73,10 @@ MOBILEPROXY_CHECK_SPAM = os.getenv("MOBILEPROXY_CHECK_SPAM", "1").strip().lower(
 )
 # Ручной маппинг {"US":1,"DE":2} если get_id_country недоступен
 MOBILEPROXY_ISO_TO_ID_JSON = os.getenv("MOBILEPROXY_ISO_TO_ID_JSON", "").strip()
+# Последний успешный HTTP-прокси (fallback, если API недоступен при старте)
+MOBILEPROXY_HTTP_CACHE_FILE = BASE_DIR / "data" / "mobileproxy_http_cache.json"
+# Не дёргать get_my_proxy чаще, чем раз в N секунд на процесс (лимит API 5 с на идентичные запросы)
+MOBILEPROXY_HTTP_MEMORY_TTL_SEC = float(os.getenv("MOBILEPROXY_HTTP_MEMORY_TTL_SEC", "300"))
 # Порядок обхода аккаунтов: сначала батчем по country (меньше смен гео)
 SHORTS_ACCOUNT_ORDER_BY_COUNTRY = os.getenv("SHORTS_ACCOUNT_ORDER_BY_COUNTRY", "1").strip().lower() not in (
     "0",
@@ -89,8 +93,11 @@ COOKIES = {
     "instagram": BASE_DIR / "cookies_instagram.txt",
 }
 
-# yt-dlp: см. get_ytdlp_cookie_options() — Netscape-файл и/или cookies из профиля Playwright (browser_profile).
-
+# yt-dlp / подготовка контента: cookies из профиля залогиненного аккаунта (см. get_ytdlp_cookie_options).
+# Имя папки в accounts/ — тот же источник, что и браузерный поиск в downloader.
+# SHORTS_PIPELINE_ACCOUNT приоритетнее YTDLP_COOKIES_ACCOUNT (если заданы оба — первый).
+# Ротация без фиксированного env: PIPELINE_ACCOUNT_ROTATION=1, опционально PIPELINE_ACCOUNT_POOL=a,b,c;
+# LRU и контекст цикла SCOUT — pipeline/pipeline_account_rotation.py.
 
 def _accounts_root_resolved() -> Path:
     r = Path(ACCOUNTS_ROOT)
@@ -100,16 +107,31 @@ def _accounts_root_resolved() -> Path:
 def _resolve_ytdlp_browser_profile_dir() -> Path | None:
     """
     Профиль Chromium из persistent context (accounts/<имя>/browser_profile).
-    Задаётся через YTDLP_BROWSER_PROFILE (полный путь) или YTDLP_COOKIES_ACCOUNT (имя аккаунта).
+
+    Приоритет имени аккаунта: SHORTS_PIPELINE_ACCOUNT → YTDLP_COOKIES_ACCOUNT
+    → контекст ротации SCOUT (PIPELINE_ACCOUNT_ROTATION).
+    Полный путь вручную: YTDLP_BROWSER_PROFILE.
     """
     explicit = os.getenv("YTDLP_BROWSER_PROFILE", "").strip()
     if explicit:
         p = Path(explicit).expanduser()
         return p if p.is_dir() else None
-    acc = os.getenv("YTDLP_COOKIES_ACCOUNT", "").strip()
+    acc = (
+        os.getenv("SHORTS_PIPELINE_ACCOUNT", "").strip()
+        or os.getenv("YTDLP_COOKIES_ACCOUNT", "").strip()
+    )
     if acc:
         p = _accounts_root_resolved() / acc / "browser_profile"
         return p if p.is_dir() else None
+    try:
+        from pipeline.pipeline_account_rotation import get_active_pipeline_account_name
+
+        rot = get_active_pipeline_account_name()
+        if rot:
+            p = _accounts_root_resolved() / rot / "browser_profile"
+            return p if p.is_dir() else None
+    except Exception:
+        pass
     return None
 
 
@@ -119,8 +141,8 @@ def get_ytdlp_cookie_options() -> dict[str, Any]:
 
     Приоритет:
       1) ``YTDLP_COOKIES_FILE`` в .env — путь к Netscape cookies, если файл существует;
-      2) ``YTDLP_BROWSER_PROFILE`` или ``YTDLP_COOKIES_ACCOUNT`` — каталог browser_profile,
-         ``cookiesfrombrowser`` = (``YTDLP_COOKIES_BROWSER``, путь, None, None);
+      2) ``YTDLP_BROWSER_PROFILE`` или ``SHORTS_PIPELINE_ACCOUNT`` / ``YTDLP_COOKIES_ACCOUNT`` —
+         каталог ``browser_profile`` аккаунта, ``cookiesfrombrowser`` = (``YTDLP_COOKIES_BROWSER``, путь, None, None);
       3) ``cookies_youtube.txt`` в корне проекта, если файл есть (legacy).
     """
     env_file = os.getenv("YTDLP_COOKIES_FILE", "").strip()
@@ -324,6 +346,10 @@ ACTIVITY_SCHEDULER_JITTER_SEC   = int(os.getenv("ACTIVITY_JITTER_SEC",   "300"))
 # Учитывает таймзону аккаунтов — платформы не засчитывают мёртвые ночные часы
 ACTIVITY_HOURS_START    = int(os.getenv("ACTIVITY_HOURS_START", "8"))   # с 08:00
 ACTIVITY_HOURS_END      = int(os.getenv("ACTIVITY_HOURS_END",   "23"))  # до 23:00
+
+# Человечность (pipeline/humanize.py): cautious | normal | aggressive
+# Переопределение агентами: KV humanize_level или humanize_level_<AGENT> в agent_memory.json
+# Доп. множители: HUMANIZE_NIGHT_PAUSE_MULT, HUMANIZE_PEAK_PAUSE_MULT, HUMANIZE_PEAK_HOUR_START/END
 
 # Максимум одновременных VL-сессий активности (ограничивает нагрузку на GPU)
 # При превышении — job переносится на +10 мин вместо блокировки потока

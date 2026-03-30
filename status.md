@@ -6,9 +6,35 @@ https://github.com/NomelLime/ShortsProject
 
 # ShortsProject — Status
 
-**Дата последнего обновления:** 29.03.2026  
+**Дата последнего обновления:** 30.03.2026  
 **Ветка:** `main`  
 **Репозиторий:** `NomelLime/ShortsProject` (private)
+
+---
+
+### Сессия 21 (30.03.2026) — Humanize, ротация pipeline-аккаунта (SCOUT + TREND_SCOUT), правки заливки/профиля
+
+**Цель:** единый уровень «человечности» (KV / env) с учётом локального времени GEO аккаунта; без жёсткого одного `SHORTS_PIPELINE_ACCOUNT` — LRU по пулу аккаунтов для поиска и yt-dlp cookies; длинные антибан-паузы PUBLISHER логируются в AgentMemory.
+
+| Файл | Назначение |
+|------|------------|
+| **`pipeline/humanize.py`** | `HumanizeLevel` / `HumanizeRisk`, `resolve_humanize_level`, `geo_pause_multiplier` (timezone + `ACTIVITY_HOURS_*`, пик/ночь через env `HUMANIZE_*`), `human_pause`, скролл-бёрсты, `log_throttle_wait` для длинных ожиданий. |
+| **`pipeline/utils.py`** | `human_sleep` → humanize; `resolve_pipeline_account_name` учитывает контекст ротации. |
+| **`pipeline/pipeline_account_rotation.py`** | LRU: KV `pipeline_account_scout_lru` в AgentMemory; `scout_pipeline_cycle_account(memory)` — contextvar на поток; пул `PIPELINE_ACCOUNT_POOL` или все `accounts/*/config.json`. Приоритет: env `SHORTS_PIPELINE_ACCOUNT` / `YTDLP_COOKIES_ACCOUNT` (фиксация), иначе ротация при `PIPELINE_ACCOUNT_ROTATION=1`. |
+| **`pipeline/agents/scout.py`** | Цикл поиска в `scout_pipeline_cycle_account`; в `crawl_done` — поле `pipeline_account`. |
+| **`pipeline/agents/trend_scout.py`** | Сбор трендов в том же `scout_pipeline_cycle_account` → `get_ytdlp_cookie_options()` / YouTube Trending видят выбранный аккаунт. |
+| **`pipeline/config.py`** | `_resolve_ytdlp_browser_profile_dir` + fallback на активный контекст ротации; комментарии env ротации. |
+| **`pipeline/profile_manager.py`** | `_profile_humanize_scope` + `_human_pause` через humanize (GEO). |
+| **`pipeline/uploader.py`** | `_uploader_humanize_scope`, `_up_pause`; HIGH перед Publish/Post/Share, CRITICAL после клика; retry backoff остаётся `time.sleep` (лимит humanize на длинные паузы). |
+| **`pipeline/agents/publisher.py`** | `log_throttle_wait` перед антибан `sleep` между заливками. |
+| **`pipeline/activity_vl.py`**, **`pipeline/downloader.py`**, **`pipeline/activity.py`** | Паузы/скролл с `account_cfg` и агентами. |
+| **`pipeline/agents/base_agent.py`** | **`human_pause(lo, hi, …)`** — прокси в `humanize.human_pause` с `agent=self.name`, `memory=self.memory`. |
+| **`pipeline/trend_sources.py`** | Докстринг про cookies при ротации. |
+| **`tests/test_pipeline_account_rotation.py`**, **`tests/test_agents.py`** (BaseAgent human_pause) | Ротация, pinned env, TrendScout touch LRU. |
+
+**Env (доп.):** `PIPELINE_ACCOUNT_ROTATION`, `PIPELINE_ACCOUNT_POOL`; humanize: `SHORTS_HUMANIZE_LEVEL`, `HUMANIZE_PEAK_*`, `HUMANIZE_NIGHT_PAUSE_MULT`, `HUMANIZE_MAX_SINGLE_PAUSE_SEC` и др. (см. `humanize.py` / `config.py`).
+
+**Тесты:** `pytest tests/test_pipeline_account_rotation.py tests/test_profile_manager.py tests/test_activity_vl.py` — ✅ (ключевые модули).
 
 ---
 
