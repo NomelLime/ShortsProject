@@ -294,15 +294,12 @@ def launch_browser(
     ctx_strategies = _get_platform_contexts()
     ctx_strategy = ctx_strategies.get(platform, ctx_strategies["youtube"])
 
-    # Proxy (существующая логика — без изменений)
+    # Proxy обязателен для любого запуска браузера.
     active_proxy = resolve_working_proxy(account_cfg)
-    has_proxy_cfg = bool(
-        account_cfg.get("proxy", {}).get("host") or account_cfg.get("fallback_proxies")
-    )
-    if has_proxy_cfg and active_proxy is None:
+    if active_proxy is None:
         raise RuntimeError(
-            "Все прокси аккаунта недоступны (основной + резервные). "
-            "Запуск браузера отменён."
+            "Прокси обязателен для запуска браузера. "
+            "Настройте proxy/fallback_proxies в аккаунте и убедитесь, что прокси доступен."
         )
     if active_proxy and proxy_ip_registry_enabled(account_cfg):
         ensure_exit_ip_for_account(

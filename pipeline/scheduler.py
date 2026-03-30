@@ -168,7 +168,7 @@ class _AccountActivityJob:
 
         logger.info("[scheduler] Запуск активности: [%s][%s]", acc_name, platform)
         try:
-            pw, context = launch_browser(acc_cfg, profile_dir)
+            pw, context = launch_browser(acc_cfg, profile_dir, platform=platform)
             try:
                 run_activity_vl(context, platform, self._account)
             finally:

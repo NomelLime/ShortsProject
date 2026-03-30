@@ -800,14 +800,15 @@ def setup_all_links(
         if not acquired:
             return {p: False for p in platforms}
 
-        try:
-            pw, context = launch_browser(account_cfg, profile_dir)
-        except Exception as exc:
-            logger.error("[profile] Браузер не запустился: %s", exc)
-            return {p: False for p in platforms}
+        for platform in platforms:
+            try:
+                pw, context = launch_browser(account_cfg, profile_dir, platform=platform)
+            except Exception as exc:
+                logger.error("[profile] Браузер не запустился для %s: %s", platform, exc)
+                results[platform] = False
+                continue
 
-        try:
-            for platform in platforms:
+            try:
                 # Per-platform URL с UTM (приоритет) → fallback на общий prelend_url
                 url_for_platform = prelend_urls.get(platform) or prelend_url
                 platform_bio     = account_cfg.get(f"bio_text_{platform}", bio_text)
@@ -821,8 +822,8 @@ def setup_all_links(
                 logger.info("[profile][%s] %s Ссылка %s", platform, status,
                             "установлена" if ok else "НЕ установлена")
                 _human_pause(3, 6)
-        finally:
-            close_browser(pw, context)
+            finally:
+                close_browser(pw, context)
 
     return results
 
@@ -857,20 +858,21 @@ def verify_all_links(
         if not acquired:
             return {p: False for p in platforms}
 
-        try:
-            pw, context = launch_browser(account_cfg, profile_dir)
-        except Exception as exc:
-            logger.error("[profile] Браузер не запустился для verify: %s", exc)
-            return {p: False for p in platforms}
+        for platform in platforms:
+            try:
+                pw, context = launch_browser(account_cfg, profile_dir, platform=platform)
+            except Exception as exc:
+                logger.error("[profile] Браузер не запустился для verify %s: %s", platform, exc)
+                results[platform] = False
+                continue
 
-        try:
-            for platform in platforms:
+            try:
                 # Per-platform URL с UTM → fallback на общий
                 expected = prelend_urls.get(platform) or prelend_url
                 ok = verify_profile_link(context, platform, expected)
                 results[platform] = ok
                 _human_pause(2, 4)
-        finally:
-            close_browser(pw, context)
+            finally:
+                close_browser(pw, context)
 
     return results

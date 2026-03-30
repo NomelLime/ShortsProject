@@ -26,7 +26,7 @@ _COMMON_ARGS = [
 
 
 class YouTubeContext(BasePlatformContext):
-    """Десктопный контекст для YouTube/Studio."""
+    """Мобильный контекст для YouTube/Studio."""
 
     platform_name = "youtube"
 
@@ -43,9 +43,9 @@ class YouTubeContext(BasePlatformContext):
             "viewport":          fingerprint["viewport"],
             "locale":            fingerprint["locale"],
             "timezone_id":       fingerprint["timezone_id"],
-            "has_touch":         False,
-            "is_mobile":         False,
-            "device_scale_factor": 1.0,
+            "has_touch":         True,
+            "is_mobile":         True,
+            "device_scale_factor": fingerprint["pixel_ratio"],
             "args":              _COMMON_ARGS,
         }
         if proxy_config:

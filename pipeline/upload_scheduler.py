@@ -327,7 +327,7 @@ def _run_upload_for(account: Dict, platform: str) -> None:
 
     profile_dir = acc_dir / "browser_profile"
     try:
-        pw, context = launch_browser(acc_cfg, profile_dir)
+        pw, context = launch_browser(acc_cfg, profile_dir, platform=platform)
     except RuntimeError as exc:
         logger.error("[upload_scheduler] [%s] Прокси недоступен: %s", acc_name, exc)
         send_telegram(f"⚠️ [{acc_name}][{platform}] Прокси недоступен — загрузка пропущена.")

@@ -361,7 +361,7 @@ class Publisher(BaseAgent):
             # Запуск браузера
             logger.info("[PUBLISHER] Запуск браузера: %s / %s", acc_name, platform)
             try:
-                pw, context = launch_browser(acc_cfg, profile_dir)
+                pw, context = launch_browser(acc_cfg, profile_dir, platform=platform)
             except RuntimeError as e:
                 logger.error("[PUBLISHER] Браузер не запущен %s/%s: %s", acc_name, platform, e)
                 if self._guardian:

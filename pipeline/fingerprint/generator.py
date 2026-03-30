@@ -153,8 +153,8 @@ def _generate_ua(platform: str, rng: random.Random) -> tuple[str, str, bool]:
     Returns:
         (user_agent, device_name, is_mobile)
     """
-    if platform in ("tiktok", "instagram"):
-        # Мобильный UA для TikTok/Instagram
+    if platform in ("tiktok", "instagram", "youtube"):
+        # Мобильный UA для всех платформ (единая мобильная стратегия)
         from pipeline.fingerprint.devices import _MOBILE_DEVICES
         device = rng.choice(_MOBILE_DEVICES)
         version = rng.choice(_MOBILE_CHROME_VERSIONS)
