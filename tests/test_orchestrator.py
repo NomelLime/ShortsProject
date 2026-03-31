@@ -143,6 +143,7 @@ def _patched_crew_deps(tmp_path, dir_inst, cmd_inst, gpu):
         patch("pipeline.agents.commander.Commander", lambda *a, **k: cmd_inst),
         patch("pipeline.agents.sentinel.Sentinel", side_effect=_agent_factory("SENTINEL")),
         patch("pipeline.agents.scout.Scout", side_effect=_agent_factory("SCOUT")),
+        patch("pipeline.agents.metrics_scout_platform.MetricsScoutPlatform", side_effect=_agent_factory("METRICS_SCOUT_PLATFORM")),
         patch("pipeline.agents.curator.Curator", side_effect=_agent_factory("CURATOR")),
         patch("pipeline.agents.visionary.Visionary", side_effect=_agent_factory("VISIONARY")),
         patch("pipeline.agents.narrator.Narrator", side_effect=_agent_factory("NARRATOR")),

@@ -92,6 +92,7 @@ def register_upload(
     video_url: str,
     meta: Dict,
     ab_variant: Optional[str] = None,
+    account_name: Optional[str] = None,
 ) -> None:
     """
     Регистрирует факт загрузки видео в analytics.json.
@@ -116,6 +117,7 @@ def register_upload(
         "comments":         None,
         "ab_variant":       ab_variant,
         "prelend_sub_id":   prelend_sub_id,
+        "account_name":     account_name,
     }
 
     _save_analytics(data)

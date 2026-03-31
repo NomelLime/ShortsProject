@@ -37,7 +37,7 @@ _PARSE_PROMPT = """Ты — помощник системы автоматиче
 Формат ответа:
 {{
   "intent": "одно из: start|stop|config|query|add_accounts|set_limits|set_content|restart|status|custom",
-  "targets": ["список агентов которых затрагивает команда, из: SCOUT,CURATOR,VISIONARY,NARRATOR,EDITOR,STRATEGIST,GUARDIAN,PUBLISHER,ACCOUNTANT,SENTINEL,DIRECTOR"],
+  "targets": ["список агентов которых затрагивает команда, из: SCOUT,METRICS_SCOUT_PLATFORM,CURATOR,VISIONARY,NARRATOR,EDITOR,STRATEGIST,GUARDIAN,PUBLISHER,ACCOUNTANT,SENTINEL,DIRECTOR"],
   "params": {{"ключ": "значение", "...": "..."}},
   "risks": ["список потенциальных рисков, пустой массив если нет"],
   "advice": "совет оператору (1-2 предложения, на русском)",
@@ -218,6 +218,20 @@ class Commander(BaseAgent):
         if cmd in ("статус", "status", "/status"):
             return self._status_report()
 
+        if cmd in ("/collect_native_metrics", "collect_native_metrics", "собери нативные метрики"):
+            if not self.director:
+                return "⚠️ DIRECTOR не подключён"
+            agent = self.director.get_agent("METRICS_SCOUT_PLATFORM")
+            if not agent:
+                self.memory.set("metrics_scout_platform_force", True)
+                return "⚠️ METRICS_SCOUT_PLATFORM не найден в реестре. Флаг принудительного запуска установлен."
+            trigger = getattr(agent, "trigger_now", None)
+            if callable(trigger):
+                trigger()
+                return "✅ METRICS_SCOUT_PLATFORM: запуск сбора нативных метрик запрошен."
+            self.memory.set("metrics_scout_platform_force", True)
+            return "✅ Флаг принудительного сбора установлен."
+
         if cmd in ("помощь", "help", "/help", "?"):
             return self._help_text()
 
@@ -276,7 +290,7 @@ class Commander(BaseAgent):
         # Валидация — не доверяем LLM-ответу напрямую
         VALID_INTENTS = {"start", "stop", "config", "query", "add_accounts",
                          "set_limits", "set_content", "restart", "status", "custom"}
-        VALID_TARGETS = {"SCOUT", "CURATOR", "VISIONARY", "NARRATOR", "EDITOR",
+        VALID_TARGETS = {"SCOUT", "METRICS_SCOUT_PLATFORM", "CURATOR", "VISIONARY", "NARRATOR", "EDITOR",
                          "STRATEGIST", "GUARDIAN", "PUBLISHER", "ACCOUNTANT",
                          "SENTINEL", "DIRECTOR"}
         if parsed.get("intent") not in VALID_INTENTS:
@@ -433,5 +447,6 @@ class Commander(BaseAgent):
             "• `установи лимит X видео/день` — изменить лимиты\n"
             "• `публикуй только [тема] контент` — фильтр контента\n"
             "• `перезапусти [АГЕНТ]` — перезапустить агента\n\n"
+            "• `/collect_native_metrics` — принудительный сбор нативных метрик\n\n"
             "Или пиши свободным текстом — Ollama разберёт 🤖"
         )

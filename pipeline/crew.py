@@ -27,6 +27,7 @@ from pipeline.agents.gpu_manager import get_gpu_manager
 from pipeline.agents.director   import Director
 from pipeline.agents.commander  import Commander
 from pipeline.agents.scout      import Scout
+from pipeline.agents.metrics_scout_platform import MetricsScoutPlatform
 from pipeline.agents.curator    import Curator
 from pipeline.agents.visionary  import Visionary
 from pipeline.agents.narrator   import Narrator
@@ -42,7 +43,7 @@ logger = logging.getLogger(__name__)
 
 class ShortsProjectCrew:
     """
-    Полная система из 12 агентов.
+    Полная система из 13 агентов.
 
     Агенты знают друг о друге там где нужна координация:
       - EDITOR    знает VISIONARY (генерация мета)
@@ -63,6 +64,7 @@ class ShortsProjectCrew:
         # ── Инициализация агентов ─────────────────────────────────────
         self.sentinel   = Sentinel(memory=self.memory,   notify=notify)
         self.scout      = Scout(memory=self.memory,      notify=notify)
+        self.metrics_scout_platform = MetricsScoutPlatform(memory=self.memory, notify=notify)
         self.curator    = Curator(memory=self.memory,    notify=notify)
         self.visionary  = Visionary(memory=self.memory,  notify=notify)
         self.narrator   = Narrator(memory=self.memory,   notify=notify)
@@ -101,6 +103,7 @@ class ShortsProjectCrew:
         for agent in [
             self.sentinel,    # первым — мониторинг
             self.scout,       # поиск контента
+            self.metrics_scout_platform,  # нативные метрики платформ
             self.curator,     # фильтрация
             self.visionary,   # AI метаданные
             self.narrator,    # TTS
@@ -112,7 +115,7 @@ class ShortsProjectCrew:
         ]:
             self.director.register(agent)
 
-        logger.info("[CREW] 12 агентов инициализированы")
+        logger.info("[CREW] 13 агентов инициализированы")
 
     # ------------------------------------------------------------------
     # Управление системой
@@ -129,7 +132,7 @@ class ShortsProjectCrew:
         if self._notify:
             self._notify(
                 "🚀 <b>ShortsProject запущен!</b>\n"
-                "12 агентов активны. Напиши <code>статус</code> для проверки."
+                "13 агентов активны. Напиши <code>статус</code> для проверки."
             )
         logger.info("[CREW] Система запущена ✓")
 

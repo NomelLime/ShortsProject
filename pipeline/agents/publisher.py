@@ -436,6 +436,7 @@ class Publisher(BaseAgent):
                         video_url=video_url,
                         meta=meta,
                         ab_variant=meta.get("ab_variant"),
+                        account_name=acc_name,
                     )
                     if self._guardian:
                         self._guardian.report_upload_success(acc_name, platform)

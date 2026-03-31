@@ -12,6 +12,31 @@ https://github.com/NomelLime/ShortsProject
 
 ---
 
+### Сессия 23 (31.03.2026) — Новый агент `METRICS_SCOUT_PLATFORM` (native metrics + COMMANDER trigger)
+
+**Цель:** отдельный агент нативного сбора метрик из залогиненных аккаунтов (`accounts/*`) через тот же прокси/антидетект/человечность, что в существующем браузерном контуре.
+
+| Файл | Изменение |
+|------|-----------|
+| **`pipeline/agents/metrics_scout_platform.py`** (NEW) | Новый агент **`METRICS_SCOUT_PLATFORM`**: цикл по умолчанию `24ч`, принудительный запуск через memory-flag, сбор до 20 последних видео на платформу + top-3 популярных (по views, fallback likes+comments), запись в `analytics.json` блок `platform_native_metrics`, cooldown `24ч` при рисках (`captcha/challenge/login invalid/proxy`). |
+| **`pipeline/config.py`** | Добавлены env: `METRICS_SCOUT_PLATFORM_ENABLED`, `METRICS_SCOUT_PLATFORM_INTERVAL_H`, `METRICS_SCOUT_PLATFORM_COOLDOWN_H`. |
+| **`pipeline/agents/director.py`** | В `BOOT_ORDER` добавлен `METRICS_SCOUT_PLATFORM`. |
+| **`pipeline/crew.py`** | Агент добавлен в инициализацию/регистрацию Crew; обновлено сообщение запуска (13 агентов). |
+| **`pipeline/agents/commander.py`** | Добавлен быстрый триггер `/collect_native_metrics` для принудительного запуска сбора; target allowlist дополнен `METRICS_SCOUT_PLATFORM`; help-текст обновлён. |
+| **`pipeline/analytics.py`**, **`pipeline/agents/publisher.py`** | `register_upload(..., account_name=...)`; Publisher передаёт `acc_name` при регистрации загрузки, чтобы native collector фильтровал видео по владельцу аккаунта. |
+
+**Структура `analytics.json` (новый блок):**
+- `platform_native_metrics.updated_at`
+- `platform_native_metrics.cooldowns`
+- `platform_native_metrics.by_platform.<platform>.recent_20`
+- `platform_native_metrics.by_platform.<platform>.top_popular_3`
+
+**Telegram:** краткий summary по top-3 видео в каждом доступном platform-блоке.
+
+**Тесты:** `pytest tests/test_orchestrator.py -q` — ✅ (9/9)
+
+---
+
 ### Сессия 22 (31.03.2026) — JIT locale-pack по аккаунту (полная локаль), prime-time fallback, совместимость агентов
 
 **Цель:** после уникализации видео выполнять языковую подготовку **по факту реального слота загрузки** (just-in-time), с группировкой по **полной локали** аккаунта (`pt-BR` ≠ `pt-PT`) и без перемонтажа видеоряда (меняется только языковая упаковка: meta/TTS/subtitles).

@@ -23,6 +23,7 @@ logger = logging.getLogger(__name__)
 BOOT_ORDER = [
     "SENTINEL",     # мониторинг — первым
     "SCOUT",        # поиск контента
+    "METRICS_SCOUT_PLATFORM",  # нативные метрики платформ
     "CURATOR",      # фильтрация
     "VISIONARY",    # метаданные
     "NARRATOR",     # TTS

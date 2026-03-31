@@ -559,6 +559,13 @@ TREND_SCOUT_GEO        = os.getenv("TREND_SCOUT_GEO", "")                # "" = 
 TREND_SCOUT_SOURCES    = os.getenv("TREND_SCOUT_SOURCES", "google,yt,tiktok")
 
 # ----------------------------------------------------------------------
+# METRICS_SCOUT_PLATFORM — нативный сбор метрик из залогиненных кабинетов
+# ----------------------------------------------------------------------
+METRICS_SCOUT_PLATFORM_ENABLED = os.getenv("METRICS_SCOUT_PLATFORM_ENABLED", "1") == "1"
+METRICS_SCOUT_PLATFORM_INTERVAL_H = int(os.getenv("METRICS_SCOUT_PLATFORM_INTERVAL_H", "24"))
+METRICS_SCOUT_PLATFORM_COOLDOWN_H = int(os.getenv("METRICS_SCOUT_PLATFORM_COOLDOWN_H", "24"))
+
+# ----------------------------------------------------------------------
 # Субтитры + перевод (Этап 8)
 # ----------------------------------------------------------------------
 SUBTITLE_ENABLED       = os.getenv("SUBTITLE_ENABLED",    "0") == "1"
