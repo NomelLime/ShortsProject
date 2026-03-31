@@ -40,6 +40,7 @@ from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Tuple
 
 from pipeline import config, utils
+from pipeline.content_locale import resolve_content_locale_for_account
 from pipeline.notifications import send_telegram
 
 logger = logging.getLogger(__name__)
@@ -50,6 +51,19 @@ _DEFAULT_UPLOAD_TIMES_STR = os.getenv("UPLOAD_TIMES", "09:00,19:00")
 DEFAULT_UPLOAD_TIMES: List[str] = [
     t.strip() for t in _DEFAULT_UPLOAD_TIMES_STR.split(",") if t.strip()
 ]
+
+# Дефолтные прайм-тайм окна по локали аккаунта (если нет кастомного и smart-данных).
+_LOCALE_PRIME_TIMES: Dict[str, List[str]] = {
+    "ru-RU": ["18:00", "21:00"],
+    "en-US": ["12:00", "19:00"],
+    "en-GB": ["18:00", "21:00"],
+    "es-ES": ["19:00", "22:00"],
+    "es-419": ["19:00", "22:00"],
+    "pt-BR": ["18:00", "21:00"],
+    "pt-PT": ["19:00", "22:00"],
+    "de-DE": ["18:00", "21:00"],
+    "fr-FR": ["18:00", "21:00"],
+}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -126,6 +140,19 @@ def get_account_upload_times(account_cfg: Dict, platform: str) -> List[str]:
         if smart:
             return smart
 
+    # 3. Базовый prime-time по locale аккаунта (полная локаль -> язык).
+    try:
+        loc = resolve_content_locale_for_account(account_cfg or {})
+        if loc in _LOCALE_PRIME_TIMES:
+            return _LOCALE_PRIME_TIMES[loc]
+        base = (loc or "").split("-")[0].lower()
+        for k, times in _LOCALE_PRIME_TIMES.items():
+            if k.lower().split("-")[0] == base:
+                return times
+    except Exception:
+        pass
+
+    # 4. Глобальный fallback.
     return DEFAULT_UPLOAD_TIMES
 
 
@@ -277,6 +304,7 @@ def _run_upload_for(account: Dict, platform: str) -> None:
     """
     from pipeline.browser import launch_browser, close_browser
     from pipeline.uploader import upload_video, clean_video_metadata
+    from pipeline.locale_packaging import prepare_locale_pack_for_upload
     from pipeline.activity import run_activity
     from pipeline.session_manager import ensure_session_fresh, mark_session_verified
     from pipeline.analytics import register_upload
@@ -374,10 +402,17 @@ def _run_upload_for(account: Dict, platform: str) -> None:
             video_path = item["video_path"]
             # A/B: берём назначенный вариант если есть
             meta       = item.get("ab_meta") or item["meta"]
-            clean_path = clean_video_metadata(video_path)
+
+            localized_video, localized_meta = prepare_locale_pack_for_upload(
+                video_path=Path(video_path),
+                base_meta=dict(meta or {}),
+                account_cfg=acc_cfg,
+                platform=platform,
+            )
+            clean_path = clean_video_metadata(localized_video)
 
             video_url = upload_video(
-                context, platform, clean_path, meta,
+                context, platform, clean_path, localized_meta,
                 account_name=acc_name, account_cfg=acc_cfg,
             )
 
@@ -389,8 +424,8 @@ def _run_upload_for(account: Dict, platform: str) -> None:
                     video_stem=Path(video_path).stem,
                     platform=platform,
                     video_url=video_url,
-                    meta=meta,
-                    ab_variant=meta.get("ab_variant"),
+                    meta=localized_meta,
+                    ab_variant=localized_meta.get("ab_variant"),
                 )
                 logger.info("[upload_scheduler] ✅ [%s][%s] %s", acc_name, platform, video_path.name)
             else:

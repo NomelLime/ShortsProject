@@ -31,6 +31,7 @@ from pipeline.session_manager import ensure_session_fresh, mark_session_verified
 from pipeline.analytics import register_upload
 from pipeline.quarantine import is_quarantined, mark_error as q_mark_error, mark_success as q_mark_success
 from pipeline.upload_warmup import is_upload_blocked, is_upload_warmup_active
+from pipeline.locale_packaging import prepare_locale_pack_for_upload
 
 logger = logging.getLogger(__name__)
 
@@ -105,6 +106,64 @@ def _try_get_url(page: Page, selectors: list[str], base: str = "") -> str:
         except Exception:
             continue
     return ""
+
+
+def _locale_from_meta(meta: Dict) -> str:
+    return str((meta or {}).get("content_locale") or "en-US")
+
+
+def _localized_texts(meta: Dict, key: str) -> List[str]:
+    loc = _locale_from_meta(meta).lower()
+    base = loc.split("-")[0]
+    words: Dict[str, Dict[str, List[str]]] = {
+        "next": {
+            "en": ["Next"],
+            "ru": ["Далее", "Следующий"],
+            "es": ["Siguiente"],
+            "pt": ["Avançar", "Próximo"],
+            "de": ["Weiter"],
+            "fr": ["Suivant"],
+        },
+        "share": {
+            "en": ["Share"],
+            "ru": ["Поделиться"],
+            "es": ["Compartir"],
+            "pt": ["Compartilhar"],
+            "de": ["Teilen"],
+            "fr": ["Partager"],
+        },
+        "post": {
+            "en": ["Post"],
+            "ru": ["Опубликовать"],
+            "es": ["Publicar"],
+            "pt": ["Publicar"],
+            "de": ["Posten"],
+            "fr": ["Publier"],
+        },
+        "reels": {
+            "en": ["Reels"],
+            "ru": ["Reels"],
+            "es": ["Reels"],
+            "pt": ["Reels"],
+            "de": ["Reels"],
+            "fr": ["Reels"],
+        },
+        "select_from_computer": {
+            "en": ["Select from computer"],
+            "ru": ["Выбрать с компьютера"],
+            "es": ["Seleccionar desde la computadora"],
+            "pt": ["Selecionar do computador"],
+            "de": ["Vom Computer auswählen"],
+            "fr": ["Sélectionner depuis l'ordinateur"],
+        },
+    }
+    lang_words = words.get(key, {})
+    return lang_words.get(base, lang_words.get("en", []))
+
+
+def _btn_has_text_selector(text: str) -> str:
+    safe = str(text).replace("\\", "\\\\").replace("'", "\\'")
+    return f"button:has-text('{safe}')"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -293,8 +352,10 @@ def _upload_tiktok(page: Page, video_path: Path, meta: Dict) -> str:
         _up_pause(0.5, 1.5, ctx="tiktok_after_caption")
 
     _up_pause(0.7, 1.3, ctx="tiktok_before_post", risk=HumanizeRisk.HIGH)
-    for sel in ["button.btn-post", "button[data-e2e='post_video_button']",
-                "button:has-text('Post')"]:
+    post_selectors = ["button.btn-post", "button[data-e2e='post_video_button']"]
+    for txt in _localized_texts(meta, "post"):
+        post_selectors.append(_btn_has_text_selector(txt))
+    for sel in post_selectors:
         try:
             if page.locator(sel).first.is_visible(timeout=5_000):
                 page.locator(sel).first.click(); break
@@ -361,7 +422,8 @@ def _upload_instagram(page: Page, video_path: Path, meta: Dict) -> str:
     try:
         page.locator("input[type='file']").first.set_input_files(str(video_path))
     except Exception:
-        for sel in ["button:has-text('Select from computer')"]:
+        sc_selectors = [_btn_has_text_selector(x) for x in _localized_texts(meta, "select_from_computer")]
+        for sel in sc_selectors:
             try:
                 with page.expect_file_chooser() as fc:
                     page.locator(sel).first.click()
@@ -371,15 +433,20 @@ def _upload_instagram(page: Page, video_path: Path, meta: Dict) -> str:
     _up_pause(2, 4, ctx="ig_after_file")
 
     try:
-        if page.locator("button:has-text('Reels')").first.is_visible(timeout=5_000):
-            page.locator("button:has-text('Reels')").first.click()
-            _up_pause(0.85, 1.15, ctx="ig_reels_select")
+        for reels_txt in _localized_texts(meta, "reels"):
+            reels_sel = _btn_has_text_selector(reels_txt)
+            if page.locator(reels_sel).first.is_visible(timeout=5_000):
+                page.locator(reels_sel).first.click()
+                _up_pause(0.85, 1.15, ctx="ig_reels_select")
+                break
     except Exception:
         pass
 
     for _ in range(3):
         try:
-            btn = page.locator("button:has-text('Next'), [aria-label='Next']").first
+            next_selectors = [_btn_has_text_selector(x) for x in _localized_texts(meta, "next")]
+            next_selectors.append("[aria-label='Next']")
+            btn = page.locator(", ".join(next_selectors)).first
             if btn.is_visible(timeout=5_000):
                 btn.click()
                 _up_pause(1, 2, ctx="ig_wizard_next")
@@ -401,7 +468,9 @@ def _upload_instagram(page: Page, video_path: Path, meta: Dict) -> str:
         _up_pause(0.5, 1.5, ctx="ig_after_caption")
 
     _up_pause(0.7, 1.3, ctx="ig_before_share", risk=HumanizeRisk.HIGH)
-    for sel in ["button:has-text('Share')", "button:has-text('Поделиться')", "[aria-label='Share']"]:
+    share_selectors = [_btn_has_text_selector(x) for x in _localized_texts(meta, "share")]
+    share_selectors += ["[aria-label='Share']", "button:has-text('Поделиться')"]
+    for sel in share_selectors:
         try:
             if page.locator(sel).first.is_visible(timeout=5_000):
                 page.locator(sel).first.click(); break
@@ -632,9 +701,17 @@ def upload_all(dry_run: bool = False) -> List[Dict]:
                         meta["prelend_url"] = (
                             prelend_urls.get("youtube") or acc_cfg.get("prelend_url", "")
                         )
-                    clean_path = clean_video_metadata(video_path)
+
+                    # JIT locale-pack: подготавливаем языковую версию только если есть слот загрузки.
+                    localized_video, localized_meta = prepare_locale_pack_for_upload(
+                        video_path=Path(video_path),
+                        base_meta=dict(meta or {}),
+                        account_cfg=acc_cfg,
+                        platform=platform,
+                    )
+                    clean_path = clean_video_metadata(localized_video)
                     video_url  = upload_video(
-                        context, platform, clean_path, meta,
+                        context, platform, clean_path, localized_meta,
                         account_name=acc_name, account_cfg=acc_cfg,
                     )
 
@@ -647,8 +724,8 @@ def upload_all(dry_run: bool = False) -> List[Dict]:
                             video_stem=Path(video_path).stem,
                             platform=platform,
                             video_url=video_url,
-                            meta=meta,
-                            ab_variant=meta.get("ab_variant"),
+                            meta=localized_meta,
+                            ab_variant=localized_meta.get("ab_variant"),
                         )
                         if config.PRELEND_AUTO_LINK and video_url:
                             try:

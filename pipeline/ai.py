@@ -30,6 +30,7 @@ from pipeline.utils import probe_video, save_json
 from pipeline.content_locale import (
     FALLBACK_CONTENT_LOCALE,
     content_language_name_for_prompt,
+    locale_language_code,
     normalize_content_locale,
     platform_meta_hint_line,
     resolve_content_locale_for_account,
@@ -1202,7 +1203,7 @@ def generate_video_metadata(
                     video_path,
                     model_size=config.META_WHISPER_MODEL,
                     max_duration_sec=config.META_WHISPER_MAX_SEC,
-                    language=config.META_WHISPER_LANGUAGE,
+                    language=(config.META_WHISPER_LANGUAGE or locale_language_code(resolved)),
                 )
                 if transcript:
                     transcript_hint = f"Speech transcript: \"{transcript}\"\n"
@@ -1663,10 +1664,19 @@ def _fallback_meta(
     """Возвращает заглушку метаданных при недоступном AI."""
     if ms is None:
         ms = _locale_meta_strings(content_locale)
+    base_lang = locale_language_code(content_locale)
+    tags_by_lang = {
+        "ru": ["шортс", "видео", "момент"],
+        "es": ["shorts", "video", "momento"],
+        "pt": ["shorts", "video", "momento"],
+        "de": ["shorts", "video", "moment"],
+        "fr": ["shorts", "video", "moment"],
+        "en": ["shorts", "video", "moment"],
+    }
     base = {
         "title":           ms["fallback_title"],
         "description":     ms["fallback_desc"],
-        "tags":            ["shorts", "video", "moment"],
+        "tags":            tags_by_lang.get(base_lang, tags_by_lang["en"]),
         "thumbnail_idea":  ms["fallback_thumb"],
         "hook_text":       "",
         "best_segment":    None,

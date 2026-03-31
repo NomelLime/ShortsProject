@@ -889,7 +889,9 @@ class Editor(BaseAgent):
         import json as _json
 
         try:
-            accounts_root = _cfg.SP_ACCOUNTS_DIR
+            accounts_root = Path(_cfg.ACCOUNTS_ROOT)
+            if not accounts_root.is_absolute():
+                accounts_root = Path(_cfg.BASE_DIR) / accounts_root
             if not accounts_root.exists():
                 return ""
 
@@ -929,7 +931,9 @@ class Editor(BaseAgent):
         import json as _json
 
         try:
-            accounts_root = _cfg.SP_ACCOUNTS_DIR
+            accounts_root = Path(_cfg.ACCOUNTS_ROOT)
+            if not accounts_root.is_absolute():
+                accounts_root = Path(_cfg.BASE_DIR) / accounts_root
             if not accounts_root.exists():
                 return None
             vp = str(video_path.resolve())

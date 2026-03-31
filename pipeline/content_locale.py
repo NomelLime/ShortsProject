@@ -90,9 +90,17 @@ def normalize_content_locale(s: str) -> str:
     return f"{lang}-{region}"
 
 
+def locale_language_code(content_locale: str) -> str:
+    """
+    Возвращает базовый код языка из BCP-47 locale: "pt-BR" -> "pt".
+    """
+    loc = normalize_content_locale(content_locale or FALLBACK_CONTENT_LOCALE)
+    return loc.split("-")[0].lower()
+
+
 def content_language_name_for_prompt(content_locale: str) -> str:
     """Короткое имя языка для инструкций к LLM (английский текст инструкции)."""
-    base = (content_locale or FALLBACK_CONTENT_LOCALE).split("-")[0].lower()
+    base = locale_language_code(content_locale or FALLBACK_CONTENT_LOCALE)
     names = {
         "en": "English",
         "ru": "Russian",

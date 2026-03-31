@@ -71,6 +71,29 @@ def add_subtitles(
     return _process_clip(clip_path, source_lang, target_lang, model_size, style_name)
 
 
+def add_subtitles_for_lang(
+    clip_path: Path,
+    target_lang: str,
+    source_lang: str = "auto",
+) -> Path:
+    """
+    Добавляет hardsub субтитры для конкретного языка (без глобального списка).
+    Используется для JIT-подготовки ролика под locale аккаунта.
+    """
+    from pipeline import config as cfg
+
+    if not getattr(cfg, "SUBTITLE_ENABLED", False):
+        return clip_path
+
+    lang = (target_lang or "").strip().lower()
+    if not lang:
+        return clip_path
+
+    model_size = str(getattr(cfg, "WHISPER_MODEL_SIZE", "base"))
+    style_name = str(getattr(cfg, "SUBTITLE_STYLE", "bottom_white"))
+    return _process_clip(clip_path, source_lang, lang, model_size, style_name)
+
+
 def add_subtitles_multi(
     clip_path: Path,
     source_lang: str = "auto",
