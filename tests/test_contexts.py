@@ -60,10 +60,10 @@ class TestYouTubeContext:
     def test_platform_name(self):
         assert self.ctx.platform_name == "youtube"
 
-    def test_not_mobile(self):
+    def test_mobile_mode(self):
         kwargs = self.ctx.build_launch_kwargs(Path("/tmp"), self.fp, None)
-        assert kwargs["is_mobile"] is False
-        assert kwargs["has_touch"] is False
+        assert kwargs["is_mobile"] is True
+        assert kwargs["has_touch"] is True
 
     def test_user_agent_in_kwargs(self):
         kwargs = self.ctx.build_launch_kwargs(Path("/tmp"), self.fp, None)
@@ -131,12 +131,12 @@ class TestInstagramContext:
 
 
 class TestPlatformSpecificFingerprints:
-    def test_tiktok_mobile_youtube_desktop_different_viewports(self):
-        """TikTok и YouTube имеют разные viewport'ы."""
+    def test_tiktok_and_youtube_are_mobile(self):
+        """TikTok и YouTube используют мобильные fingerprint-профили."""
         fp_yt = _make_fp("youtube")
         fp_tt = _make_fp("tiktok")
-        # TikTok мобильный — более узкий viewport
-        assert fp_tt["viewport"]["width"] < fp_yt["viewport"]["width"]
+        assert fp_tt["is_mobile"] is True
+        assert fp_yt["is_mobile"] is True
 
     def test_tiktok_webgl_from_mobile_pool(self):
         """TikTok использует мобильные WebGL профили."""
@@ -144,7 +144,8 @@ class TestPlatformSpecificFingerprints:
         mobile_vendors = {"Qualcomm", "ARM"}
         assert fp["webgl_vendor"] in mobile_vendors
 
-    def test_youtube_webgl_from_desktop_pool(self):
-        """YouTube использует десктопные WebGL профили."""
+    def test_youtube_webgl_from_mobile_pool(self):
+        """YouTube использует мобильные WebGL профили (единая mobile-стратегия)."""
         fp = _make_fp("youtube")
-        assert "Google Inc." in fp["webgl_vendor"]
+        mobile_vendors = {"Qualcomm", "ARM"}
+        assert fp["webgl_vendor"] in mobile_vendors

@@ -20,6 +20,28 @@ def test_proxy_cfg_to_http_url_with_auth():
     assert "u1" in u
 
 
+def test_proxy_cfg_to_url_socks5():
+    u = utils.proxy_cfg_to_url(
+        {
+            "host": "bproxy.site",
+            "port": 14284,
+            "username": "u1",
+            "password": "p1",
+            "scheme": "socks5h",
+        }
+    )
+    assert u.startswith("socks5h://")
+    assert "@bproxy.site:14284" in u
+
+
+def test_proxy_url_to_cfg_socks5():
+    cfg = utils.proxy_url_to_cfg("socks5h://u1:p1@bproxy.site:14284")
+    assert cfg is not None
+    assert cfg["scheme"] == "socks5h"
+    assert cfg["host"] == "bproxy.site"
+    assert cfg["port"] == 14284
+
+
 def test_load_proxy_env_wins(monkeypatch):
     monkeypatch.setenv("PROXY", "http://override:9")
     assert utils.load_proxy() == "http://override:9"

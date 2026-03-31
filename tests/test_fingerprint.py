@@ -45,12 +45,12 @@ class TestGenerateFingerprint:
         for field in required:
             assert field in fp, f"Поле '{field}' отсутствует"
 
-    def test_youtube_is_desktop(self):
-        """YouTube — всегда десктоп."""
+    def test_youtube_is_mobile(self):
+        """YouTube — мобильный (единая mobile-стратегия)."""
         fp = _gen.generate_fingerprint(platform="youtube")
-        assert fp["is_mobile"] is False
-        assert fp["max_touch_points"] == 0
-        assert "Mobile" not in fp["user_agent"]
+        assert fp["is_mobile"] is True
+        assert fp["max_touch_points"] > 0
+        assert "Mobile" in fp["user_agent"]
 
     def test_tiktok_is_mobile(self):
         """TikTok — всегда мобильный."""
@@ -159,8 +159,8 @@ class TestEnsureFingerprint:
         fp_tt = _gen.ensure_fingerprint(config, "tiktok",  "US")
         # Должны быть разные объекты
         assert fp_yt is not fp_tt
-        # YouTube — десктоп, TikTok — мобильный
-        assert fp_yt["is_mobile"] is False
+        # YouTube и TikTok — мобильные в текущей стратегии
+        assert fp_yt["is_mobile"] is True
         assert fp_tt["is_mobile"] is True
 
 

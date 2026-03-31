@@ -24,6 +24,7 @@ imagehash
 
 # Утилиты
 requests
+PySocks
 python-json-logger>=2.0.0
 python-dotenv
 portalocker       # кросс-процессные GPU-блокировки (пакет shared_gpu_lock)

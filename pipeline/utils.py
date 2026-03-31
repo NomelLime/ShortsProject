@@ -229,22 +229,53 @@ def load_keywords() -> List[str]:
     return out
 
 
-def proxy_cfg_to_http_url(proxy_cfg: dict) -> str:
+def proxy_cfg_to_url(proxy_cfg: dict) -> str:
     """
-    Строка URL для yt-dlp и Playwright (поле server) из dict
-    host / port / username / password.
+    Строка URL прокси из dict host/port/username/password/scheme.
+    scheme по умолчанию: http.
     """
     from urllib.parse import quote
 
     host = proxy_cfg["host"]
     port = int(proxy_cfg.get("port", 8080))
+    scheme = (proxy_cfg.get("scheme") or "http").strip().lower()
     user = (proxy_cfg.get("username") or "").strip()
     pwd = (proxy_cfg.get("password") or "").strip()
     if user:
         return (
-            f"http://{quote(user, safe='')}:{quote(pwd, safe='')}@{host}:{port}"
+            f"{scheme}://{quote(user, safe='')}:{quote(pwd, safe='')}@{host}:{port}"
         )
-    return f"http://{host}:{port}"
+    return f"{scheme}://{host}:{port}"
+
+
+def proxy_cfg_to_http_url(proxy_cfg: dict) -> str:
+    """
+    Backward-compatible alias: строит URL прокси из dict.
+    """
+    return proxy_cfg_to_url(proxy_cfg)
+
+
+def proxy_url_to_cfg(proxy_url: str) -> Optional[Dict[str, Any]]:
+    """
+    Разбирает URL прокси (http/socks5/socks5h) в dict.
+    """
+    from urllib.parse import unquote, urlparse
+
+    raw = (proxy_url or "").strip()
+    if not raw:
+        return None
+    p = urlparse(raw)
+    scheme = (p.scheme or "").lower().strip()
+    if scheme not in ("http", "https", "socks5", "socks5h"):
+        return None
+    if not p.hostname or not p.port:
+        return None
+    out: Dict[str, Any] = {"host": p.hostname, "port": int(p.port), "scheme": scheme}
+    if p.username:
+        out["username"] = unquote(p.username)
+    if p.password:
+        out["password"] = unquote(p.password)
+    return out
 
 
 def _accounts_root_path() -> Path:
@@ -318,7 +349,7 @@ def load_proxy() -> Optional[str]:
 
     Приоритет:
       1. Переменная окружения PROXY (явный override).
-      2. Иначе — HTTP-прокси из mobileproxy API (MOBILEPROXY_API_KEY + MOBILEPROXY_PROXY_ID)
+      2. Иначе — прокси из mobileproxy API (MOBILEPROXY_API_KEY + MOBILEPROXY_PROXY_ID)
          и кэш data/mobileproxy_http_cache.json (см. mobileproxy_connection).
     """
     explicit = (os.environ.get("PROXY") or "").strip()
@@ -329,7 +360,7 @@ def load_proxy() -> Optional[str]:
 
         p = fetch_mobileproxy_http_proxy(force_refresh=False, use_cache_on_api_fail=True)
         if p and p.get("host"):
-            return proxy_cfg_to_http_url(p)
+            return proxy_cfg_to_url(p)
     except Exception as exc:
         logger.debug("load_proxy: mobileproxy недоступен: %s", exc)
     return None
@@ -344,36 +375,24 @@ def check_proxy_health(proxy_cfg: dict, timeout: int = 10) -> bool:
 
     Возвращает True если прокси отвечает, False если недоступен.
     """
-    import urllib.request
-    import urllib.error
+    import requests
 
     if not proxy_cfg or not proxy_cfg.get("host"):
         return True  # прокси не настроен — считаем OK
 
     host = proxy_cfg["host"]
     port = proxy_cfg.get("port", 8080)
-    username = proxy_cfg.get("username", "")
-    password = proxy_cfg.get("password", "")
-
-    # URL без учётных данных — не встраиваем пароль в строку URL
-    proxy_url = f"http://{host}:{port}"
-    proxy_handler = urllib.request.ProxyHandler({"http": proxy_url, "https": proxy_url})
-
-    if username:
-        password_mgr = urllib.request.HTTPPasswordMgrWithDefaultRealm()
-        password_mgr.add_password(None, proxy_url, username, password)
-        auth_handler = urllib.request.ProxyBasicAuthHandler(password_mgr)
-        opener = urllib.request.build_opener(proxy_handler, auth_handler)
-    else:
-        opener = urllib.request.build_opener(proxy_handler)
+    proxy_url = proxy_cfg_to_url(proxy_cfg)
+    proxies = {"http": proxy_url, "https": proxy_url}
 
     try:
-        req = urllib.request.Request(
+        _ = requests.get(
             "http://httpbin.org/ip",
             headers={"User-Agent": "Mozilla/5.0"},
+            proxies=proxies,
+            timeout=timeout,
         )
-        with opener.open(req, timeout=timeout):
-            return True
+        return True
     except Exception as exc:
         get_logger("utils").warning(
             "Прокси %s:%s недоступен: %s", host, port, exc
@@ -386,33 +405,22 @@ def fetch_exit_ip_via_proxy(proxy_cfg: dict, timeout: float = 15.0) -> Optional[
     Внешний IPv4/IPv6 через HTTP-прокси (httpbin.org/ip).
     Используется реестром exit-IP без импорта browser.py.
     """
-    import json as _json
-    import urllib.request
+    import requests
 
     if not proxy_cfg or not proxy_cfg.get("host"):
         return None
-    host = proxy_cfg["host"]
-    port = proxy_cfg.get("port", 8080)
-    username = proxy_cfg.get("username", "")
-    password = proxy_cfg.get("password", "")
-    proxy_url = f"http://{host}:{port}"
-    proxy_handler = urllib.request.ProxyHandler({"http": proxy_url, "https": proxy_url})
-    if username:
-        password_mgr = urllib.request.HTTPPasswordMgrWithDefaultRealm()
-        password_mgr.add_password(None, proxy_url, username, password)
-        auth_handler = urllib.request.ProxyBasicAuthHandler(password_mgr)
-        opener = urllib.request.build_opener(proxy_handler, auth_handler)
-    else:
-        opener = urllib.request.build_opener(proxy_handler)
+    proxy_url = proxy_cfg_to_url(proxy_cfg)
+    proxies = {"http": proxy_url, "https": proxy_url}
     try:
-        req = urllib.request.Request(
+        resp = requests.get(
             "http://httpbin.org/ip",
             headers={"User-Agent": "Mozilla/5.0"},
+            proxies=proxies,
+            timeout=timeout,
         )
-        with opener.open(req, timeout=timeout) as resp:
-            data = _json.loads(resp.read().decode())
-            origin = data.get("origin", "") or ""
-            return origin.split(",")[0].strip() or None
+        data = resp.json()
+        origin = data.get("origin", "") or ""
+        return origin.split(",")[0].strip() or None
     except Exception as exc:
         get_logger("utils").debug("fetch_exit_ip_via_proxy: %s", exc)
         return None

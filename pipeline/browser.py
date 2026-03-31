@@ -4,9 +4,8 @@ browser.py – Инициализация браузера с поддержко
 """
 
 import logging
+import os
 import time
-import urllib.request
-import json as _json
 from pathlib import Path
 from typing import List, Optional
 from rebrowser_playwright.sync_api import sync_playwright, BrowserContext, Playwright
@@ -44,43 +43,14 @@ def get_proxy_country(proxy: dict, timeout: int = 8) -> Optional[str]:
     if key in _geo_cache:
         return _geo_cache[key]
 
-    host = proxy.get("host", "")
-    port = proxy.get("port", 8080)
-    username = proxy.get("username", "")
-    password = proxy.get("password", "")
-
-    proxy_url = f"http://{host}:{port}"
-    proxy_handler = urllib.request.ProxyHandler({"http": proxy_url, "https": proxy_url})
-
-    if username:
-        password_mgr = urllib.request.HTTPPasswordMgrWithDefaultRealm()
-        password_mgr.add_password(None, proxy_url, username, password)
-        auth_handler = urllib.request.ProxyBasicAuthHandler(password_mgr)
-        opener = urllib.request.build_opener(proxy_handler, auth_handler)
-    else:
-        opener = urllib.request.build_opener(proxy_handler)
-
     try:
-        # Шаг 1: получаем внешний IP через прокси
-        req_ip = urllib.request.Request(
-            "http://httpbin.org/ip",
-            headers={"User-Agent": "Mozilla/5.0"},
-        )
-        with opener.open(req_ip, timeout=timeout) as resp:
-            ip_data = _json.loads(resp.read().decode())
-            external_ip = ip_data.get("origin", "").split(",")[0].strip()
-
+        # Шаг 1: получаем внешний IP через прокси (http/socks5)
+        external_ip = utils.fetch_exit_ip_via_proxy(proxy, timeout=float(timeout))
         if not external_ip:
             return None
 
-        # Шаг 2: определяем страну по IP (ip-api.com — 1500 req/min, бесплатно)
-        geo_req = urllib.request.Request(
-            f"http://ip-api.com/json/{external_ip}?fields=countryCode",
-            headers={"User-Agent": "Mozilla/5.0"},
-        )
-        with urllib.request.urlopen(geo_req, timeout=timeout) as resp:
-            geo_data = _json.loads(resp.read().decode())
-            country = geo_data.get("countryCode", "").upper()
+        # Шаг 2: определяем страну по IP.
+        country = utils.fetch_country_for_ip(external_ip, timeout=float(timeout))
 
         if country:
             _geo_cache[key] = country
@@ -96,8 +66,9 @@ def _build_proxy_config(proxy: dict) -> dict | None:
     """Формирует словарь прокси для Playwright из конфига аккаунта."""
     if not proxy or not proxy.get("host"):
         return None
+    scheme = (proxy.get("scheme") or "http").strip().lower()
     proxy_cfg = {
-        "server": f"http://{proxy['host']}:{proxy['port']}",
+        "server": f"{scheme}://{proxy['host']}:{proxy['port']}",
     }
     if proxy.get("username"):
         proxy_cfg["username"] = proxy["username"]
@@ -128,6 +99,12 @@ def resolve_working_proxy(account_cfg: dict) -> dict | None:
       }
     """
     candidates: list[dict] = []
+
+    # Явный override для всей инфраструктуры (http/socks5/socks5h)
+    explicit_proxy_url = (os.getenv("PROXY") or "").strip()
+    explicit_proxy_cfg = utils.proxy_url_to_cfg(explicit_proxy_url or "")
+    if explicit_proxy_cfg and explicit_proxy_cfg.get("host"):
+        candidates.append(explicit_proxy_cfg)
 
     primary = account_cfg.get("proxy", {})
     if primary and primary.get("host"):

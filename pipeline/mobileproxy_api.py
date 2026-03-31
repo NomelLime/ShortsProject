@@ -53,7 +53,21 @@ def _api_get(command: str, **params: Any) -> Optional[Dict[str, Any]]:
             logger.warning("[mobileproxy_api] %s HTTP %s", command, resp.status_code)
             return None
         data = resp.json()
-        if str(data.get("status", "")).lower() != "ok":
+        # Некоторые команды (например get_my_proxy) могут вернуть массив вместо объекта.
+        # Нормализуем ответ к dict, чтобы код ниже работал единообразно.
+        if isinstance(data, list):
+            if command == "get_my_proxy":
+                return {"status": "ok", "proxy_id": data}
+            logger.warning("[mobileproxy_api] %s unexpected list response", command)
+            return None
+        if not isinstance(data, dict):
+            logger.warning(
+                "[mobileproxy_api] %s unexpected response type: %s",
+                command,
+                type(data).__name__,
+            )
+            return None
+        if "status" in data and str(data.get("status", "")).lower() != "ok":
             logger.warning("[mobileproxy_api] %s: %s", command, str(data)[:200])
             return None
         return data
