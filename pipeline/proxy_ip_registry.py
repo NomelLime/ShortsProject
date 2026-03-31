@@ -117,6 +117,11 @@ def clear_proxy_session_caches() -> None:
 
 
 def _rotate_once(change_url: str) -> tuple[bool, Optional[str]]:
+    from urllib.parse import urlparse
+    parsed = urlparse(change_url)
+    if parsed.scheme not in ("http", "https"):
+        logger.error("[proxy_ip_registry] невалидная схема rotate URL: %s", parsed.scheme)
+        return False, None
     try:
         resp = requests.get(
             change_url,
