@@ -6,9 +6,39 @@ https://github.com/NomelLime/ShortsProject
 
 # ShortsProject — Status
 
-**Дата последнего обновления:** 30.03.2026  
+**Дата последнего обновления:** 31.03.2026  
 **Ветка:** `main`  
 **Репозиторий:** `NomelLime/ShortsProject` (private)
+
+---
+
+### Сессия 22 (31.03.2026) — JIT locale-pack по аккаунту (полная локаль), prime-time fallback, совместимость агентов
+
+**Цель:** после уникализации видео выполнять языковую подготовку **по факту реального слота загрузки** (just-in-time), с группировкой по **полной локали** аккаунта (`pt-BR` ≠ `pt-PT`) и без перемонтажа видеоряда (меняется только языковая упаковка: meta/TTS/subtitles).
+
+| Файл | Назначение |
+|------|------------|
+| **`pipeline/locale_packaging.py`** | Новый JIT-модуль подготовки ролика под аккаунт/платформу: `prepare_locale_pack_for_upload()`; локализует метаданные через `generate_video_metadata(content_locale=...)`, формирует target-версию видео под locale, кэширует по ключу `video+platform+locale`. |
+| **`pipeline/uploader.py`** | Подключён JIT locale-pack перед `upload_video()` (только когда слот уже есть). Добавлены locale-aware текстовые селекторы для UI fallback (`Post/Next/Share/...`) на базе `meta["content_locale"]`. |
+| **`pipeline/upload_scheduler.py`** | Аналогичное подключение JIT locale-pack в scheduled upload. Добавлен fallback прайм-тайм по локали аккаунта (`_LOCALE_PRIME_TIMES`) после custom/smart расписания. |
+| **`pipeline/subtitler.py`** | Добавлен `add_subtitles_for_lang(...)` — таргетированные субтитры для конкретного языка локали (вместо только глобального `SUBTITLE_LANGUAGES`). |
+| **`pipeline/content_locale.py`** | Добавлен helper `locale_language_code(...)` для извлечения базового языка из BCP-47 локали. |
+| **`pipeline/ai.py`** | `META_WHISPER_LANGUAGE`: если глобально не задан, берётся из языка `content_locale`; fallback-теги локализованы по языку локали. |
+| **`pipeline/agents/editor.py`** | Исправлен путь аккаунтов: вместо `SP_ACCOUNTS_DIR` используется рабочий `ACCOUNTS_ROOT` (с корректным absolute resolve), чтобы не терять `country/content_locale`. |
+
+**Принятые правила реализации (по обсуждению):**
+- Сначала уникализация/вариативность видеоряда, затем JIT-языковая упаковка на upload-слоте.
+- Группировка по полной локали аккаунта.
+- При одинаковой локали версия переиспользуется из JIT-кэша.
+- `hook_text` и `overlays` входят в языковую упаковку и локализуются.
+- Если локаль определить нельзя — fallback `en-US`.
+
+**Проверки:**
+- `python -m py_compile` по изменённым файлам — ✅
+- Lints по изменённым файлам — ✅
+- `pytest tests/test_agents.py -q` — **44/44** ✅
+- Smoke `ShortsProjectCrew` (инициализация/остановка агентов) — ✅
+- Lightweight smoke JIT (без реальных аккаунтов): для `country=RU` и `country=ES` созданы отдельные locale meta-cache (`*.ru-RU.jit_meta.json`, `*.es-ES.jit_meta.json`), повторный вызов для RU переиспользует кэш — ✅
 
 ---
 
