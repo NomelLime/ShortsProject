@@ -8,6 +8,11 @@
   — ротация до успеха по стране аккаунта;
   — глобальная блокировка (файл + очередь ожидания ОС) на смену IP.
 
+Смена IP (proxy_change_ip_url) — только exit на той же линии; change_equipment
+(смена страны) внутри цикла ротации не вызывается. Перед циклом один раз
+выравнивается линия под ISO аккаунта. После каждой ротации IP при необходимости
+дополнительно выравнивается линия на тот же ISO, если exit оказался не в GEO.
+
 Включение: SHORTS_PROXY_IP_REGISTRY=1 или MOBILEPROXY_CHANGE_IP_URL,
   либо MOBILEPROXY_API_KEY + MOBILEPROXY_PROXY_ID.
 """
@@ -154,6 +159,39 @@ def _country_matches(account_cfg: dict, exit_ip: Optional[str]) -> bool:
     return bool(cc and cc == req)
 
 
+def _realign_line_if_exit_country_mismatch(account_cfg: dict, active_proxy: dict) -> None:
+    """
+    После proxy_change_ip_url: если exit не в стране аккаунта — change_equipment
+    на тот же ISO (целевой GEO не меняется, только линия под него).
+    """
+    if not config.MOBILEPROXY_REALIGN_LINE_AFTER_IP_ROTATE:
+        return
+    if not mobileproxy_geo_enabled(account_cfg):
+        return
+    iso = (account_cfg.get("country") or "").strip().upper()
+    if len(iso) != 2:
+        return
+    ip = utils.fetch_exit_ip_via_proxy(active_proxy, timeout=25.0)
+    if not ip or _country_matches(account_cfg, ip):
+        return
+    logger.warning(
+        "[proxy_ip_registry] После ротации IP exit %s не в GEO «%s» — выравнивание линии (тот же ISO)",
+        ip,
+        iso,
+    )
+    from pipeline.mobileproxy_api import ensure_equipment_country_for_iso
+
+    ensure_equipment_country_for_iso(iso)
+    clear_proxy_session_caches()
+    _invalidate_browser_geo_cache(active_proxy)
+    from pipeline.mobileproxy_connection import fetch_mobileproxy_http_proxy
+
+    fresh = fetch_mobileproxy_http_proxy(force_refresh=True, use_cache_on_api_fail=False)
+    if fresh and isinstance(active_proxy, dict):
+        active_proxy.clear()
+        active_proxy.update(fresh)
+
+
 def _invalidate_browser_geo_cache(proxy_cfg: dict) -> None:
     from pipeline import browser as browser_mod
 
@@ -203,11 +241,42 @@ def ensure_exit_ip_for_account(
             _invalidate_browser_geo_cache(active_proxy)
 
 
-def _do_rotate(change_url: str, active_proxy: dict) -> None:
+def _do_rotate(
+    change_url: str,
+    active_proxy: dict,
+    account_cfg: Optional[dict] = None,
+) -> bool:
+    """Ротация только exit-IP (тот же GEO-тариф линии). Возвращает успех HTTP rotate."""
     ok_rot, _ = _rotate_once(change_url)
     if ok_rot:
         time.sleep(config.PROXY_IP_POST_ROTATE_PAUSE_SEC)
     _invalidate_browser_geo_cache(active_proxy)
+    if account_cfg is not None:
+        _realign_line_if_exit_country_mismatch(account_cfg, active_proxy)
+    return ok_rot
+
+
+def rotate_exit_ip_preserving_country(account_cfg: dict, active_proxy: dict) -> bool:
+    """
+    Одна ротация exit-IP через proxy_change_ip_url без смены страны аккаунта.
+
+    Используйте, если внешний «чекер»/сайт отклоняет IP, а IPGuardian ещё «зелёный»:
+    сначала эта функция, при необходимости — clear_remembered_exit_ip + повторный
+    ensure_exit_ip_for_account. Смена страны (другой ISO) здесь не выполняется.
+    """
+    change_url = get_change_ip_url()
+    if not change_url:
+        logger.warning("[proxy_ip_registry] rotate_exit_ip_preserving_country: нет URL смены IP")
+        return False
+    return _do_rotate(change_url, active_proxy, account_cfg=account_cfg)
+
+
+def clear_remembered_exit_ip(account_id: str) -> None:
+    """Удаляет запомненный exit из реестра (чтобы подобрать новый IP при следующем ensure)."""
+    reg = _load_registry()
+    acc = reg.setdefault("accounts", {})
+    acc.pop(account_id, None)
+    _save_registry(reg)
 
 
 def _ensure_under_lock(
@@ -252,7 +321,7 @@ def _ensure_under_lock(
             "[proxy_ip_registry] %s: IP в спам-базе IPGuardian — ротация",
             account_id,
         )
-        _do_rotate(change_url, active_proxy)
+        _do_rotate(change_url, active_proxy, account_cfg)
         total_rotations += 1
         return True
 
@@ -295,19 +364,19 @@ def _ensure_under_lock(
                 accounts[account_id] = {"ip": cur_ip}
                 _save_registry(reg)
                 return
-            _do_rotate(change_url, active_proxy)
+            _do_rotate(change_url, active_proxy, account_cfg)
             total_rotations += 1
             continue
 
         # 3) Страна не совпала — ротация до успеха (политика пользователя)
         if required_country and cur_ip and not country_ok:
-            _do_rotate(change_url, active_proxy)
+            _do_rotate(change_url, active_proxy, account_cfg)
             total_rotations += 1
             continue
 
         # 4) Фаза sticky: вернуться к запомненному IP
         if remembered and sticky_tries < max_sticky and cur_ip != remembered:
-            _do_rotate(change_url, active_proxy)
+            _do_rotate(change_url, active_proxy, account_cfg)
             total_rotations += 1
             sticky_tries += 1
             continue
@@ -333,12 +402,12 @@ def _ensure_under_lock(
                 accounts[account_id] = {"ip": cur_ip}
                 _save_registry(reg)
                 return
-            _do_rotate(change_url, active_proxy)
+            _do_rotate(change_url, active_proxy, account_cfg)
             total_rotations += 1
             continue
 
         # 6) Нет IP или прочие случаи — крутим дальше
-        _do_rotate(change_url, active_proxy)
+        _do_rotate(change_url, active_proxy, account_cfg)
         total_rotations += 1
 
     raise RuntimeError(

@@ -163,13 +163,16 @@ def verify_mobileproxy_for_new_account(country_iso: str) -> bool:
     from pipeline.mobileproxy_api import (
         ensure_equipment_country_for_iso,
         invalidate_my_proxy_cache,
-        resolve_iso_to_id_country,
+        iso_supported_by_mobileproxy,
+        swap_to_fresh_equipment_same_iso,
     )
 
-    if resolve_iso_to_id_country(iso) is None:
+    if not iso_supported_by_mobileproxy(iso):
         print(
-            "  ❌ Не найден id_country для ISO «%s». Задайте MOBILEPROXY_ISO_TO_ID_JSON "
-            "или проверьте get_id_country в API." % iso
+            "  ❌ ISO «%s» не входит в список стран mobileproxy.space "
+            "(command=get_id_country, см. %s). "
+            "Задайте MOBILEPROXY_ISO_TO_ID_JSON или выберите код из ответа API."
+            % (iso, config.MOBILEPROXY_API_DOCS_URL)
         )
         return False
 
@@ -191,12 +194,117 @@ def verify_mobileproxy_for_new_account(country_iso: str) -> bool:
 
     from pipeline.utils import check_proxy_health
     from pipeline.browser import get_proxy_country
+    from pipeline.proxy_ip_registry import get_change_ip_url, rotate_exit_ip_preserving_country
 
-    if not check_proxy_health(proxy):
-        print("  ❌ Прокси недоступен (проверка httpbin через HTTP). Аккаунт не создан.")
+    setup_timeout = float(getattr(config, "MOBILEPROXY_VERIFY_SETUP_TIMEOUT_SEC", 90.0))
+    retry_pause = float(getattr(config, "MOBILEPROXY_VERIFY_SETUP_RETRY_PAUSE_SEC", 15.0))
+    extra_pause = float(getattr(config, "MOBILEPROXY_VERIFY_SETUP_EXTRA_PAUSE_SEC", 10.0))
+    max_rounds = max(1, int(getattr(config, "MOBILEPROXY_VERIFY_SETUP_ROTATE_ATTEMPTS", 4)))
+    rotate_pause = float(getattr(config, "MOBILEPROXY_VERIFY_SETUP_ROTATE_PAUSE_SEC", 12.0))
+    swap_max = max(1, int(getattr(config, "MOBILEPROXY_VERIFY_SETUP_EQUIPMENT_SWAP_ATTEMPTS", 4)))
+    swap_pause = float(getattr(config, "MOBILEPROXY_VERIFY_SETUP_EQUIPMENT_SWAP_PAUSE_SEC", 15.0))
+
+    can_rotate_ip = bool(get_change_ip_url())
+    rounds = max_rounds if can_rotate_ip else 1
+    account_cfg_min = {"country": iso}
+    healthy = False
+
+    for swap_i in range(swap_max):
+        # Первая итерация: пауза после ensure_equipment; далее — новое оборудование
+        # задаётся в конце предыдущей итерации (см. блок после внутреннего цикла).
+        if swap_i == 0 and extra_pause > 0:
+            print(
+                f"  … Пауза {extra_pause:.0f}s после смены линии перед проверкой HTTP…"
+            )
+            time.sleep(extra_pause)
+
+        for round_i in range(rounds):
+            healthy = check_proxy_health(proxy, timeout=setup_timeout)
+            if not healthy:
+                print(
+                    f"  … Повторная проверка прокси через {retry_pause:.0f}s "
+                    "(мобильная линия после смены гео может отвечать дольше обычного)…"
+                )
+                time.sleep(retry_pause)
+                invalidate_mobileproxy_http_cache()
+                proxy = fetch_mobileproxy_http_proxy(force_refresh=True, use_cache_on_api_fail=False)
+                if not proxy:
+                    print(
+                        "  ❌ Не удалось обновить параметры прокси после ожидания. "
+                        "Аккаунт не создан."
+                    )
+                    return False
+                healthy = check_proxy_health(proxy, timeout=setup_timeout)
+
+            if healthy:
+                break
+
+            if round_i + 1 >= rounds:
+                break
+
+            print(
+                "  … Ротация exit-IP в том же GEO (proxy_change_ip_url) — "
+                f"попытка {round_i + 2}/{rounds}…"
+            )
+            if not rotate_exit_ip_preserving_country(account_cfg_min, proxy):
+                print(
+                    "  ⚠ Ротация exit-IP не удалась — переходим к смене оборудования "
+                    "в том же GEO (если остались попытки)."
+                )
+                break
+            invalidate_my_proxy_cache()
+            invalidate_mobileproxy_http_cache()
+            proxy = fetch_mobileproxy_http_proxy(force_refresh=True, use_cache_on_api_fail=False)
+            if not proxy:
+                print(
+                    "  ⚠ После ротации не удалось получить параметры прокси — "
+                    "пробуем смену оборудования."
+                )
+                break
+            if rotate_pause > 0:
+                time.sleep(rotate_pause)
+
+        if healthy:
+            break
+
+        # Проверка/ротации IP исчерпаны — смена оборудования (тот же id_country), затем новый круг
+        if swap_i + 1 >= swap_max:
+            break
+
+        print(
+            "  … Смена оборудования в том же GEO (change_equipment + add_to_black_list, "
+            "см. https://mobileproxy.space/user.html?api)…"
+        )
+        if not swap_to_fresh_equipment_same_iso(iso):
+            print(
+                "  ❌ Не удалось сменить оборудование в том же GEO (mobileproxy API). "
+                "Аккаунт не создан."
+            )
+            return False
+        invalidate_my_proxy_cache()
+        invalidate_mobileproxy_http_cache()
+        proxy = fetch_mobileproxy_http_proxy(force_refresh=True, use_cache_on_api_fail=False)
+        if not proxy:
+            print(
+                "  ❌ После смены оборудования не удалось получить параметры прокси. "
+                "Аккаунт не создан."
+            )
+            return False
+        if swap_pause > 0:
+            time.sleep(swap_pause)
+
+    if not healthy:
+        print(
+            "  ❌ Прокси недоступен (проверка HTTP через MOBILEPROXY_PROXY_HEALTH_CHECK_URLS). "
+            f"Увеличьте MOBILEPROXY_VERIFY_SETUP_TIMEOUT_SEC (сейчас {setup_timeout:.0f}s), "
+            "MOBILEPROXY_VERIFY_CONNECT_TIMEOUT_SEC, MOBILEPROXY_VERIFY_SETUP_EQUIPMENT_SWAP_ATTEMPTS "
+            f"(сейчас {swap_max}), MOBILEPROXY_VERIFY_SETUP_ROTATE_ATTEMPTS (сейчас {max_rounds}). "
+            "Аккаунт не создан."
+        )
         return False
 
-    gc = get_proxy_country(proxy)
+    geo_timeout = int(max(setup_timeout, 15.0))
+    gc = get_proxy_country(proxy, timeout=geo_timeout)
     if not gc:
         print(
             "  ❌ Не удалось определить страну выхода прокси (GEO). "

@@ -25,6 +25,8 @@ import shutil
 import sys
 from pathlib import Path
 
+from pipeline import config as project_config
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Утилиты ввода
@@ -81,6 +83,38 @@ def _ask_choice(prompt: str, choices: list[str], multi: bool = False) -> list[st
     return selected if multi else selected[:1]
 
 
+def _mobileproxy_supported_iso_set() -> frozenset[str] | None:
+    """
+    ISO2 из маппинга MOBILEPROXY (get_id_country + MOBILEPROXY_ISO_TO_ID_JSON).
+    None — нет ключей в .env, продолжать нельзя.
+    Пустой frozenset — список из API пуст; страну всё равно спрашиваем, проверка ниже.
+    """
+    from pipeline.mobileproxy_connection import mobileproxy_env_configured
+    from pipeline.mobileproxy_api import list_supported_iso2_codes
+
+    if not mobileproxy_env_configured():
+        print(
+            "  ❌ Задайте в .env MOBILEPROXY_API_KEY и MOBILEPROXY_PROXY_ID.\n"
+            f"     Документация API: {project_config.MOBILEPROXY_API_DOCS_URL}"
+        )
+        return None
+    codes = list_supported_iso2_codes()
+    if not codes:
+        print(
+            "  ⚠ Список стран из API пуст (get_id_country не распознан или нет ключей). "
+            "Задайте MOBILEPROXY_ISO_TO_ID_JSON или проверьте ключ API.\n"
+            "     Введите целевой ISO ниже — проверка будет при шаге прокси.\n"
+            f"     Справка: {project_config.MOBILEPROXY_API_DOCS_URL}"
+        )
+        return frozenset()
+    print(
+        "  Разрешённые ISO для смены линии (mobileproxy.space, command=get_id_country):"
+    )
+    for i in range(0, len(codes), 16):
+        print("    " + ", ".join(codes[i : i + 16]))
+    return frozenset(codes)
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Сборка конфига
 # ─────────────────────────────────────────────────────────────────────────────
@@ -118,13 +152,24 @@ def build_config() -> tuple[str, dict] | tuple[None, None]:
     # 3. Страна аккаунта (обязательно; GEO + mobileproxy API)
     print()
     print("  Страна аккаунта — обязательный ISO-код (прокси и отпечаток под это ГЕО).")
+    supported_iso = _mobileproxy_supported_iso_set()
+    if supported_iso is None:
+        return None, None
+
     country = ""
     while not country:
         country_raw = _ask("Страна (ISO, напр: US, DE, GB)", default="").upper().strip()
-        if len(country_raw) == 2 and country_raw.isalpha():
-            country = country_raw
-        else:
+        if len(country_raw) != 2 or not country_raw.isalpha():
             print("  ⚠ Нужен двухбуквенный латинский код ISO, например US.")
+            continue
+        if supported_iso and country_raw not in supported_iso:
+            print(
+                f"  ⚠ ISO «{country_raw}» нет в списке стран MOBILEPROXY для вашей линии. "
+                "Выберите код из списка выше или добавьте пару в MOBILEPROXY_ISO_TO_ID_JSON.\n"
+                f"     Документация: {project_config.MOBILEPROXY_API_DOCS_URL}"
+            )
+            continue
+        country = country_raw
     print(f"  ✓ Страна: {country}")
 
     # 4. Прокси: только mobileproxy API (get_my_proxy), без ручного host/port

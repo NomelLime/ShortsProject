@@ -51,7 +51,7 @@ def test_first_clean_ip_assigned(reg_path, proxy_cfg, monkeypatch):
     monkeypatch.setattr(config, "SHORTS_PROXY_IP_REGISTRY", True)
     monkeypatch.setattr(config, "MOBILEPROXY_CHANGE_IP_URL", "https://change.test/rot")
     monkeypatch.setattr(
-        "pipeline.proxy_ip_registry.mobileproxy_geo_enabled", lambda **_: False
+        "pipeline.proxy_ip_registry.mobileproxy_geo_enabled", lambda *a, **k: False
     )
     monkeypatch.setattr(config, "PROXY_IP_MAX_ROTATIONS", 20)
     monkeypatch.setattr(config, "PROXY_IP_MAX_STICKY_ATTEMPTS", 5)
@@ -76,7 +76,7 @@ def test_sticky_hits_remembered_after_rotate(reg_path, proxy_cfg, monkeypatch):
     monkeypatch.setattr(config, "SHORTS_PROXY_IP_REGISTRY", True)
     monkeypatch.setattr(config, "MOBILEPROXY_CHANGE_IP_URL", "https://change.test/rot")
     monkeypatch.setattr(
-        "pipeline.proxy_ip_registry.mobileproxy_geo_enabled", lambda **_: False
+        "pipeline.proxy_ip_registry.mobileproxy_geo_enabled", lambda *a, **k: False
     )
     monkeypatch.setattr(config, "PROXY_IP_MAX_ROTATIONS", 30)
     monkeypatch.setattr(config, "PROXY_IP_MAX_STICKY_ATTEMPTS", 10)

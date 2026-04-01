@@ -51,8 +51,34 @@ MOBILEPROXY_API_KEY = os.getenv("MOBILEPROXY_API_KEY", "").strip()
 MOBILEPROXY_PROXY_ID = os.getenv("MOBILEPROXY_PROXY_ID", "").strip()
 MOBILEPROXY_CHANGE_IP_URL = os.getenv("MOBILEPROXY_CHANGE_IP_URL", "").strip()
 MOBILEPROXY_API_BASE = os.getenv("MOBILEPROXY_API_BASE", "https://mobileproxy.space/api.html").strip()
-# Лимит доки API: идентичные запросы не чаще 5 с; пауза после смены IP (сеть)
+# Документация API (get_id_country, change_equipment и т.д.)
+MOBILEPROXY_API_DOCS_URL = os.getenv(
+    "MOBILEPROXY_API_DOCS_URL",
+    "https://mobileproxy.space/user.html?api",
+).strip()
+# Ограничения API (https://mobileproxy.space/user.html?api — Restrictions):
+# - идентичные запросы не чаще 1 раза в 5 с («Too many lonely requests. Timeout 5 second»);
+# - не более 3×(число активных прокси) запросов/с («Too many requests per second», HTTP 429);
+# - ссылка смены IP (changeip) — без лимита 3 req/s.
+# Минимальный интервал между любыми вызовами api.html в процессе (страховка от 429).
 MOBILEPROXY_API_MIN_INTERVAL_SEC = float(os.getenv("MOBILEPROXY_API_MIN_INTERVAL_SEC", "5.0"))
+# Пауза перед повтором при HTTP 429 / rate limit (согласно сообщению про 5 s)
+MOBILEPROXY_API_RETRY_ON_429_SEC = float(os.getenv("MOBILEPROXY_API_RETRY_ON_429_SEC", "5.0"))
+MOBILEPROXY_API_MAX_RETRIES = max(1, int(os.getenv("MOBILEPROXY_API_MAX_RETRIES", "2")))
+# Таймаут HTTP для запросов к api.html (change_equipment часто >25s)
+MOBILEPROXY_API_TIMEOUT_SEC = float(os.getenv("MOBILEPROXY_API_TIMEOUT_SEC", "90.0"))
+# change_equipment: повторы с другими параметрами / GEO; затем перебор get_geo_list
+MOBILEPROXY_CHANGE_EQUIPMENT_MAX_ATTEMPTS = max(
+    1,
+    int(os.getenv("MOBILEPROXY_CHANGE_EQUIPMENT_MAX_ATTEMPTS", "6")),
+)
+MOBILEPROXY_CHANGE_EQUIPMENT_RETRY_PAUSE_SEC = float(
+    os.getenv("MOBILEPROXY_CHANGE_EQUIPMENT_RETRY_PAUSE_SEC", "12.0")
+)
+MOBILEPROXY_CHANGE_EQUIPMENT_GEO_LIST_MAX = max(
+    1,
+    int(os.getenv("MOBILEPROXY_CHANGE_EQUIPMENT_GEO_LIST_MAX", "12")),
+)
 PROXY_IP_POST_ROTATE_PAUSE_SEC = float(os.getenv("PROXY_IP_POST_ROTATE_PAUSE_SEC", "2.5"))
 PROXY_IP_MAX_ROTATIONS = max(10, int(os.getenv("PROXY_IP_MAX_ROTATIONS", "120")))
 PROXY_IP_MAX_STICKY_ATTEMPTS = max(5, int(os.getenv("PROXY_IP_MAX_STICKY_ATTEMPTS", "40")))
@@ -64,6 +90,43 @@ MOBILEPROXY_CHANGE_GEO = os.getenv("MOBILEPROXY_CHANGE_GEO", "1").strip().lower(
     "off",
 )
 MOBILEPROXY_POST_GEO_PAUSE_SEC = float(os.getenv("MOBILEPROXY_POST_GEO_PAUSE_SEC", "8.0"))
+# setup_account / verify_mobileproxy: чтение ответа через прокси (мобильные линии часто >45s)
+MOBILEPROXY_VERIFY_SETUP_TIMEOUT_SEC = float(
+    os.getenv("MOBILEPROXY_VERIFY_SETUP_TIMEOUT_SEC", "90.0")
+)
+# Отдельно таймаут установки TCP к шлюзу прокси (не съедает весь бюджет на connect)
+MOBILEPROXY_VERIFY_CONNECT_TIMEOUT_SEC = float(
+    os.getenv("MOBILEPROXY_VERIFY_CONNECT_TIMEOUT_SEC", "30.0")
+)
+# Список URL проверки (первый успешный ответ = прокси OK); httpbin с мобильных часто тормозит
+MOBILEPROXY_PROXY_HEALTH_CHECK_URLS = os.getenv(
+    "MOBILEPROXY_PROXY_HEALTH_CHECK_URLS",
+    "https://api.ipify.org?format=json,http://httpbin.org/ip,http://ipv4.icanhazip.com",
+).strip()
+MOBILEPROXY_VERIFY_SETUP_RETRY_PAUSE_SEC = float(
+    os.getenv("MOBILEPROXY_VERIFY_SETUP_RETRY_PAUSE_SEC", "15.0")
+)
+# Пауза после change_equipment до первой проверки HTTP (стабилизация линии)
+MOBILEPROXY_VERIFY_SETUP_EXTRA_PAUSE_SEC = float(
+    os.getenv("MOBILEPROXY_VERIFY_SETUP_EXTRA_PAUSE_SEC", "10.0")
+)
+# Провал httpbin → ротация exit-IP (тот же GEO) и повтор; 1 = только ретраи без смены IP
+MOBILEPROXY_VERIFY_SETUP_ROTATE_ATTEMPTS = max(
+    1,
+    int(os.getenv("MOBILEPROXY_VERIFY_SETUP_ROTATE_ATTEMPTS", "4")),
+)
+MOBILEPROXY_VERIFY_SETUP_ROTATE_PAUSE_SEC = float(
+    os.getenv("MOBILEPROXY_VERIFY_SETUP_ROTATE_PAUSE_SEC", "12.0")
+)
+# После исчерпания ротаций IP: смена оборудования в том же id_country (add_to_black_list + get_geo_list).
+# Минимум 2: при 1 внешняя итерация без смены оборудования после первой неудачной проверки.
+MOBILEPROXY_VERIFY_SETUP_EQUIPMENT_SWAP_ATTEMPTS = max(
+    2,
+    int(os.getenv("MOBILEPROXY_VERIFY_SETUP_EQUIPMENT_SWAP_ATTEMPTS", "4")),
+)
+MOBILEPROXY_VERIFY_SETUP_EQUIPMENT_SWAP_PAUSE_SEC = float(
+    os.getenv("MOBILEPROXY_VERIFY_SETUP_EQUIPMENT_SWAP_PAUSE_SEC", "15.0")
+)
 # Проверка exit-IP в IPGuardian через API (proxy_ip / change_equipment с check_spam=true)
 MOBILEPROXY_CHECK_SPAM = os.getenv("MOBILEPROXY_CHECK_SPAM", "1").strip().lower() not in (
     "0",
@@ -71,6 +134,12 @@ MOBILEPROXY_CHECK_SPAM = os.getenv("MOBILEPROXY_CHECK_SPAM", "1").strip().lower(
     "no",
     "off",
 )
+# IPGuardian: ротация exit-IP при score >= порога (ниже — чаще крутим при «серых» IP)
+MOBILEPROXY_SPAM_SCORE_ROTATE_MIN = float(os.getenv("MOBILEPROXY_SPAM_SCORE_ROTATE_MIN", "80.0"))
+# После proxy_change_ip_url: если exit не в стране аккаунта — change_equipment на тот же ISO (не меняем страну)
+MOBILEPROXY_REALIGN_LINE_AFTER_IP_ROTATE = os.getenv(
+    "MOBILEPROXY_REALIGN_LINE_AFTER_IP_ROTATE", "1"
+).strip().lower() not in ("0", "false", "no", "off")
 # Ручной маппинг {"US":1,"DE":2} если get_id_country недоступен
 MOBILEPROXY_ISO_TO_ID_JSON = os.getenv("MOBILEPROXY_ISO_TO_ID_JSON", "").strip()
 # Последний успешный HTTP-прокси (fallback, если API недоступен при старте)

@@ -278,6 +278,38 @@ def proxy_url_to_cfg(proxy_url: str) -> Optional[Dict[str, Any]]:
     return out
 
 
+def _proxy_health_check_urls() -> List[str]:
+    """URL для проверки прокси и получения exit-IP (первый успешный ответ)."""
+    raw = (getattr(config, "MOBILEPROXY_PROXY_HEALTH_CHECK_URLS", None) or "").strip()
+    if not raw:
+        return [
+            "https://api.ipify.org?format=json",
+            "http://httpbin.org/ip",
+            "http://ipv4.icanhazip.com",
+        ]
+    return [p.strip() for p in raw.split(",") if p.strip()]
+
+
+def _exit_ip_from_health_response(resp) -> Optional[str]:
+    """Внешний IP из ответа ipify / httpbin / plain text."""
+    try:
+        ct = (resp.headers.get("Content-Type") or "").lower()
+        if "json" in ct or (resp.text or "").lstrip().startswith("{"):
+            data = resp.json()
+            if isinstance(data, dict):
+                if data.get("ip"):
+                    return str(data["ip"]).split(",")[0].strip()
+                if data.get("origin"):
+                    return str(data["origin"]).split(",")[0].strip()
+    except Exception:
+        pass
+    for line in (resp.text or "").splitlines():
+        s = line.strip()
+        if s and 6 <= len(s) <= 45 and not s.startswith("<"):
+            return s
+    return None
+
+
 def _accounts_root_path() -> Path:
     r = Path(config.ACCOUNTS_ROOT)
     return r if r.is_absolute() else (Path(config.BASE_DIR) / r)
@@ -366,7 +398,12 @@ def load_proxy() -> Optional[str]:
     return None
 
 
-def check_proxy_health(proxy_cfg: dict, timeout: int = 10) -> bool:
+def check_proxy_health(
+    proxy_cfg: dict,
+    timeout: float = 10.0,
+    *,
+    connect_timeout: Optional[float] = None,
+) -> bool:
     """
     Проверяет работоспособность прокси из конфига аккаунта.
 
@@ -374,6 +411,8 @@ def check_proxy_health(proxy_cfg: dict, timeout: int = 10) -> bool:
         {"host": "...", "port": 8080, "username": "...", "password": "..."}
 
     Возвращает True если прокси отвечает, False если недоступен.
+    Пробует несколько URL (MOBILEPROXY_PROXY_HEALTH_CHECK_URLS): httpbin с мобильных
+    часто таймаут; ipify/icanhazip обычно быстрее.
     """
     import requests
 
@@ -385,24 +424,42 @@ def check_proxy_health(proxy_cfg: dict, timeout: int = 10) -> bool:
     proxy_url = proxy_cfg_to_url(proxy_cfg)
     proxies = {"http": proxy_url, "https": proxy_url}
 
-    try:
-        _ = requests.get(
-            "http://httpbin.org/ip",
-            headers={"User-Agent": "Mozilla/5.0"},
-            proxies=proxies,
-            timeout=timeout,
-        )
-        return True
-    except Exception as exc:
-        get_logger("utils").warning(
-            "Прокси %s:%s недоступен: %s", host, port, exc
-        )
-        return False
+    connect_t = (
+        connect_timeout
+        if connect_timeout is not None
+        else float(getattr(config, "MOBILEPROXY_VERIFY_CONNECT_TIMEOUT_SEC", 30.0))
+    )
+    read_t = float(timeout)
+    req_timeout: Union[float, Tuple[float, float]] = (connect_t, read_t)
+
+    urls = _proxy_health_check_urls()
+    last_exc: Optional[Exception] = None
+    for url in urls:
+        try:
+            resp = requests.get(
+                url,
+                headers={"User-Agent": "Mozilla/5.0"},
+                proxies=proxies,
+                timeout=req_timeout,
+            )
+            if resp.status_code == 200:
+                return True
+        except Exception as exc:
+            last_exc = exc
+            continue
+    get_logger("utils").warning(
+        "Прокси %s:%s недоступен (пробовали %d URL): %s",
+        host,
+        port,
+        len(urls),
+        last_exc,
+    )
+    return False
 
 
 def fetch_exit_ip_via_proxy(proxy_cfg: dict, timeout: float = 15.0) -> Optional[str]:
     """
-    Внешний IPv4/IPv6 через HTTP-прокси (httpbin.org/ip).
+    Внешний IPv4/IPv6 через HTTP-прокси (те же URL, что и в check_proxy_health).
     Используется реестром exit-IP без импорта browser.py.
     """
     import requests
@@ -411,19 +468,27 @@ def fetch_exit_ip_via_proxy(proxy_cfg: dict, timeout: float = 15.0) -> Optional[
         return None
     proxy_url = proxy_cfg_to_url(proxy_cfg)
     proxies = {"http": proxy_url, "https": proxy_url}
-    try:
-        resp = requests.get(
-            "http://httpbin.org/ip",
-            headers={"User-Agent": "Mozilla/5.0"},
-            proxies=proxies,
-            timeout=timeout,
-        )
-        data = resp.json()
-        origin = data.get("origin", "") or ""
-        return origin.split(",")[0].strip() or None
-    except Exception as exc:
-        get_logger("utils").debug("fetch_exit_ip_via_proxy: %s", exc)
-        return None
+    connect_t = float(getattr(config, "MOBILEPROXY_VERIFY_CONNECT_TIMEOUT_SEC", 30.0))
+    read_t = float(timeout)
+    req_timeout: Union[float, Tuple[float, float]] = (connect_t, read_t)
+
+    for url in _proxy_health_check_urls():
+        try:
+            resp = requests.get(
+                url,
+                headers={"User-Agent": "Mozilla/5.0"},
+                proxies=proxies,
+                timeout=req_timeout,
+            )
+            if resp.status_code != 200:
+                continue
+            ip = _exit_ip_from_health_response(resp)
+            if ip:
+                return ip
+        except Exception as exc:
+            get_logger("utils").debug("fetch_exit_ip_via_proxy %s: %s", url, exc)
+            continue
+    return None
 
 
 def fetch_country_for_ip(external_ip: str, timeout: float = 8.0) -> Optional[str]:
