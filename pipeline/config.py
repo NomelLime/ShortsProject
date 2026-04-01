@@ -144,6 +144,16 @@ MOBILEPROXY_REALIGN_LINE_AFTER_IP_ROTATE = os.getenv(
 MOBILEPROXY_ISO_TO_ID_JSON = os.getenv("MOBILEPROXY_ISO_TO_ID_JSON", "").strip()
 # Последний успешный HTTP-прокси (fallback, если API недоступен при старте)
 MOBILEPROXY_HTTP_CACHE_FILE = BASE_DIR / "data" / "mobileproxy_http_cache.json"
+# Невалидное оборудование (setup): не брать из get_geo_list повторно N часов (локальный JSON)
+MOBILEPROXY_INVALID_EQUIPMENT_FREEZE_HOURS = float(
+    os.getenv("MOBILEPROXY_INVALID_EQUIPMENT_FREEZE_HOURS", "24")
+)
+MOBILEPROXY_INVALID_EQUIPMENT_FREEZE_FILE = Path(
+    os.getenv(
+        "MOBILEPROXY_INVALID_EQUIPMENT_FREEZE_FILE",
+        str(BASE_DIR / "data" / "mobileproxy_invalid_equipment_freeze.json"),
+    )
+)
 # Не дёргать get_my_proxy чаще, чем раз в N секунд на процесс (лимит API 5 с на идентичные запросы)
 MOBILEPROXY_HTTP_MEMORY_TTL_SEC = float(os.getenv("MOBILEPROXY_HTTP_MEMORY_TTL_SEC", "300"))
 # Порядок обхода аккаунтов: сначала батчем по country (меньше смен гео)

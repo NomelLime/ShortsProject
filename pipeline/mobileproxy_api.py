@@ -428,10 +428,20 @@ def _geo_items_from_response(data: Optional[Dict[str, Any]]) -> List[dict]:
     return []
 
 
-def _try_change_equipment_via_geo_list(target_iso: str, id_country: int, proxy_id: int) -> bool:
+def _try_change_equipment_via_geo_list(
+    target_iso: str,
+    id_country: int,
+    proxy_id: int,
+    *,
+    skip_frozen: bool = False,
+) -> bool:
     """
     Перебор GEO из get_geo_list с фильтром по ISO (тот же id_country).
+
+    skip_frozen: пропускать линии из mobileproxy_equipment_freeze (невалидные при setup).
     """
+    from pipeline.mobileproxy_equipment_freeze import is_equipment_frozen
+
     data = _api_get("get_geo_list", proxy_id=str(proxy_id))
     items = _geo_items_from_response(data)
     if not items:
@@ -446,10 +456,23 @@ def _try_change_equipment_via_geo_list(target_iso: str, id_country: int, proxy_i
             len(items),
         )
         return False
+    use_list = matching
+    if skip_frozen:
+        use_list = [it for it in matching if not is_equipment_frozen(proxy_id, it)]
+        if matching and not use_list:
+            hrs = float(getattr(config, "MOBILEPROXY_INVALID_EQUIPMENT_FREEZE_HOURS", 24.0))
+            logger.warning(
+                "[mobileproxy_api] get_geo_list ISO=%s: все %s вариант(ов) в заморозке "
+                "(%.0f ч после невалидной проверки) — других линий нет",
+                want,
+                len(matching),
+                hrs,
+            )
+            return False
     geo_max = int(getattr(config, "MOBILEPROXY_CHANGE_EQUIPMENT_GEO_LIST_MAX", 12))
     pause = float(getattr(config, "MOBILEPROXY_CHANGE_EQUIPMENT_RETRY_PAUSE_SEC", 12.0))
-    n = min(len(matching), geo_max)
-    for i, item in enumerate(matching[:geo_max]):
+    n = min(len(use_list), geo_max)
+    for i, item in enumerate(use_list[:geo_max]):
         geoid = item.get("geoid")
         if geoid is None:
             continue
@@ -489,7 +512,8 @@ def _try_change_equipment_via_geo_list(target_iso: str, id_country: int, proxy_i
 def swap_to_fresh_equipment_same_iso(iso2: str) -> bool:
     """
     То же id_country (целевой ISO), другое оборудование: change_equipment с add_to_black_list=1
-    (см. mobileproxy API). Если не удалось — перебор get_geo_list для того же ISO.
+    (см. mobileproxy API). Перебор get_geo_list сначала с пропуском «замороженных» линий
+    (невалидных при setup), затем типовые вызовы change_equipment.
 
     Вызывать, когда линия уже на нужной стране, но текущее оборудование «битое»
     (не проходит HTTP/GEO после ротаций IP).
@@ -518,6 +542,16 @@ def swap_to_fresh_equipment_same_iso(iso2: str) -> bool:
         target_id,
         target_iso,
     )
+    # 0) Сначала явный перебор get_geo_list без замороженных линий (не зацикливаться A↔B)
+    if _try_change_equipment_via_geo_list(
+        target_iso, target_id, pid, skip_frozen=True
+    ):
+        invalidate_my_proxy_cache()
+        pause = float(getattr(config, "MOBILEPROXY_POST_GEO_PAUSE_SEC", 8.0))
+        if pause > 0:
+            time.sleep(pause)
+        return True
+
     # 1) С контекстом текущей линии (geoid/eid/operator)
     ok = change_equipment_to_country(
         target_id,
@@ -550,14 +584,9 @@ def swap_to_fresh_equipment_same_iso(iso2: str) -> bool:
         return True
 
     logger.warning(
-        "[mobileproxy_api] swap same ISO: change_equipment с blacklist не удалась — get_geo_list"
+        "[mobileproxy_api] swap same ISO: смена оборудования не удалась "
+        "(get_geo_list без заморозки + change_equipment с blacklist)"
     )
-    if _try_change_equipment_via_geo_list(target_iso, target_id, pid):
-        invalidate_my_proxy_cache()
-        pause = float(getattr(config, "MOBILEPROXY_POST_GEO_PAUSE_SEC", 8.0))
-        if pause > 0:
-            time.sleep(pause)
-        return True
     return False
 
 

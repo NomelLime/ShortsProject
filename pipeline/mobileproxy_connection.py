@@ -166,6 +166,7 @@ def verify_mobileproxy_for_new_account(country_iso: str) -> bool:
         iso_supported_by_mobileproxy,
         swap_to_fresh_equipment_same_iso,
     )
+    from pipeline.mobileproxy_equipment_freeze import freeze_current_proxy_line_from_api
 
     if not iso_supported_by_mobileproxy(iso):
         print(
@@ -275,6 +276,8 @@ def verify_mobileproxy_for_new_account(country_iso: str) -> bool:
             "  … Смена оборудования в том же GEO (change_equipment + add_to_black_list, "
             "см. https://mobileproxy.space/user.html?api)…"
         )
+        # Невалидная линия не выбирается из get_geo_list повторно 24 ч (см. MOBILEPROXY_INVALID_*)
+        freeze_current_proxy_line_from_api()
         if not swap_to_fresh_equipment_same_iso(iso):
             print(
                 "  ❌ Не удалось сменить оборудование в том же GEO (mobileproxy API). "
@@ -294,6 +297,7 @@ def verify_mobileproxy_for_new_account(country_iso: str) -> bool:
             time.sleep(swap_pause)
 
     if not healthy:
+        freeze_current_proxy_line_from_api()
         print(
             "  ❌ Прокси недоступен (проверка HTTP через MOBILEPROXY_PROXY_HEALTH_CHECK_URLS). "
             f"Увеличьте MOBILEPROXY_VERIFY_SETUP_TIMEOUT_SEC (сейчас {setup_timeout:.0f}s), "
@@ -312,6 +316,7 @@ def verify_mobileproxy_for_new_account(country_iso: str) -> bool:
         )
         return False
     if gc != iso:
+        freeze_current_proxy_line_from_api()
         print(
             f"  ❌ Страна выхода прокси ({gc}) не совпадает с выбранной ({iso}). Аккаунт не создан."
         )
