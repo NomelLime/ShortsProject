@@ -67,6 +67,11 @@ def _build_proxy_config(proxy: dict) -> dict | None:
     if not proxy or not proxy.get("host"):
         return None
     scheme = (proxy.get("scheme") or "http").strip().lower()
+    # Chromium/Playwright не понимает socks5h в proxy.server (ERR_NO_SUPPORTED_PROXIES).
+    # Для браузера используем socks5, оставляя остальные схемы без изменений.
+    if scheme == "socks5h":
+        logger.info("[proxy] scheme socks5h -> socks5 для Playwright")
+        scheme = "socks5"
     proxy_cfg = {
         "server": f"{scheme}://{proxy['host']}:{proxy['port']}",
     }

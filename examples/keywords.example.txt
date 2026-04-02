@@ -4,16 +4,92 @@
 # После копирования в data/keywords.txt отредактируйте под себя.
 
 # Универсальные (shorts / viral)
-motivation
-funny moments
-life hacks
-cooking tips
-fitness motivation
-pet compilation
-travel short
-asmr
-story time
-before and after
+luxury lifestyle 2026
+billionaire lifestyle
+rich lifestyle visualization
+supercars
+luxury cars
+private jets
+mansions
+luxury life
+dream lifestyle
+billionaire luxury 2026
+millionaire mindset 2026
+billionaire mindset
+success motivation
+daily motivation shorts
+positive mindset
+self discipline motivation
+morning motivation
+never give up motivation
+hustle motivation
+rags to riches 2026
+from poor to rich
+success story motivation
+rags to riches story
+rise from nothing
+self made millionaire
+poor to millionaire
+best side hustles 2026
+side hustle ideas 2026
+make money online 2026
+realistic side hustles
+side hustles that make money
+passive income 2026
+easy side hustle
+guess the price
+what would you do with 1 million
+quiz 2026
+guess the luxury item
+millionaire quiz
+would you rather luxury edition
+brain test rich life
+2026 goals
+2026 motivation
+viral 2026
+fyp 2026
+this changed my life 2026
+#luxurylifestyle
+#billionairelifestyle
+#richlifestyle
+#supercar
+#luxurycars
+#luxury2026
+#fyp
+#viral
+#millionairemindset
+#motivation
+#successmindset
+#mindset
+#hustle
+#billionairemindset
+#motivationalshorts
+#viralmotivation
+#ragstoriches
+#frompoortorich
+#successstory
+#selfmade
+#motivationstory
+#inspiration
+#sidehustle
+#sidehustles2026
+#makemoneyonline
+#passiveincome
+#sidehustleideas
+#quiz
+#guesstheprice
+#wouldyourather
+#brainquiz
+#fypquiz
+#viralquiz
+#luxuryquiz
+#2026
+#explore
+#trending
+#reels2026
+#shorts2026
+
+
 
 # Дополнительные идеи (раскомментируйте или замените)
 # tech tips

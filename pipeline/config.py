@@ -472,7 +472,9 @@ PLATFORMS = [
     Platform(
         name="YouTube Shorts",
         search_suffixes=("#shorts",),
-        prefixes=("ytsearch{n}:", "ytsearchdate{n}:"),
+        # ytsearchdate* не поддерживается некоторыми сборками yt-dlp
+        # (ошибка Unsupported url scheme: ytsearchdateXX).
+        prefixes=("ytsearch{n}:",),
     ),
     Platform(
         name="TikTok",
