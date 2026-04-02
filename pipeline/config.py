@@ -45,6 +45,9 @@ ACCOUNTS_ROOT        = os.getenv("ACCOUNTS_ROOT", "accounts")
 # Реестр exit-IP (один mobileproxy, ротация IP) — data/proxy_ip_registry.json
 PROXY_IP_REGISTRY_FILE = BASE_DIR / "data" / "proxy_ip_registry.json"
 PROXY_IP_ROTATION_LOCK_FILE = BASE_DIR / "data" / "proxy_ip_rotation.lock"
+PROXY_IP_ROTATION_LOCK_TIMEOUT_SEC = float(
+    os.getenv("PROXY_IP_ROTATION_LOCK_TIMEOUT_SEC", "20")
+)
 # Включить: SHORTS_PROXY_IP_REGISTRY=1 или задан MOBILEPROXY_CHANGE_IP_URL / (MOBILEPROXY_API_KEY + MOBILEPROXY_PROXY_ID)
 SHORTS_PROXY_IP_REGISTRY = os.getenv("SHORTS_PROXY_IP_REGISTRY", "").strip().lower() in ("1", "true", "yes", "on")
 MOBILEPROXY_API_KEY = os.getenv("MOBILEPROXY_API_KEY", "").strip()
@@ -541,6 +544,11 @@ CLICK_DELAY_MIN_SEC       = 3
 CLICK_DELAY_MAX_SEC       = 10
 UPLOAD_TIMEOUT_MS         = 300_000
 CAPTCHA_WAIT_TIMEOUT_SEC  = int(os.getenv("CAPTCHA_WAIT_TIMEOUT_SEC", str(30 * 60)))
+# Навигационный таймаут проверки логина (browser.check_session_valid)
+SESSION_CHECK_NAV_TIMEOUT_MS = int(os.getenv("SESSION_CHECK_NAV_TIMEOUT_MS", "12000"))
+# После ручного входа выдерживаем «человеческую» паузу перед дальнейшими действиями.
+LOGIN_POST_AUTH_WARMUP_MIN_SEC = int(os.getenv("LOGIN_POST_AUTH_WARMUP_MIN_SEC", "120"))
+LOGIN_POST_AUTH_WARMUP_MAX_SEC = int(os.getenv("LOGIN_POST_AUTH_WARMUP_MAX_SEC", "300"))
 
 # ----------------------------------------------------------------------
 # Сессии / авто-обновление cookies

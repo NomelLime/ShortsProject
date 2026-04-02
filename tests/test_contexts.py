@@ -60,10 +60,10 @@ class TestYouTubeContext:
     def test_platform_name(self):
         assert self.ctx.platform_name == "youtube"
 
-    def test_mobile_mode(self):
+    def test_desktop_mode(self):
         kwargs = self.ctx.build_launch_kwargs(Path("/tmp"), self.fp, None)
-        assert kwargs["is_mobile"] is True
-        assert kwargs["has_touch"] is True
+        assert kwargs["is_mobile"] is False
+        assert kwargs["has_touch"] is False
 
     def test_user_agent_in_kwargs(self):
         kwargs = self.ctx.build_launch_kwargs(Path("/tmp"), self.fp, None)

@@ -5,6 +5,9 @@ browser.py – Инициализация браузера с поддержко
 
 import logging
 import os
+import random
+import sys
+import threading
 import time
 from pathlib import Path
 from typing import List, Optional
@@ -130,6 +133,14 @@ def resolve_working_proxy(account_cfg: dict) -> dict | None:
 
     for proxy in candidates:
         label = f"{proxy.get('host')}:{proxy.get('port')}"
+        scheme = (proxy.get("scheme") or "http").strip().lower()
+        has_auth = bool((proxy.get("username") or "").strip())
+        if scheme in ("socks5", "socks5h") and has_auth:
+            logger.warning(
+                "[proxy] %s использует SOCKS с auth; Chromium/Playwright это не поддерживает — пропускаем",
+                label,
+            )
+            continue
         logger.debug("[proxy] Проверяем %s...", label)
         if not utils.check_proxy_health(proxy):
             logger.warning("[proxy] Недоступен: %s — пробуем следующий...", label)
@@ -181,6 +192,21 @@ _LOGIN_REDIRECT_MARKERS: dict[str, list[str]] = {
 }
 
 
+def _soften_launch_kwargs_for_login(launch_kwargs: dict) -> dict:
+    """
+    Более «обычный» запуск Chrome для страниц авторизации.
+    Убираем часть флагов, которые чаще триггерят антибот-эвристику.
+    """
+    out = dict(launch_kwargs)
+    args = list(out.get("args") or [])
+    drop_exact = {
+        "--disable-blink-features=AutomationControlled",
+        "--disable-extensions-except=",
+    }
+    out["args"] = [a for a in args if a not in drop_exact]
+    return out
+
+
 def check_session_valid(context: BrowserContext, platforms: list[str]) -> dict[str, bool]:
     """
     Проверяет, залогинен ли браузер на каждой из платформ.
@@ -192,6 +218,7 @@ def check_session_valid(context: BrowserContext, platforms: list[str]) -> dict[s
     """
     results: dict[str, bool] = {}
     page = context.new_page()
+    nav_timeout_ms = int(getattr(cfg, "SESSION_CHECK_NAV_TIMEOUT_MS", 12000))
 
     for platform in platforms:
         check_url = _SESSION_CHECK_URLS.get(platform)
@@ -200,7 +227,8 @@ def check_session_valid(context: BrowserContext, platforms: list[str]) -> dict[s
             continue
 
         try:
-            page.goto(check_url, wait_until="domcontentloaded", timeout=20_000)
+            logger.info("[session][%s] Проверка сессии: %s", platform, check_url)
+            page.goto(check_url, wait_until="domcontentloaded", timeout=nav_timeout_ms)
             current_url = page.url
             markers = _LOGIN_REDIRECT_MARKERS.get(platform, [])
             redirected = any(marker in current_url for marker in markers)
@@ -212,7 +240,12 @@ def check_session_valid(context: BrowserContext, platforms: list[str]) -> dict[s
                 "залогинен" if results[platform] else "НЕ залогинен",
             )
         except Exception as exc:
-            logger.warning("[session][%s] Не удалось проверить сессию: %s", platform, exc)
+            logger.warning(
+                "[session][%s] Не удалось проверить сессию за %sms: %s",
+                platform,
+                nav_timeout_ms,
+                exc,
+            )
             results[platform] = False  # при ошибке считаем не залогиненным
 
     try:
@@ -241,8 +274,11 @@ def _save_account_config(acc_config: dict, profile_dir: Path) -> None:
     cfg_path = profile_dir.parent / "config.json"
     if cfg_path.exists():
         try:
+            safe_cfg = dict(acc_config)
+            # runtime-поле; не сохраняем, чтобы не тащить временный прокси между сессиями
+            safe_cfg.pop("_active_proxy", None)
             cfg_path.write_text(
-                _json.dumps(acc_config, ensure_ascii=False, indent=2),
+                _json.dumps(safe_cfg, ensure_ascii=False, indent=2),
                 encoding="utf-8",
             )
         except Exception as exc:
@@ -253,6 +289,9 @@ def launch_browser(
     account_cfg: dict,
     profile_dir: Path,
     platform: str = "",
+    allow_direct_fallback: bool = False,
+    use_ip_registry: bool = True,
+    force_manual_login: bool = False,
 ) -> tuple[Playwright, BrowserContext]:
     """
     Запускает persistent context с платформенно-адаптивным fingerprint.
@@ -290,7 +329,7 @@ def launch_browser(
             "Прокси обязателен для запуска браузера. "
             "Настройте proxy/fallback_proxies в аккаунте и убедитесь, что прокси доступен."
         )
-    if active_proxy and proxy_ip_registry_enabled(account_cfg):
+    if active_proxy and use_ip_registry and proxy_ip_registry_enabled(account_cfg):
         ensure_exit_ip_for_account(
             account_id_from(profile_dir, account_cfg),
             account_cfg,
@@ -312,17 +351,64 @@ def launch_browser(
 
     # Платформенные kwargs
     launch_kwargs = ctx_strategy.build_launch_kwargs(profile_dir, fp, proxy_config)
+    if force_manual_login:
+        launch_kwargs = _soften_launch_kwargs_for_login(launch_kwargs)
 
-    context = pw.chromium.launch_persistent_context(**launch_kwargs)
+    logger.info("[browser] launch_persistent_context start (platform=%s)", platform)
+    try:
+        context = pw.chromium.launch_persistent_context(**launch_kwargs)
+    except Exception as exc:
+        if allow_direct_fallback:
+            logger.warning(
+                "[browser] launch с прокси не удался (%s) — пробуем direct без прокси для ручного логина",
+                exc,
+            )
+            try:
+                pw.stop()
+            except Exception:
+                pass
+            pw = sync_playwright().start()
+            launch_kwargs_no_proxy = dict(launch_kwargs)
+            launch_kwargs_no_proxy.pop("proxy", None)
+            context = pw.chromium.launch_persistent_context(**launch_kwargs_no_proxy)
+        else:
+            raise
 
     # Post-launch: stealth + fingerprint инъекции
     ctx_strategy.post_launch(context, fp)
 
-    if manual_login_needed:
-        platforms_list = account_cfg.get("platforms", [platform])
-        if isinstance(platforms_list, str):
-            platforms_list = [platforms_list]
-        _manual_login_flow(context, platforms_list)
+    platforms_list = account_cfg.get("platforms", [platform])
+    if isinstance(platforms_list, str):
+        platforms_list = [platforms_list]
+    platforms_list = [str(p).lower() for p in platforms_list]
+
+    # Ручной логин нужен не только для пустого профиля: сессии могли протухнуть,
+    # а файл Cookies при этом уже существует.
+    login_required = bool(manual_login_needed or force_manual_login)
+    if not login_required:
+        session_state = check_session_valid(context, platforms_list)
+        invalid = [p for p, ok in session_state.items() if not ok]
+        if invalid:
+            logger.info(
+                "[session] Обнаружены невалидные сессии: %s — запускаем ручной логин",
+                ", ".join(invalid),
+            )
+            login_required = True
+
+    if login_required:
+        # В фоновых потоках scheduler нет безопасного interactive stdin:
+        # там не блокируем выполнение input(), только логируем.
+        can_prompt = bool(getattr(sys.stdin, "isatty", lambda: False)()) and (
+            threading.current_thread() is threading.main_thread()
+        )
+        if can_prompt:
+            _manual_login_flow(context, platforms_list)
+        else:
+            logger.warning(
+                "[session] Требуется ручной логин (%s), но запуск неинтерактивный; "
+                "выполните ручной запуск browser/login из основного терминала.",
+                ", ".join(platforms_list),
+            )
 
     logger.info(
         "[browser] Запущен для %s (platform=%s, device=%s, fp=%s...)",
@@ -356,6 +442,12 @@ def _manual_login_flow(context: BrowserContext, platforms: List[str]) -> None:
     input("  >>> Нажмите ENTER после завершения логина: ")
     for page in pages:
         page.close()
+    warm_min = int(getattr(cfg, "LOGIN_POST_AUTH_WARMUP_MIN_SEC", 120))
+    warm_max = int(getattr(cfg, "LOGIN_POST_AUTH_WARMUP_MAX_SEC", 300))
+    if warm_max >= warm_min > 0:
+        pause = int(random.randint(warm_min, warm_max))
+        logger.info("[session] Пост-логин прогрев браузера: %ss", pause)
+        time.sleep(pause)
     logger.info("Сессия сохранена в папку профиля.")
 
 

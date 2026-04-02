@@ -46,6 +46,21 @@ _vl_semaphore = threading.Semaphore(config.ACTIVITY_VL_CONCURRENCY)
 
 # Задержка переноса при занятом GPU-семафоре (сек)
 _GPU_BUSY_RESCHEDULE_SEC = 600  # 10 мин
+# Задержка переноса при занятом browser_profile аккаунта (сек)
+_ACCOUNT_BUSY_RESCHEDULE_SEC = 120  # 2 мин
+
+# Пер-аккаунтная сериализация активности: один profile_dir в один момент времени.
+_account_profile_locks: Dict[str, threading.Lock] = {}
+_account_profile_locks_guard = threading.Lock()
+
+
+def _get_account_profile_lock(account_name: str) -> threading.Lock:
+    with _account_profile_locks_guard:
+        lock = _account_profile_locks.get(account_name)
+        if lock is None:
+            lock = threading.Lock()
+            _account_profile_locks[account_name] = lock
+        return lock
 
 
 def _in_activity_window() -> bool:
@@ -154,6 +169,18 @@ class _AccountActivityJob:
             self._schedule(delay)
             return
 
+        # Один аккаунт/профиль не должен запускаться одновременно в нескольких job:
+        # Chromium persistent profile при конкуренции даёт Resource deadlock/session closed.
+        account_lock = _get_account_profile_lock(acc_name)
+        if not account_lock.acquire(blocking=False):
+            logger.info(
+                "[scheduler] [%s][%s] Профиль аккаунта занят другой активностью — "
+                "перенос на %d сек",
+                acc_name, platform, _ACCOUNT_BUSY_RESCHEDULE_SEC,
+            )
+            self._schedule(_ACCOUNT_BUSY_RESCHEDULE_SEC)
+            return
+
         # Проверка VL-семафора: не блокируем поток, переносим если все слоты заняты
         acquired = _vl_semaphore.acquire(blocking=False)
         if not acquired:
@@ -186,6 +213,7 @@ class _AccountActivityJob:
             )
         finally:
             _vl_semaphore.release()
+            account_lock.release()
 
         # Планируем следующий запуск
         next_delay = self._next_delay()

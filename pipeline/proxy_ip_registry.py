@@ -223,10 +223,10 @@ def ensure_exit_ip_for_account(
 
     lock_path = config.PROXY_IP_ROTATION_LOCK_FILE
     lock_path.parent.mkdir(parents=True, exist_ok=True)
+    lock_timeout = float(getattr(config, "PROXY_IP_ROTATION_LOCK_TIMEOUT_SEC", 20.0))
 
-    with open(lock_path, "a+", encoding="utf-8") as lock_fh:
-        portalocker.lock(lock_fh, portalocker.LOCK_EX)
-        try:
+    try:
+        with portalocker.Lock(str(lock_path), mode="a+", timeout=lock_timeout):
             if mobileproxy_geo_enabled(account_cfg):
                 iso = (account_cfg.get("country") or "").strip().upper()
                 if len(iso) == 2:
@@ -236,9 +236,17 @@ def ensure_exit_ip_for_account(
                     clear_proxy_session_caches()
                     _invalidate_browser_geo_cache(active_proxy)
             _ensure_under_lock(account_id, account_cfg, active_proxy, change_url)
-        finally:
-            portalocker.unlock(lock_fh)
-            _invalidate_browser_geo_cache(active_proxy)
+    except Exception as exc:
+        logger.warning(
+            "[proxy_ip_registry] Не удалось получить lock ротации за %.0fs (%s) — "
+            "пропуск ensure_exit_ip_for_account для %s",
+            lock_timeout,
+            exc,
+            account_id,
+        )
+        return
+    finally:
+        _invalidate_browser_geo_cache(active_proxy)
 
 
 def _do_rotate(

@@ -26,7 +26,7 @@ _COMMON_ARGS = [
 
 
 class YouTubeContext(BasePlatformContext):
-    """Мобильный контекст для YouTube/Studio."""
+    """Desktop-контекст для YouTube/Studio (стабильнее для Google Login)."""
 
     platform_name = "youtube"
 
@@ -43,9 +43,10 @@ class YouTubeContext(BasePlatformContext):
             "viewport":          fingerprint["viewport"],
             "locale":            fingerprint["locale"],
             "timezone_id":       fingerprint["timezone_id"],
-            "has_touch":         True,
-            "is_mobile":         True,
-            "device_scale_factor": fingerprint["pixel_ratio"],
+            # Для Google Login мобильная эмуляция чаще даёт "browser not secure".
+            "has_touch":         False,
+            "is_mobile":         False,
+            "device_scale_factor": 1,
             "args":              _COMMON_ARGS,
         }
         if proxy_config:

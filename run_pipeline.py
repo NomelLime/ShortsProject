@@ -32,7 +32,60 @@ from pipeline.pipeline_state import (
 )
 from pipeline.scheduler import ActivityScheduler
 from pipeline import config
-from pipeline.utils import ensure_dirs, validate_config
+from pipeline.utils import ensure_dirs, validate_config, get_all_accounts
+
+
+def _interactive_login_preflight(*, all_platforms: bool = False) -> None:
+    """
+    До старта ActivityScheduler проверяем/обновляем логин в главном потоке.
+    Это гарантирует появление окна ручной авторизации, если сессия невалидна.
+    """
+    enabled = os.getenv("LOGIN_PREFLIGHT_ENABLED", "1").strip().lower() not in (
+        "0",
+        "false",
+        "no",
+        "off",
+    )
+    is_tty = bool(getattr(sys.stdin, "isatty", lambda: False)())
+    if not enabled or not is_tty:
+        return
+
+    try:
+        accounts = get_all_accounts()
+    except Exception as exc:
+        logger.warning("[preflight] Не удалось получить аккаунты: %s", exc)
+        return
+    if not accounts:
+        return
+
+    from pipeline.browser import launch_browser, close_browser
+
+    logger.info("[preflight] Проверка сессий перед запуском пайплайна...")
+    for acc in accounts:
+        acc_name = acc.get("name", "?")
+        acc_cfg = acc.get("config", {})
+        profile_dir = Path(acc.get("dir")) / "browser_profile"
+        platforms = acc.get("platforms") or acc_cfg.get("platforms") or ["youtube"]
+        if isinstance(platforms, str):
+            platforms = [platforms]
+        targets = [str(platforms[0]).lower()] if platforms and not all_platforms else [str(p).lower() for p in platforms]
+        for platform in targets:
+            cfg_one = dict(acc_cfg)
+            cfg_one["platforms"] = [platform]
+            try:
+                logger.info("[preflight] [%s] launch_browser (platform=%s)...", acc_name, platform)
+                pw, ctx = launch_browser(
+                    cfg_one,
+                    profile_dir,
+                    platform=platform,
+                    allow_direct_fallback=True,
+                    use_ip_registry=False,
+                    force_manual_login=True,
+                )
+                close_browser(pw, ctx)
+                logger.info("[preflight] [%s][%s] ОК", acc_name, platform)
+            except Exception as exc:
+                logger.warning("[preflight] [%s][%s] Проверка сессии пропущена: %s", acc_name, platform, exc)
 
 
 def parse_args():
@@ -46,6 +99,7 @@ def parse_args():
     parser.add_argument("--dry-run", action="store_true", help="Пробный запуск без реальных изменений")
     parser.add_argument("--only", choices=STAGE_ORDER, help="Выполнить один этап и выйти")
     parser.add_argument("--resume", action="store_true", help="Продолжить с последнего незавершённого этапа")
+    parser.add_argument("--login-only", action="store_true", help="Только ручной вход по платформам без запуска этапов")
     return parser.parse_args()
 
 
@@ -138,6 +192,11 @@ def main():
         log_warmup_dashboard(logger)
     except Exception:
         pass
+
+    _interactive_login_preflight(all_platforms=args.login_only)
+    if args.login_only:
+        logger.info("[preflight] Режим --login-only завершён.")
+        return
 
     if args.only:
         with ActivityScheduler():
