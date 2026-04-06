@@ -251,6 +251,7 @@ def _collect_statistics(results: List[Dict]) -> Dict:
     uploaded = sum(1 for r in results if r.get("status") == "uploaded")
     skipped  = sum(1 for r in results if r.get("status") == "skipped")
     errors   = sum(1 for r in results if r.get("status") == "error")
+    manual_required = sum(1 for r in results if r.get("status") == "manual_required")
 
     error_details = [
         f"  • [{r.get('account_id', '?')}] "
@@ -269,6 +270,7 @@ def _collect_statistics(results: List[Dict]) -> Dict:
         "uploaded":      uploaded,
         "skipped":       skipped,
         "errors":        errors,
+        "manual_required": manual_required,
         "error_details": error_details,
         "platforms":     platforms,
         "timestamp":     datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
@@ -299,6 +301,7 @@ def _build_report_text(
         f"  ✅ Успешно загружено: `{stats['uploaded']}`",
         f"  ⏭ Пропущено:         `{stats['skipped']}`",
         f"  ❌ Ошибок:            `{stats['errors']}`",
+        f"  🧩 Operator bridge:   `{stats.get('manual_required', 0)}`",
         "",
         "📦 *Архивирование:*",
         f"  📂 Перемещено файлов: `{archived}` (все обязательные платформы ✓)",

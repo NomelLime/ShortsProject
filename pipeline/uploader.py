@@ -32,6 +32,13 @@ from pipeline.analytics import register_upload
 from pipeline.quarantine import is_quarantined, mark_error as q_mark_error, mark_success as q_mark_success
 from pipeline.upload_warmup import is_upload_blocked, is_upload_warmup_active
 from pipeline.locale_packaging import prepare_locale_pack_for_upload
+from pipeline.publish_bridge import (
+    MANUAL_REQUIRED_SENTINEL,
+    STATUS_MANUAL_REQUIRED,
+    bridge_enabled_for_platform,
+    get_publish_handler_mode,
+    queue_manual_publish,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -514,9 +521,9 @@ def _upload_instagram(page: Page, video_path: Path, meta: Dict) -> str:
 # ─────────────────────────────────────────────────────────────────────────────
 
 _PLATFORM_UPLOADERS = {
-    "youtube":   _upload_youtube,
-    "tiktok":    _upload_tiktok,
-    "instagram": _upload_instagram,
+    "vk":      _upload_youtube,
+    "rutube":  _upload_tiktok,
+    "ok":      _upload_instagram,
 }
 
 
@@ -537,6 +544,25 @@ def upload_video(
     if uploader_fn is None:
         logger.error("[%s] Неизвестная платформа.", platform)
         return None
+
+    bridge_mode, fail_open = get_publish_handler_mode(platform)
+    if bridge_enabled_for_platform(platform) and bridge_mode in {"active", "fallback"}:
+        manual_entry = queue_manual_publish(
+            platform=platform,
+            account_id=account_name or "unknown",
+            video_path=video_path,
+            meta=meta,
+            reason=f"bridge_mode:{bridge_mode}",
+        )
+        send_telegram(
+            f"🧩 Operator bridge: <b>{platform}</b> / "
+            f"<b>{video_path.name}</b> -> {STATUS_MANUAL_REQUIRED} "
+            f"(ticket: {manual_entry['ticket_id']})"
+        )
+        if bridge_mode == "active":
+            return MANUAL_REQUIRED_SENTINEL
+        if bridge_mode == "fallback" and not fail_open:
+            return None
 
     last_error: Optional[Exception] = None
 
@@ -715,9 +741,19 @@ def upload_all(dry_run: bool = False) -> List[Dict]:
                         account_name=acc_name, account_cfg=acc_cfg,
                     )
 
+                    if video_url == MANUAL_REQUIRED_SENTINEL:
+                        results.append({
+                            "status": STATUS_MANUAL_REQUIRED,
+                            "platform": platform,
+                            "account_id": acc_name,
+                            "source_path": str(video_path),
+                            "error_msg": "Задача поставлена в operator bridge",
+                        })
+                        continue
+
                     if video_url is not None:
                         utils.mark_uploaded(item)
-                        utils.increment_upload_count(acc_dir)
+                        utils.increment_upload_count(acc_dir, platform=platform)
                         q_mark_success(acc_name, platform)
                         # Фикс #1: передаём реальный URL в аналитику
                         register_upload(

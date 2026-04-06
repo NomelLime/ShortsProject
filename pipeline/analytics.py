@@ -352,10 +352,19 @@ def _collect_instagram_stats(page: Page, video_url: str) -> Optional[Dict]:
     return stats
 
 
+def _collect_operator_bridge_placeholder(_page: Page, url: str) -> Dict:
+    """
+    В migration-режиме native-метрики для VK/RuTube/OK могут приходить
+    позднее через API/операторский контур. Возвращаем совместимый пустой блок.
+    """
+    logger.info("[analytics][bridge] Placeholder metrics for %s", url)
+    return {"views": None, "likes": None, "comments": None}
+
+
 _PLATFORM_COLLECTORS = {
-    "youtube":   _collect_youtube_stats,
-    "tiktok":    _collect_tiktok_stats,
-    "instagram": _collect_instagram_stats,
+    "vk": _collect_operator_bridge_placeholder,
+    "rutube": _collect_operator_bridge_placeholder,
+    "ok": _collect_operator_bridge_placeholder,
 }
 
 

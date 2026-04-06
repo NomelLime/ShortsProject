@@ -65,7 +65,7 @@ def _interactive_login_preflight(*, all_platforms: bool = False) -> None:
         acc_name = acc.get("name", "?")
         acc_cfg = acc.get("config", {})
         profile_dir = Path(acc.get("dir")) / "browser_profile"
-        platforms = acc.get("platforms") or acc_cfg.get("platforms") or ["youtube"]
+        platforms = acc.get("platforms") or acc_cfg.get("platforms") or ["vk"]
         if isinstance(platforms, str):
             platforms = [platforms]
         targets = [str(platforms[0]).lower()] if platforms and not all_platforms else [str(p).lower() for p in platforms]

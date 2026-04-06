@@ -12,6 +12,30 @@ https://github.com/NomelLime/ShortsProject
 
 ---
 
+### Сессия 24 (06.04.2026) — Миграция платформ: `youtube/tiktok/instagram` -> `vk/rutube/ok` + operator bridge
+
+| Файл | Изменение |
+|------|-----------|
+| **`pipeline/config.py`** | Платформенный контур переведён на `vk/rutube/ok`: `PLATFORM_URLS`, `BROWSER_SEARCH_URLS`, `PLATFORM_DAILY_LIMITS`, `ALL_PLATFORMS`; добавлены `PLATFORM_ALIASES` и feature flags bridge: `PUBLISH_BRIDGE_*`. |
+| **`pipeline/publish_bridge.py`** (NEW) | Operator-assisted publish bridge: постановка задач в `data/operator_publish_queue.json`, статусы unified-контракта (`manual_required`, `published`, `failed_*`), агрегат в `data/operator_bridge_stats.json`. |
+| **`pipeline/uploader.py`** | Интегрирован bridge (`active/shadow/fallback`), добавлен статус `manual_required`, per-platform инкремент daily-limit (`increment_upload_count(..., platform=...)`), sentinal `__MANUAL_REQUIRED__`. |
+| **`pipeline/browser.py`** | Session/login URLs и redirect markers обновлены для `vk/rutube/ok`; диспетчер контекстов переключён на новые платформы; дефолтная платформа `vk`. |
+| **`pipeline/contexts/{vk,rutube,ok}.py`** (NEW) | Новые platform contexts для браузерного контура (desktop-профили + stealth/fingerprint). |
+| **`pipeline/analytics.py`** | `_PLATFORM_COLLECTORS` переключён на `vk/rutube/ok` (placeholder-коллектор в migration-режиме до API-native метрик). |
+| **`setup_account.py`, `pipeline/utils.py`, `run_pipeline.py`** | Дефолтные платформы аккаунта/очередей переведены на `vk/rutube/ok`; нормализация legacy-платформ через alias. |
+| **`pipeline/finalize.py`** | В отчёте добавлен блок `operator bridge` (`manual_required`). |
+
+**Операционный режим на переходный период:**
+- `PUBLISH_BRIDGE_ENABLED=true`
+- `PUBLISH_BRIDGE_PLATFORMS=vk,rutube,ok`
+- `PUBLISH_BRIDGE_MODE=active` (или `shadow`/`fallback`)
+
+**Проверки:**
+- `python -m py_compile` по изменённым файлам — ✅  
+- lints по изменённым файлам — ✅
+
+---
+
 ### Сессия 23 (31.03.2026) — Новый агент `METRICS_SCOUT_PLATFORM` (native metrics + COMMANDER trigger)
 
 **Цель:** отдельный агент нативного сбора метрик из залогиненных аккаунтов (`accounts/*`) через тот же прокси/антидетект/человечность, что в существующем браузерном контуре.

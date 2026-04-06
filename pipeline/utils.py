@@ -561,11 +561,17 @@ def get_all_accounts() -> List[Dict]:
             cfg_path = acc_dir / "config.json"
             if cfg_path.exists():
                 acc_cfg = json.loads(cfg_path.read_text(encoding="utf-8"))
+                raw_platforms = acc_cfg.get("platforms", [acc_cfg.get("platform", "vk")])
+                normalized_platforms = []
+                for p in raw_platforms:
+                    p_norm = str(p).strip().lower()
+                    p_norm = config.PLATFORM_ALIASES.get(p_norm, p_norm)
+                    normalized_platforms.append(p_norm)
                 accounts.append({
                     "name": acc_dir.name,
                     "dir": acc_dir,
                     "config": acc_cfg,
-                    "platforms": acc_cfg.get("platforms", [acc_cfg.get("platform", "youtube")]),
+                    "platforms": normalized_platforms or ["vk"],
                 })
     if getattr(config, "SHORTS_ACCOUNT_ORDER_BY_COUNTRY", True):
         accounts = sort_accounts_by_country(accounts)
@@ -645,7 +651,7 @@ def create_sample_account(name: str, platform: str) -> None:
     config_path = acc_dir / "config.json"
     if not config_path.exists():
         sample = {
-            "platforms": ["youtube", "tiktok", "instagram"],
+            "platforms": ["vk", "rutube", "ok"],
             "user_agent": (
                 "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
                 "AppleWebKit/537.36 (KHTML, like Gecko) "

@@ -180,15 +180,15 @@ def _is_profile_empty(profile_dir: Path) -> bool:
 
 # URL для проверки авторизации — открываем страницу и смотрим, не редиректит ли нас на логин
 _SESSION_CHECK_URLS: dict[str, str] = {
-    "youtube":   "https://studio.youtube.com",
-    "tiktok":    "https://www.tiktok.com/upload",
-    "instagram": "https://www.instagram.com/accounts/edit/",
+    "vk":      "https://vk.com/video",
+    "rutube":  "https://rutube.ru/profile/video/",
+    "ok":      "https://ok.ru/video",
 }
 
 _LOGIN_REDIRECT_MARKERS: dict[str, list[str]] = {
-    "youtube":   ["accounts.google.com/signin", "accounts.google.com/ServiceLogin"],
-    "tiktok":    ["tiktok.com/login", "/login?redirect"],
-    "instagram": ["instagram.com/accounts/login", "/login/?next="],
+    "vk":      ["login.vk.com", "vk.com/login"],
+    "rutube":  ["rutube.ru/login", "rutube.ru/auth"],
+    "ok":      ["connect.ok.ru", "ok.ru/dk?st.cmd=anonymMain"],
 }
 
 
@@ -258,13 +258,13 @@ def check_session_valid(context: BrowserContext, platforms: list[str]) -> dict[s
 
 # Реестр платформенных контекстов (lazy import для избегания circular)
 def _get_platform_contexts():
-    from pipeline.contexts.youtube   import YouTubeContext
-    from pipeline.contexts.tiktok    import TikTokContext
-    from pipeline.contexts.instagram import InstagramContext
+    from pipeline.contexts.vk import VkContext
+    from pipeline.contexts.rutube import RutubeContext
+    from pipeline.contexts.ok import OkContext
     return {
-        "youtube":   YouTubeContext(),
-        "tiktok":    TikTokContext(),
-        "instagram": InstagramContext(),
+        "vk":      VkContext(),
+        "rutube":  RutubeContext(),
+        "ok":      OkContext(),
     }
 
 
@@ -311,16 +311,16 @@ def launch_browser(
     """
     # Определяем платформу
     if not platform:
-        platforms = account_cfg.get("platforms", ["youtube"])
+        platforms = account_cfg.get("platforms", ["vk"])
         if isinstance(platforms, str):
             platforms = [platforms]
-        platform = platforms[0] if platforms else "youtube"
+        platform = platforms[0] if platforms else "vk"
 
     platform = platform.lower()
 
     # Платформенная стратегия
     ctx_strategies = _get_platform_contexts()
-    ctx_strategy = ctx_strategies.get(platform, ctx_strategies["youtube"])
+    ctx_strategy = ctx_strategies.get(platform, ctx_strategies["vk"])
 
     # Proxy обязателен для любого запуска браузера.
     active_proxy = resolve_working_proxy(account_cfg)
@@ -422,15 +422,34 @@ def launch_browser(
 def _manual_login_flow(context: BrowserContext, platforms: List[str]) -> None:
     """Ожидает ручного входа пользователя for multiple platforms."""
     login_urls = {
-        "youtube": "https://accounts.google.com/ServiceLogin",
-        "tiktok": "https://www.tiktok.com/login",
-        "instagram": "https://www.instagram.com/accounts/login/",
+        "vk": "https://id.vk.com/auth",
+        "rutube": "https://rutube.ru/login/",
+        "ok": "https://connect.ok.ru/",
     }
+    login_nav_timeout_ms = int(
+        getattr(
+            cfg,
+            "LOGIN_NAV_TIMEOUT_MS",
+            getattr(cfg, "SESSION_CHECK_NAV_TIMEOUT_MS", 30000),
+        )
+    )
     pages = []
     for platform in platforms:
         url = login_urls.get(platform, "https://www.google.com")
         page = context.new_page()
-        page.goto(url)
+        try:
+            # Для антибот-страниц (особенно TikTok) "load" часто не наступает вовремя.
+            # В ручном режиме достаточно дождаться domcontentloaded и дать пользователю
+            # завершить вход во вкладке.
+            page.goto(url, wait_until="domcontentloaded", timeout=login_nav_timeout_ms)
+        except Exception as exc:
+            logger.warning(
+                "[login][%s] Не удалось полностью открыть login URL за %sms: %s. "
+                "Оставляем вкладку открытой для ручного перехода.",
+                platform,
+                login_nav_timeout_ms,
+                exc,
+            )
         pages.append(page)
 
     logger.info(

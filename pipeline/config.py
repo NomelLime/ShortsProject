@@ -506,31 +506,31 @@ DEFAULT_HEADERS = {
 # URL платформ для загрузки
 # ----------------------------------------------------------------------
 PLATFORM_URLS = {
-    "youtube": {
-        "home":   "https://www.youtube.com",
-        "shorts": "https://www.youtube.com/shorts",
-        "search": "https://www.youtube.com/results?search_query=",
-        "upload": "https://studio.youtube.com",
+    "vk": {
+        "home":   "https://vk.com",
+        "video":  "https://vk.com/video",
+        "search": "https://vk.com/search?c%5Bsection%5D=video&c%5Bq%5D=",
+        "upload": "https://vk.com/video",
     },
-    "tiktok": {
-        "home":   "https://www.tiktok.com",
-        "feed":   "https://www.tiktok.com/foryou",
-        "search": "https://www.tiktok.com/search?q=",
-        "upload": "https://www.tiktok.com/upload",
+    "rutube": {
+        "home":   "https://rutube.ru",
+        "video":  "https://rutube.ru/video/",
+        "search": "https://rutube.ru/search/?query=",
+        "upload": "https://rutube.ru/upload/",
     },
-    "instagram": {
-        "home":   "https://www.instagram.com",
-        "reels":  "https://www.instagram.com/reels/",
-        "search": "https://www.instagram.com/explore/",
-        "upload": "https://www.instagram.com/",
+    "ok": {
+        "home":   "https://ok.ru",
+        "video":  "https://ok.ru/video",
+        "search": "https://ok.ru/search?st.query=",
+        "upload": "https://ok.ru/video",
     },
 }
 
 # Поисковые URL для браузерного поиска
 BROWSER_SEARCH_URLS = {
-    "youtube":   "https://www.youtube.com/results?search_query={query}&sp=EgIYAQ%253D%253D",  # фильтр: Short
-    "tiktok":    "https://www.tiktok.com/search?q={query}",
-    "instagram": "https://www.instagram.com/explore/search/keyword/?q={query}",
+    "vk":      "https://vk.com/search?c%5Bsection%5D=video&c%5Bq%5D={query}",
+    "rutube":  "https://rutube.ru/search/?query={query}",
+    "ok":      "https://ok.ru/search?st.query={query}",
 }
 
 # ----------------------------------------------------------------------
@@ -573,15 +573,24 @@ ANALYTICS_COLLECT_MAX_HOURS   = int(os.getenv("ANALYTICS_COLLECT_MAX_HOURS",   "
 # Каждый аккаунт имеет одну платформу; лимит берётся из этой таблицы
 # ----------------------------------------------------------------------
 PLATFORM_DAILY_LIMITS = {
-    "youtube":   int(os.getenv("DAILY_LIMIT_YOUTUBE",   "5")),
-    "tiktok":    int(os.getenv("DAILY_LIMIT_TIKTOK",    "5")),
-    "instagram": int(os.getenv("DAILY_LIMIT_INSTAGRAM", "5")),
+    "vk":      int(os.getenv("DAILY_LIMIT_VK", "5")),
+    "rutube":  int(os.getenv("DAILY_LIMIT_RUTUBE", "5")),
+    "ok":      int(os.getenv("DAILY_LIMIT_OK", "5")),
 }
 # Общий fallback если платформа не распознана
 DAILY_UPLOAD_LIMIT = int(os.getenv("DAILY_UPLOAD_LIMIT", "5"))
 
 # Все платформы, которые должны получить видео до архивирования исходника
-ALL_PLATFORMS = {"youtube", "tiktok", "instagram"}
+ALL_PLATFORMS = {"vk", "rutube", "ok"}
+
+# Переходный mapping для старых платформенных ключей.
+PLATFORM_ALIASES = {
+    "youtube": "vk",
+    "tiktok": "ok",
+    "instagram": "ok",
+    "vk_video": "vk",
+    "odnoklassniki": "ok",
+}
 
 # ----------------------------------------------------------------------
 # Прогрев после первой валидной сессии: заливка откладывается на N дней
@@ -593,6 +602,17 @@ def _env_bool(name: str, default: bool) -> bool:
     if v is None:
         return default
     return v.strip().lower() not in ("0", "false", "no", "off")
+
+# Operator publish bridge (ручной/операторский контур на переходный период).
+PUBLISH_BRIDGE_ENABLED = _env_bool("PUBLISH_BRIDGE_ENABLED", True)
+_bridge_platforms_raw = os.getenv("PUBLISH_BRIDGE_PLATFORMS", "vk,rutube,ok")
+PUBLISH_BRIDGE_PLATFORMS = {
+    p.strip().lower() for p in _bridge_platforms_raw.split(",") if p.strip()
+}
+PUBLISH_BRIDGE_MODE = os.getenv("PUBLISH_BRIDGE_MODE", "active").strip().lower()
+if PUBLISH_BRIDGE_MODE not in ("shadow", "active", "fallback"):
+    PUBLISH_BRIDGE_MODE = "active"
+PUBLISH_BRIDGE_FAIL_OPEN = _env_bool("PUBLISH_BRIDGE_FAIL_OPEN", True)
 
 
 UPLOAD_WARMUP_ENABLED = _env_bool("UPLOAD_WARMUP_ENABLED", True)
