@@ -40,7 +40,7 @@ logger = logging.getLogger(__name__)
 def _sanitize_llm_input(text: str, max_len: int = 300) -> str:
     """Санитизирует строку из AgentMemory перед включением в LLM-промпт.
 
-    Рекомендации могут содержать данные от SCOUT (YouTube заголовки) →
+    Рекомендации могут содержать данные от SCOUT (заголовки из внешних источников) →
     STRATEGIST → GUARDIAN. Prompt injection нейтрализуется здесь.
     """
     import re
@@ -210,7 +210,7 @@ class Guardian(BaseAgent):
 
         Запускается раз в час вместе с _session_cycle.
         Предупреждает если timezone fingerprint не совпадает с GEO прокси —
-        это один из главных сигналов антидетекта TikTok/Instagram.
+        это один из главных сигналов антидетекта коротких видео-платформ.
         """
         self.set_human_detail("Сверяю GEO и отпечаток браузера с прокси")
         try:

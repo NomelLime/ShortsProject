@@ -165,9 +165,9 @@ class Scout(BaseAgent):
 
     def _vl_filter_urls(self, urls: List[str]) -> List[str]:
         """
-        VL-оценка thumbnail для YouTube-видео перед добавлением в очередь.
+        VL-оценка thumbnail для видео перед добавлением в очередь.
 
-        - Только YouTube URL (остальные проходят без проверки)
+        - Только URL поддерживаемых платформ (остальные проходят без проверки)
         - Лимит SCOUT_VL_MAX_PER_CYCLE проверок за цикл (остаток добавляется)
         - Результаты кешируются в vl_cache.json — повторный поиск бесплатен
         - При отключённом флаге или ошибке — все URL проходят
@@ -196,7 +196,7 @@ class Scout(BaseAgent):
                         break
                     score = vl_score_thumbnail(url)
                     if score is None:
-                        # Не YouTube или ошибка — пропускаем
+                        # Неподдерживаемый URL или ошибка — пропускаем
                         filtered.append(url)
                         continue
                     checked += 1

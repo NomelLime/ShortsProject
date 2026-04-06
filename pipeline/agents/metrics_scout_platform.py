@@ -50,7 +50,7 @@ class MetricsScoutPlatform(BaseAgent):
         self._set_status(AgentStatus.RUNNING, "сбор platform_native_metrics")
         self.set_human_detail("Собираю нативные метрики видео из залогиненных кабинетов")
         analytics = self._load_analytics()
-        platforms = ("youtube", "tiktok", "instagram")
+        platforms = ("vk", "rutube", "ok")
         recs: List[Dict[str, Any]] = []
         cooldowns = self._get_cooldowns(analytics)
 
@@ -155,7 +155,7 @@ class MetricsScoutPlatform(BaseAgent):
 
     def _build_native_block(self, records: List[Dict[str, Any]], cooldowns: Dict[str, Dict[str, Any]]) -> Dict[str, Any]:
         by_platform: Dict[str, Dict[str, Any]] = {}
-        for platform in ("youtube", "tiktok", "instagram"):
+        for platform in ("vk", "rutube", "ok"):
             p_rows = [r for r in records if r.get("platform") == platform]
             p_rows.sort(key=lambda x: x.get("uploaded_at") or "", reverse=True)
             recent_20 = p_rows[:20]

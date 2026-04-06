@@ -330,7 +330,7 @@ class Publisher(BaseAgent):
             if failed:
                 self._send(
                     f"⚠️ [{acc_name}] Не удалось установить ссылки: {', '.join(failed)} "
-                    f"(TikTok требует 1000+ подписчиков)"
+                    f"(для OK/VK/RuTube могут действовать платформенные ограничения)"
                 )
         except Exception as exc:
             logger.error("[PUBLISHER] Ошибка setup profile links для %s: %s", acc_name, exc)

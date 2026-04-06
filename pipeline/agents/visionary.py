@@ -24,7 +24,7 @@ logger = logging.getLogger(__name__)
 def _sanitize_llm_input(text: str, max_len: int = 300) -> str:
     """Санитизирует строку из внешних источников перед включением в LLM-промпт.
 
-    Защита от prompt injection: заголовки YouTube/TikTok → SCOUT → STRATEGIST
+    Защита от prompt injection: заголовки из внешних источников → SCOUT → STRATEGIST
     → VISIONARY → generate_video_metadata. Убирает управляющие конструкции.
     """
     import re
@@ -77,7 +77,7 @@ class Visionary(BaseAgent):
         num_variants: int = 2,
         ab_variant: Optional[str] = None,
         account_cfg: Optional[Dict] = None,
-        target_platform: str = "youtube",
+        target_platform: str = "vk",
     ) -> List[Dict]:
         """
         Генерирует метаданные для видео через Ollama VL (модель видит реальные кадры).
@@ -111,7 +111,7 @@ class Visionary(BaseAgent):
         num_variants: int = 2,
         ab_variant: Optional[str] = None,
         account_cfg: Optional[Dict] = None,
-        target_platform: str = "youtube",
+        target_platform: str = "vk",
     ) -> List[Dict]:
         """Как generate_metadata, но без захвата GPU (внутри уже удержанного EDITOR lock)."""
         video_path = Path(video_path)
@@ -171,7 +171,7 @@ class Visionary(BaseAgent):
         strategist_rec: Optional[Dict],
         scout_rec: Optional[Dict],
         account_cfg: Optional[Dict] = None,
-        target_platform: str = "youtube",
+        target_platform: str = "vk",
         acquire_gpu: bool = True,
     ) -> List[Dict]:
         """Генерирует две группы вариантов — по STRATEGIST и по SCOUT."""
@@ -318,7 +318,7 @@ class Visionary(BaseAgent):
         context_hashtags: List[str],
         ab_variant: Optional[str],
         account_cfg: Optional[Dict] = None,
-        target_platform: str = "youtube",
+        target_platform: str = "vk",
         acquire_gpu: bool = True,
     ) -> List[Dict]:
         """Запускает generate_video_metadata; опционально с GPU lock."""

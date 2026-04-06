@@ -3,8 +3,9 @@ pipeline/trend_sources.py — Адаптеры источников трендо
 
 Источники:
   1. pytrends  — Google Trends (требует: pip install pytrends)
-  2. yt-dlp    — YouTube Trending (без аутентификации)
-  3. TikTok    — Creative Center (простой HTTP-запрос)
+  2. VK Video  — заглушка (до подключения нативного источника)
+  3. RuTube    — заглушка (до подключения нативного источника)
+  4. OK        — заглушка (до подключения нативного источника)
 
 Каждый адаптер возвращает список строк-ключевых слов/хэштегов.
 TrendScout агрегирует их и взвешивает по частоте появления.
@@ -167,3 +168,23 @@ def fetch_tiktok_trends(max_results: int = 20) -> List[str]:
 
     logger.debug("[TrendSources] TikTok Trends: %d ключевых слов", len(keywords))
     return keywords[:max_results]
+
+
+# ── VK Video / RuTube / OK (публичные заглушки) ──────────────────────────────
+
+def fetch_vk_video_trends(max_results: int = 20) -> List[str]:
+    """Тренды VK Video: пока без стабильного публичного API, возвращаем пусто."""
+    logger.debug("[TrendSources] VK Video Trends источник пока не реализован")
+    return []
+
+
+def fetch_rutube_trends(max_results: int = 20) -> List[str]:
+    """Тренды RuTube: пока без стабильного публичного API, возвращаем пусто."""
+    logger.debug("[TrendSources] RuTube Trends источник пока не реализован")
+    return []
+
+
+def fetch_ok_trends(max_results: int = 20) -> List[str]:
+    """Тренды OK: пока без стабильного публичного API, возвращаем пусто."""
+    logger.debug("[TrendSources] OK Trends источник пока не реализован")
+    return []

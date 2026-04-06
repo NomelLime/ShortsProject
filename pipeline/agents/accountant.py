@@ -242,7 +242,7 @@ class Accountant(BaseAgent):
         Устанавливает кастомный дневной лимит.
 
         Args:
-            platform:     "youtube" / "tiktok" / "instagram" / "all"
+            platform:     "vk" / "rutube" / "ok" / "all"
             limit:        новый лимит (штук в день)
             account_name: если задан → лимит только для этого аккаунта
         """
