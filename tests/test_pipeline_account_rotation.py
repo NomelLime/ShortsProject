@@ -46,6 +46,7 @@ def test_scout_context_binds_resolve(tmp_path, monkeypatch):
     monkeypatch.delenv("SHORTS_PIPELINE_ACCOUNT", raising=False)
     monkeypatch.delenv("YTDLP_COOKIES_ACCOUNT", raising=False)
     monkeypatch.setenv("PIPELINE_ACCOUNT_ROTATION", "1")
+    monkeypatch.setattr(par, "_accounts_root", lambda: tmp_path)
     monkeypatch.setattr(utils.config, "ACCOUNTS_ROOT", str(tmp_path))
     _mk_account(tmp_path, "acc_rot")
     mem = MagicMock()

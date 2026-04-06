@@ -21,8 +21,9 @@ STATUS_FAILED_TERMINAL = "failed_terminal"
 STATUS_MANUAL_REQUIRED = "manual_required"
 MANUAL_REQUIRED_SENTINEL = "__MANUAL_REQUIRED__"
 
-_BRIDGE_DATA_FILE = Path(config.DATA_DIR) / "operator_publish_queue.json"
-_BRIDGE_STATS_FILE = Path(config.DATA_DIR) / "operator_bridge_stats.json"
+_DATA_DIR = Path(getattr(config, "DATA_DIR", Path(config.BASE_DIR) / "data"))
+_BRIDGE_DATA_FILE = _DATA_DIR / "operator_publish_queue.json"
+_BRIDGE_STATS_FILE = _DATA_DIR / "operator_bridge_stats.json"
 
 
 def bridge_enabled_for_platform(platform: str) -> bool:
