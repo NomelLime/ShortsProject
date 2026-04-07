@@ -13,9 +13,11 @@ downloader.py — Этап «Поиск трендовых видео»
 from __future__ import annotations
 
 import copy
+import os
 import random
 import re
 import time
+import threading
 from pathlib import Path
 from urllib.parse import quote_plus
 
@@ -118,8 +120,21 @@ def _run_search_query(query: str, ydl_opts: dict) -> list[str]:
         with YoutubeDL(ydl_opts) as ydl:
             result = ydl.extract_info(query, download=False)
     except Exception as exc:
-        log.error("Ошибка запроса «%s»: %s", query, exc)
-        return []
+        msg = str(exc).lower()
+        if "failed to load cookies" in msg:
+            log.warning("Cookies не загрузились для «%s», повторяем без cookies", query)
+            retry_opts = dict(ydl_opts)
+            retry_opts.pop("cookiefile", None)
+            retry_opts.pop("cookiesfrombrowser", None)
+            try:
+                with YoutubeDL(retry_opts) as ydl:
+                    result = ydl.extract_info(query, download=False)
+            except Exception as retry_exc:
+                log.error("Ошибка запроса «%s» (retry без cookies): %s", query, retry_exc)
+                return []
+        else:
+            log.error("Ошибка запроса «%s»: %s", query, exc)
+            return []
 
     if not result:
         log.warning("Нет результатов: %s", query)
@@ -134,8 +149,35 @@ def _run_search_query(query: str, ydl_opts: dict) -> list[str]:
     return urls
 
 
+def _run_search_query_with_timeout(query: str, ydl_opts: dict, timeout_sec: int) -> list[str]:
+    result_holder: dict[str, list[str]] = {"urls": []}
+    err_holder: dict[str, Exception | None] = {"err": None}
+
+    def _worker() -> None:
+        try:
+            result_holder["urls"] = _run_search_query(query, ydl_opts)
+        except Exception as exc:
+            err_holder["err"] = exc
+
+    t = threading.Thread(target=_worker, daemon=True)
+    t.start()
+    t.join(timeout=max(5, timeout_sec))
+
+    if t.is_alive():
+        log.warning("[yt-dlp] Таймаут query (%ds), пропускаем: %s", timeout_sec, query)
+        return []
+    if err_holder["err"] is not None:
+        log.warning("[yt-dlp] Query crashed, пропускаем «%s»: %s", query, err_holder["err"])
+        return []
+    return result_holder["urls"]
+
+
 def _search_ytdlp(keywords: list[str], proxy: str | None) -> list[str]:
     """Быстрый массовый поиск через yt-dlp (Вариант Б)."""
+    if not cfg.YTDLP_SEARCH_ENABLED:
+        log.info("[yt-dlp] Поиск отключён (YTDLP_SEARCH_ENABLED=0)")
+        return []
+
     ydl_opts  = _search_ydl_opts(proxy)
     found     = set()
     all_queries: list[tuple[str, str]] = []
@@ -144,6 +186,22 @@ def _search_ytdlp(keywords: list[str], proxy: str | None) -> list[str]:
         for keyword in keywords:
             for query in platform.build_queries(keyword, cfg.MAX_RESULTS_PER_QUERY):
                 all_queries.append((platform.name, query))
+
+    # Автоподдержка новых платформ из конфига через шаблоны yt-dlp.
+    # Не дублируем уже добавленные платформы из cfg.PLATFORMS.
+    base_platform_keys = {"youtube", "tiktok"}
+    for platform_key in (cfg.BROWSER_SEARCH_URLS or {}).keys():
+        pk = str(platform_key).strip().lower()
+        if not pk or pk in base_platform_keys:
+            continue
+        templates = (cfg.YTDLP_PLATFORM_QUERIES or {}).get(pk, ())
+        for keyword in keywords:
+            for tpl in templates:
+                query = tpl.format(n=cfg.MAX_RESULTS_PER_QUERY, keyword=keyword)
+                all_queries.append((pk, query))
+
+    if cfg.YTDLP_MAX_QUERIES > 0:
+        all_queries = all_queries[: cfg.YTDLP_MAX_QUERIES]
 
     total = len(all_queries)
     log.info("[yt-dlp] Всего запросов: %d", total)
@@ -155,7 +213,7 @@ def _search_ytdlp(keywords: list[str], proxy: str | None) -> list[str]:
 
     for idx, (platform_name, query) in enumerate(all_queries, start=1):
         log.info("[yt-dlp] [%d/%d] %-20s | %s", idx, total, platform_name, query)
-        new_urls = _run_search_query(query, ydl_opts)
+        new_urls = _run_search_query_with_timeout(query, ydl_opts, cfg.YTDLP_QUERY_TIMEOUT_SEC)
         before   = len(found)
         found.update(new_urls)
         log.info("  → +%d новых | итого: %d", len(found) - before, len(found))
@@ -198,6 +256,7 @@ def _browser_search_platform(
     try:
         log.info("[browser][%s] Открываю страницу поиска: «%s»", platform, keyword)
         page.goto(url, wait_until="domcontentloaded", timeout=30_000)
+        _enforce_search_query(page, platform, keyword)
         human_pause(
             2,
             5,
@@ -268,6 +327,60 @@ def _browser_search_platform(
                     except Exception:
                         pass
 
+        elif platform == "vk":
+            selectors = [
+                "a[href*='/video-']",
+                "a[href*='/clip-']",
+                "a[href*='z=video']",
+                "[data-testid*='video'] a[href]",
+            ]
+            for sel in selectors:
+                for el in page.locator(sel).all()[:30]:
+                    try:
+                        href = el.get_attribute("href")
+                        if href and ("/video-" in href or "/clip-" in href or "z=video" in href):
+                            if not href.startswith("http"):
+                                href = "https://vkvideo.ru" + href
+                            urls_found.append(href)
+                    except Exception:
+                        pass
+
+        elif platform == "rutube":
+            selectors = [
+                "a[href*='/video/']",
+                "a[href*='/shorts/']",
+            ]
+            for sel in selectors:
+                for el in page.locator(sel).all()[:30]:
+                    try:
+                        href = el.get_attribute("href")
+                        if href and ("/video/" in href or "/shorts/" in href):
+                            if not href.startswith("http"):
+                                href = "https://rutube.ru" + href
+                            urls_found.append(href)
+                    except Exception:
+                        pass
+
+        elif platform == "ok":
+            selectors = [
+                "a[href*='/video/']",
+                "a[href*='/video/c']",
+                "a[href*='st.mvId=']",
+                "a[data-l*='video']",
+                "a[data-video-id]",
+                "[data-module='VideoCard'] a[href]",
+            ]
+            for sel in selectors:
+                for el in page.locator(sel).all()[:30]:
+                    try:
+                        href = el.get_attribute("href")
+                        if href and ("video" in href or "st.mvId=" in href or "movieId" in href):
+                            if not href.startswith("http"):
+                                href = "https://ok.ru" + href
+                            urls_found.append(href)
+                    except Exception:
+                        pass
+
         # Имитируем «просмотр» нескольких результатов — кратко зависаем
         watch_time = random.uniform(3, 8)
         log.debug("[browser][%s] «Изучаем» результаты %.1f сек", platform, watch_time)
@@ -282,6 +395,38 @@ def _browser_search_platform(
     unique = list(dict.fromkeys(urls_found))
     log.info("[browser][%s] «%s» → %d URL", platform, keyword, len(unique))
     return unique
+
+
+def _enforce_search_query(page, platform: str, keyword: str) -> None:
+    """
+    Для VK/OK URL-параметр иногда игнорируется и страница показывает рекомендации.
+    Принудительно вводим keyword в поисковую строку и жмём Enter.
+    """
+    if platform not in ("vk", "ok"):
+        return
+    selectors = {
+        "vk": [
+            "input[name='q']",
+            "input[placeholder*='Поиск']",
+            "input[type='search']",
+        ],
+        "ok": [
+            "input[name='st.query']",
+            "input[placeholder*='Поиск видео']",
+            "input[type='search']",
+        ],
+    }
+    for sel in selectors.get(platform, []):
+        try:
+            inp = page.locator(sel).first
+            if inp.is_visible(timeout=2_000):
+                inp.click()
+                inp.fill(keyword)
+                inp.press("Enter")
+                human_pause(1, 2, agent="DOWNLOADER", context=f"{platform}_query_submit")
+                return
+        except Exception:
+            continue
 
 
 def _try_like_first_result(
@@ -327,12 +472,9 @@ def _search_browser(keywords: list[str], _proxy: str | None) -> list[str]:
         return []
 
     bundle = utils.get_pipeline_account_bundle()
-    if not bundle:
-        log.error(
-            "[browser] Задайте SHORTS_PIPELINE_ACCOUNT (или YTDLP_COOKIES_ACCOUNT) — "
-            "имя аккаунта в accounts/ с залогиненным browser_profile."
-        )
-        return []
+    allow_no_account = os.getenv("BROWSER_SEARCH_NO_ACCOUNT", "").strip().lower() in (
+        "1", "true", "yes", "on",
+    )
 
     from pipeline.browser import close_browser, launch_browser
 
@@ -344,21 +486,74 @@ def _search_browser(keywords: list[str], _proxy: str | None) -> list[str]:
     except ImportError as e:
         log.warning("[browser] playwright-stealth не установлен: %s", e)
 
-    acc_cfg = copy.deepcopy(bundle["config"])
-    _acc_for_search = acc_cfg
-    profile_dir = bundle["dir"] / "browser_profile"
-    plats = acc_cfg.get("platforms", ["youtube"])
+    acc_cfg = copy.deepcopy(bundle["config"]) if bundle else {}
+    _acc_for_search = acc_cfg if bundle else None
+    profile_dir = (bundle["dir"] / "browser_profile") if bundle else None
+    plats = acc_cfg.get("platforms", ["youtube"]) if bundle else ["youtube"]
     if isinstance(plats, str):
         plats = [plats]
     plat0 = (plats[0] if plats else "youtube").lower()
 
     kws = keywords[:cfg.BROWSER_SEARCH_KEYWORDS_MAX]
     all_browser_urls: list[str] = []
+    configured_platforms = [p.lower() for p in (cfg.BROWSER_SEARCH_URLS or {}).keys()]
+    default_platforms = ["youtube", "tiktok"]
+    search_platforms = list(dict.fromkeys(default_platforms + configured_platforms))
 
     try:
-        pw, context = launch_browser(acc_cfg, profile_dir, platform=plat0)
+        if bundle:
+            pw, context = launch_browser(acc_cfg, profile_dir, platform=plat0)
+        elif allow_no_account:
+            use_playwright_compat = os.getenv("BROWSER_COMPAT_PLAYWRIGHT", "").strip().lower() in (
+                "1", "true", "yes", "on",
+            )
+            engine = os.getenv("BROWSER_NO_ACCOUNT_ENGINE", "chromium").strip().lower()
+
+            if use_playwright_compat:
+                try:
+                    from playwright.sync_api import sync_playwright as compat_sync_playwright
+
+                    pw = compat_sync_playwright().start()
+                    if engine == "firefox":
+                        browser = pw.firefox.launch(headless=cfg.BROWSER_SEARCH_HEADLESS)
+                    else:
+                        browser = pw.chromium.launch(headless=cfg.BROWSER_SEARCH_HEADLESS)
+                except Exception as compat_exc:
+                    raise RuntimeError(
+                        f"Compat playwright launch error: {compat_exc}"
+                    ) from compat_exc
+            else:
+                from rebrowser_playwright.sync_api import sync_playwright
+
+                pw = sync_playwright().start()
+                try:
+                    if engine == "firefox":
+                        browser = pw.firefox.launch(headless=cfg.BROWSER_SEARCH_HEADLESS)
+                    else:
+                        browser = pw.chromium.launch(headless=cfg.BROWSER_SEARCH_HEADLESS)
+                except Exception as exc:
+                    if engine == "firefox":
+                        log.warning(
+                            "[browser] Firefox launch error (%s) — fallback на chromium",
+                            exc,
+                        )
+                        browser = pw.chromium.launch(headless=cfg.BROWSER_SEARCH_HEADLESS)
+                        engine = "chromium"
+                    else:
+                        raise
+            context = browser.new_context()
+            log.warning(
+                "[browser] Запуск без accounts: temporary context без логина/cookies (engine=%s, compat=%s)",
+                engine,
+                "on" if use_playwright_compat else "off",
+            )
+        else:
+            log.error(
+                "[browser] Нет accounts. Для теста без логина включите BROWSER_SEARCH_NO_ACCOUNT=1"
+            )
+            return []
     except Exception as exc:
-        log.error("[browser] Не удалось запустить браузер аккаунта: %s", exc)
+        log.error("[browser] Не удалось запустить браузер: %s", exc)
         return []
 
     try:
@@ -367,7 +562,7 @@ def _search_browser(keywords: list[str], _proxy: str | None) -> list[str]:
             stealth_apply(page)
 
         for keyword in kws:
-            for platform in ("youtube", "tiktok", "instagram"):
+            for platform in search_platforms:
                 found = _browser_search_platform(
                     page, platform, keyword, account_cfg=_acc_for_search,
                 )
@@ -459,6 +654,20 @@ def search_and_save() -> None:
 
     added = save_urls(all_urls)
     log.info("═══ Поиск завершён: найдено %d, добавлено %d ═══", len(all_urls), added)
+
+    auto_download = (
+        os.getenv("AUTO_DOWNLOAD_AFTER_SEARCH", "").strip().lower() in ("1", "true", "yes", "on")
+    )
+    if auto_download and added > 0:
+        try:
+            from pipeline import download as _download
+
+            queued = len(utils.unique_lines(cfg.URLS_FILE))
+            log.info("[post-check] urls.txt: %d URL в очереди", queued)
+            log.info("[post-check] AUTO_DOWNLOAD_AFTER_SEARCH=1 → запускаю download.download_all()")
+            _download.download_all()
+        except Exception as exc:
+            log.warning("[post-check] Автозапуск download не удался: %s", exc)
 
 
 if __name__ == "__main__":

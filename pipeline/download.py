@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import os
 import random
+import shutil
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
@@ -19,6 +20,8 @@ from enum import Enum, auto
 from pathlib import Path
 from threading import Lock
 from typing import Final, Optional
+from urllib.parse import urlparse
+from collections import Counter
 
 from yt_dlp import YoutubeDL
 
@@ -156,7 +159,8 @@ def download_single(
             return DownloadResult(url, DownloadStatus.FAILED, None, "checkpoint:previously_failed")
 
     ydl_opts = {
-        "outtmpl":   str(cfg.PREPARING_DIR / "%(id)s.%(ext)s"),
+        # extractor в имени снижает риск коллизий ID между платформами.
+        "outtmpl":   str(cfg.PREPARING_DIR / "%(extractor)s_%(id)s.%(ext)s"),
         "noplaylist": True,
         "quiet":      True,
         "no_warnings": True,
@@ -168,9 +172,20 @@ def download_single(
     ydl_opts.update(cfg.get_ytdlp_cookie_options())
 
     try:
-        with YoutubeDL(ydl_opts) as ydl:
-            info     = ydl.extract_info(url, download=True)
-            out_path = Path(ydl.prepare_filename(info))
+        try:
+            with YoutubeDL(ydl_opts) as ydl:
+                info = ydl.extract_info(url, download=True)
+                out_path = Path(ydl.prepare_filename(info))
+        except Exception as first_exc:
+            if "failed to load cookies" not in str(first_exc).lower():
+                raise
+            log.warning("Cookies не загрузились для URL, повторяем без cookies: %s", url[:100])
+            retry_opts = dict(ydl_opts)
+            retry_opts.pop("cookiefile", None)
+            retry_opts.pop("cookiesfrombrowser", None)
+            with YoutubeDL(retry_opts) as ydl:
+                info = ydl.extract_info(url, download=True)
+                out_path = Path(ydl.prepare_filename(info))
 
         if not out_path.exists():
             if checkpoint is not None:
@@ -213,14 +228,38 @@ def download_all(
     reset=True — сбрасывает чекпоинт и обрабатывает все URL заново.
     По умолчанию (reset=False) — пропускает уже обработанные URL из чекпоинта.
     """
-    urls = utils.unique_lines(cfg.URLS_FILE)
+    priority_urls = _load_priority_urls(cfg.DOWNLOAD_PRIORITY_TOP_N)
+    if priority_urls:
+        urls = priority_urls
+        log.info(
+            "Источник URL: priority queue (%s), top-N=%d, выбрано=%d",
+            cfg.URL_PRIORITY_QUEUE_FILE,
+            cfg.DOWNLOAD_PRIORITY_TOP_N,
+            len(urls),
+        )
+    else:
+        urls = utils.unique_lines(cfg.URLS_FILE)
+        if not urls:
+            log.error("urls.txt пуст или не найден: %s", cfg.URLS_FILE)
+            return DownloadStats()
+        log.info("Priority queue пуста — fallback на urls.txt")
+    urls = [u for u in urls if _is_downloadable_url(u)]
+    log.info("Загружено %d URL из %s (после фильтра: %d)", len(utils.unique_lines(cfg.URLS_FILE)), cfg.URLS_FILE, len(urls))
     if not urls:
-        log.error("urls.txt пуст или не найден: %s", cfg.URLS_FILE)
+        log.error("После фильтрации нет валидных URL для скачивания.")
         return DownloadStats()
-    log.info("Загружено %d URL из %s", len(urls), cfg.URLS_FILE)
 
-    if proxy is None:
+    no_proxy_mode = os.environ.get("NO_PROXY_DOWNLOAD", "").strip().lower() in ("1", "true", "yes", "on")
+    if no_proxy_mode:
+        proxy = ""
+        log.info("[diag] NO_PROXY_DOWNLOAD=1: запускаю download без прокси")
+    elif proxy is None:
         proxy = utils.load_proxy()
+
+    diag_mode = os.environ.get("DIAGNOSTIC_DOWNLOAD", "").strip().lower() in ("1", "true", "yes", "on")
+    if diag_mode:
+        max_workers = min(max_workers, 4)
+        log.info("[diag] DIAGNOSTIC_DOWNLOAD=1: ограничиваю потоки до %d", max_workers)
 
     if reset:
         reset_checkpoint()
@@ -232,6 +271,13 @@ def download_all(
         u for u in urls
         if u not in checkpoint.get("done", []) and u not in checkpoint.get("failed", [])
     ]
+    if cfg.DOWNLOAD_MAX_FILES_PER_RUN > 0 and len(pending) > cfg.DOWNLOAD_MAX_FILES_PER_RUN:
+        pending = pending[: cfg.DOWNLOAD_MAX_FILES_PER_RUN]
+        log.info(
+            "Лимит DOWNLOAD_MAX_FILES_PER_RUN=%d: беру только первые %d URL",
+            cfg.DOWNLOAD_MAX_FILES_PER_RUN,
+            len(pending),
+        )
 
     log.info(
         "Всего URL: %d | Уже скачано: %d | Ранее упало: %d | К обработке: %d | Потоков: %d",
@@ -245,6 +291,10 @@ def download_all(
 
     stats = DownloadStats()
     stats.skipped = already_done + already_fail
+    platform_done: Counter[str] = Counter()
+    platform_failed: Counter[str] = Counter()
+    bytes_downloaded = 0
+    success_urls: set[str] = set()
 
     if not pending:
         log.info("Все URL уже обработаны (чекпоинт). Нечего скачивать.")
@@ -261,15 +311,203 @@ def download_all(
             result = future.result()
             # Пропущенные по чекпоинту не попадают сюда (pending не содержит их)
             stats.record(result)
+            platform = _platform_from_url(result.url)
+            if result.status is DownloadStatus.OK:
+                platform_done[platform] += 1
+                success_urls.add(result.url)
+                if result.file and result.file.exists():
+                    try:
+                        bytes_downloaded += result.file.stat().st_size
+                    except OSError:
+                        pass
+            else:
+                platform_failed[platform] += 1
+
+            log.info(
+                "%s | src=%s | ok=%d fail=%d | size=%s",
+                _render_progress_bar(done, len(pending)),
+                platform,
+                stats.ok,
+                stats.failed + stats.integrity_error,
+                _format_bytes(bytes_downloaded),
+            )
+
+            # Жёсткий стоп по бюджету объёма за запуск.
+            if _gb_from_bytes(bytes_downloaded) >= cfg.DOWNLOAD_MAX_GB_PER_RUN:
+                log.warning(
+                    "Останов: достигнут лимит DOWNLOAD_MAX_GB_PER_RUN=%.2f GB (факт %.2f GB)",
+                    cfg.DOWNLOAD_MAX_GB_PER_RUN,
+                    _gb_from_bytes(bytes_downloaded),
+                )
+                for f in futures:
+                    f.cancel()
+                break
+
+            # Стоп по свободному месту на диске.
+            free_gb = _free_disk_gb(cfg.PREPARING_DIR)
+            if free_gb < cfg.DOWNLOAD_MIN_FREE_GB:
+                log.warning(
+                    "Останов: свободно %.2f GB, ниже DOWNLOAD_MIN_FREE_GB=%.2f GB",
+                    free_gb,
+                    cfg.DOWNLOAD_MIN_FREE_GB,
+                )
+                for f in futures:
+                    f.cancel()
+                break
 
             if done % 10 == 0 or done == len(pending):
                 log.info(
                     "Прогресс %d/%d | ✓%d ✗%d ⚠%d",
                     done, len(pending), stats.ok, stats.failed, stats.integrity_error,
                 )
+                log.info(
+                    "По платформам: done=%s | fail=%s",
+                    dict(platform_done),
+                    dict(platform_failed),
+                )
 
     _print_summary(stats)
+    if success_urls:
+        _prune_priority_queue(success_urls)
     return stats
+
+
+def _is_downloadable_url(url: str) -> bool:
+    """
+    Отсекает витринные/поисковые страницы, которые не являются URL конкретного видео.
+    """
+    try:
+        p = urlparse(url.strip())
+    except Exception:
+        return False
+    host = (p.netloc or "").lower()
+    path = (p.path or "").rstrip("/")
+    if not host or not p.scheme.startswith("http"):
+        return False
+
+    # OK showcase/feed страницы (не конкретные ролики)
+    if "ok.ru" in host and path in ("/video", "/video/showcase"):
+        return False
+
+    # YouTube search/results pages
+    if "youtube.com" in host and path == "/results":
+        return False
+
+    # TikTok search page
+    if "tiktok.com" in host and path == "/search":
+        return False
+
+    # Instagram полностью исключён из этапа download
+    if "instagram.com" in host:
+        return False
+
+    return True
+
+
+def _load_priority_urls(limit: int) -> list[str]:
+    path = cfg.URL_PRIORITY_QUEUE_FILE
+    if not path.exists() or limit <= 0:
+        return []
+    rows: list[tuple[int, str]] = []
+    seen = set()
+    try:
+        for raw in path.read_text(encoding="utf-8").splitlines():
+            line = raw.strip()
+            if not line:
+                continue
+            try:
+                item = json.loads(line)
+            except Exception:
+                continue
+            url = str(item.get("url", "")).strip()
+            if not url or url in seen or not _is_downloadable_url(url):
+                continue
+            score = int(item.get("score", 0))
+            rows.append((score, url))
+            seen.add(url)
+    except Exception as exc:
+        log.warning("Не удалось прочитать priority queue %s: %s", path, exc)
+        return []
+    rows.sort(key=lambda x: x[0], reverse=True)
+    return [url for _, url in rows[:limit]]
+
+
+def _prune_priority_queue(consumed_urls: set[str]) -> None:
+    if not consumed_urls:
+        return
+    path = cfg.URL_PRIORITY_QUEUE_FILE
+    if not path.exists():
+        return
+    try:
+        kept: list[str] = []
+        removed = 0
+        for raw in path.read_text(encoding="utf-8").splitlines():
+            line = raw.strip()
+            if not line:
+                continue
+            try:
+                item = json.loads(line)
+                url = str(item.get("url", "")).strip()
+            except Exception:
+                kept.append(line)
+                continue
+            if url and url in consumed_urls:
+                removed += 1
+                continue
+            kept.append(line)
+        path.write_text(("\n".join(kept) + ("\n" if kept else "")), encoding="utf-8")
+        log.info("Priority queue cleanup: удалено %d успешно скачанных URL", removed)
+    except Exception as exc:
+        log.warning("Не удалось очистить priority queue: %s", exc)
+
+
+def _platform_from_url(url: str) -> str:
+    host = (urlparse(url).netloc or "").lower()
+    if "youtube.com" in host or "youtu.be" in host:
+        return "youtube"
+    if "tiktok.com" in host:
+        return "tiktok"
+    if "vkvideo.ru" in host or "vk.com" in host:
+        return "vk"
+    if "rutube.ru" in host:
+        return "rutube"
+    if "ok.ru" in host:
+        return "ok"
+    if "instagram.com" in host:
+        return "instagram"
+    return "other"
+
+
+def _format_bytes(num_bytes: int) -> str:
+    units = ["B", "KB", "MB", "GB", "TB"]
+    size = float(max(0, num_bytes))
+    idx = 0
+    while size >= 1024 and idx < len(units) - 1:
+        size /= 1024
+        idx += 1
+    return f"{size:.1f}{units[idx]}"
+
+
+def _render_progress_bar(done: int, total: int, width: int = 24) -> str:
+    if total <= 0:
+        return "[------------------------] 0%"
+    ratio = max(0.0, min(1.0, done / total))
+    filled = int(ratio * width)
+    bar = "#" * filled + "-" * (width - filled)
+    return f"[{bar}] {int(ratio * 100):3d}% ({done}/{total})"
+
+
+def _gb_from_bytes(num_bytes: int) -> float:
+    return max(0.0, float(num_bytes) / (1024 ** 3))
+
+
+def _free_disk_gb(path: Path) -> float:
+    try:
+        path.mkdir(parents=True, exist_ok=True)
+    except Exception:
+        pass
+    usage = shutil.disk_usage(path)
+    return float(usage.free) / (1024 ** 3)
 
 
 def _print_summary(stats: DownloadStats) -> None:

@@ -11,8 +11,11 @@ COMMANDER может установить scout_keywords_override в AgentMemory
 """
 from __future__ import annotations
 
+import json
 import logging
+from datetime import datetime, timezone
 from typing import Any, List, Optional
+from urllib.parse import urlparse
 
 from pipeline.agents.base_agent import BaseAgent, AgentStatus
 from pipeline.agents.gpu_manager import get_gpu_manager, GPUPriority
@@ -96,6 +99,7 @@ class Scout(BaseAgent):
 
                 # VL thumbnail pre-filter: отклоняем мусор до скачивания
                 new_urls = self._vl_filter_urls(new_urls)
+                self._append_priority_queue(new_urls)
 
                 saved = merge_and_save_urls(new_urls, config.URLS_FILE)
                 self._total_found += saved
@@ -280,6 +284,65 @@ class Scout(BaseAgent):
             cycle=cycle,
         )
         logger.info("[SCOUT] Тренд записан для STRATEGIST: %s", content)
+
+    def _append_priority_queue(self, urls: List[str]) -> None:
+        """
+        Формирует приоритетную очередь URL для download этапа.
+        Пишет JSONL c полями: url, platform, score, reason, ts.
+        """
+        try:
+            from pipeline import config as _cfg
+
+            if not urls:
+                return
+
+            trend_scores: dict = self.memory.get("trend_scores") or {}
+            threshold = getattr(_cfg, "TREND_SCOUT_THRESHOLD", 2)
+            now_iso = datetime.now(timezone.utc).isoformat()
+            _cfg.URL_PRIORITY_QUEUE_FILE.parent.mkdir(parents=True, exist_ok=True)
+
+            lines: list[str] = []
+            for url in urls:
+                platform = self._platform_from_url(url)
+                trend_bonus = min(20, max(0, len([k for k, v in trend_scores.items() if v >= threshold])))
+                platform_bonus = {
+                    "vk": 10,
+                    "rutube": 9,
+                    "ok": 8,
+                    "tiktok": 6,
+                    "youtube": 4,
+                    "other": 1,
+                }.get(platform, 1)
+                score = 50 + platform_bonus + trend_bonus
+                item = {
+                    "url": url,
+                    "platform": platform,
+                    "score": score,
+                    "reason": f"vl_passed|platform={platform}|trend_bonus={trend_bonus}",
+                    "ts": now_iso,
+                }
+                lines.append(json.dumps(item, ensure_ascii=False))
+
+            with _cfg.URL_PRIORITY_QUEUE_FILE.open("a", encoding="utf-8") as f:
+                f.write("\n".join(lines) + "\n")
+            logger.info("[SCOUT] Priority queue append: +%d URL", len(lines))
+        except Exception as exc:
+            logger.warning("[SCOUT] Не удалось обновить priority queue: %s", exc)
+
+    @staticmethod
+    def _platform_from_url(url: str) -> str:
+        host = (urlparse(url).netloc or "").lower()
+        if "youtube.com" in host or "youtu.be" in host:
+            return "youtube"
+        if "tiktok.com" in host:
+            return "tiktok"
+        if "vkvideo.ru" in host or "vk.com" in host:
+            return "vk"
+        if "rutube.ru" in host:
+            return "rutube"
+        if "ok.ru" in host:
+            return "ok"
+        return "other"
 
     @staticmethod
     def _detect_top_niche(keywords: List[str]) -> str:

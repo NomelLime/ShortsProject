@@ -73,6 +73,10 @@ accounts/
 *.cookies
 cookies_*.txt
 cookies_*.json
+cookies.sqlite
+cookies.sqlite-*
+key4.db
+logins.json
 browser_profile/
 playwright_profile/
 *.session

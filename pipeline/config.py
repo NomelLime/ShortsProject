@@ -32,6 +32,7 @@ HASHTAGS_FILE = ASSETS_DIR / 'trending_hashtags.txt'
 # ----------------------------------------------------------------------
 KEYWORDS_FILE        = BASE_DIR / "data" / "keywords.txt"
 URLS_FILE            = BASE_DIR / "data" / "urls.txt"
+URL_PRIORITY_QUEUE_FILE = BASE_DIR / "data" / "url_priority_queue.jsonl"
 FAILED_URLS_FILE     = BASE_DIR / "data" / "failed_urls.txt"
 UPLOAD_RETRY_QUEUE   = BASE_DIR / "data" / "upload_retry_queue.json"
 DOWNLOAD_CHECKPOINT  = BASE_DIR / "data" / "download_checkpoint.json"   # чекпоинт скачивания
@@ -227,6 +228,15 @@ def get_ytdlp_cookie_options() -> dict[str, Any]:
          каталог ``browser_profile`` аккаунта, ``cookiesfrombrowser`` = (``YTDLP_COOKIES_BROWSER``, путь, None, None);
       3) ``cookies_youtube.txt`` в корне проекта, если файл есть (legacy).
     """
+    disable_cookies = os.getenv("YTDLP_DISABLE_COOKIES", "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
+    if disable_cookies:
+        return {}
+
     env_file = os.getenv("YTDLP_COOKIES_FILE", "").strip()
     if env_file:
         p = Path(env_file).expanduser()
@@ -410,9 +420,15 @@ VIDEO_EXT = ('.mp4', '.mov', '.avi', '.mkv', '.webm')
 MAX_RESULTS_PER_QUERY = 50
 MAX_DURATION_SEC      = 90      # было 60, увеличено для захвата 60–90 сек роликов
 MIN_VIEWS             = 100_000
+# yt-dlp "боевой" контур:
+# - таймаут на один поисковый query (чтобы не зависать на одном запросе);
+# - опциональный лимит query на запуск (smoke/diagnostic режим).
+YTDLP_SEARCH_ENABLED = os.getenv("YTDLP_SEARCH_ENABLED", "1").strip().lower() in ("1", "true", "yes", "on")
+YTDLP_QUERY_TIMEOUT_SEC = int(os.getenv("YTDLP_QUERY_TIMEOUT_SEC", "45"))
+YTDLP_MAX_QUERIES = int(os.getenv("YTDLP_MAX_QUERIES", "0"))  # 0 = без лимита
 
 # Браузерный поиск (симуляция живого человека)
-BROWSER_SEARCH_ENABLED      = True   # включить Playwright-поиск поверх yt-dlp
+BROWSER_SEARCH_ENABLED      = os.getenv("BROWSER_SEARCH_ENABLED", "1").strip().lower() in ("1", "true", "yes", "on")
 BROWSER_SEARCH_HEADLESS     = False  # False = видимый браузер для стелс-режима
 BROWSER_SEARCH_KEYWORDS_MAX = 3      # сколько keywords обрабатывать через браузер
 
@@ -451,6 +467,10 @@ FFPROBE_TIMEOUT      = 30
 SOCKET_TIMEOUT       = 30
 SLEEP_MIN            = 10
 SLEEP_MAX            = 30
+DOWNLOAD_MAX_FILES_PER_RUN = int(os.getenv("DOWNLOAD_MAX_FILES_PER_RUN", "50"))
+DOWNLOAD_MAX_GB_PER_RUN = float(os.getenv("DOWNLOAD_MAX_GB_PER_RUN", "6.0"))
+DOWNLOAD_MIN_FREE_GB = float(os.getenv("DOWNLOAD_MIN_FREE_GB", "8.0"))
+DOWNLOAD_PRIORITY_TOP_N = int(os.getenv("DOWNLOAD_PRIORITY_TOP_N", "30"))
 
 # ----------------------------------------------------------------------
 # Платформы для поиска
@@ -488,6 +508,19 @@ PLATFORMS = [
     # ytsearch не достаёт Reels напрямую. Instagram ищется через
     # браузерный поиск (_search_browser в downloader.py).
 ]
+
+# Дополнительные платформы для yt-dlp поиска.
+# Ключ = platform из BROWSER_SEARCH_URLS/PLATFORM_URLS, значение = шаблоны запросов.
+# Важно: это best-effort. Если платформа/схема не поддерживается текущей сборкой yt-dlp,
+# поиск просто вернёт пустой результат и продолжит цикл.
+YTDLP_PLATFORM_QUERIES: dict[str, tuple[str, ...]] = {
+    "youtube": ("ytsearch{n}:{keyword} #shorts",),
+    "tiktok": ("ytsearch{n}:{keyword} tiktok",),
+    # legacy-платформы (через ytsearch по ключевым словам бренда)
+    "vk": ("ytsearch{n}:{keyword} vk video",),
+    "rutube": ("ytsearch{n}:{keyword} rutube",),
+    "ok": ("ytsearch{n}:{keyword} odnoklassniki video",),
+}
 
 # ----------------------------------------------------------------------
 # HTTP-заголовки
@@ -528,9 +561,11 @@ PLATFORM_URLS = {
 
 # Поисковые URL для браузерного поиска
 BROWSER_SEARCH_URLS = {
-    "vk":      "https://vk.com/search?c%5Bsection%5D=video&c%5Bq%5D={query}",
+    "youtube": "https://www.youtube.com/results?search_query={query}",
+    "tiktok":  "https://www.tiktok.com/search?q={query}",
+    "vk":      "https://vkvideo.ru/search?query={query}",
     "rutube":  "https://rutube.ru/search/?query={query}",
-    "ok":      "https://ok.ru/search?st.query={query}",
+    "ok":      "https://ok.ru/video/showcase?st.query={query}",
 }
 
 # ----------------------------------------------------------------------
