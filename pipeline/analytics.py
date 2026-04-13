@@ -118,6 +118,12 @@ def register_upload(
         "ab_variant":       ab_variant,
         "prelend_sub_id":   prelend_sub_id,
         "account_name":     account_name,
+        "creative_id":      meta.get("creative_id") or video_stem,
+        "hook_type":        meta.get("hook_type") or ("ab_" + str(ab_variant).lower() if ab_variant else "generic"),
+        "experiment_id":    meta.get("experiment_id") or (f"ab_{ab_variant}" if ab_variant else "default"),
+        "hook_score":       meta.get("hook_score"),
+        "risk_score":       meta.get("risk_score"),
+        "retention_prediction": meta.get("retention_prediction"),
     }
 
     _save_analytics(data)

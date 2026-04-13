@@ -348,6 +348,16 @@ class Visionary(BaseAgent):
                     if isinstance(v, dict):
                         v["ab_variant"] = ab_variant
 
+            # Agent-first enrich: hook scoring + voice persona hints.
+            try:
+                from pipeline.agents.hook_lab import HookLabAgent
+                from pipeline.agents.voice_persona import VoicePersonaAgent
+
+                enriched = HookLabAgent.annotate_variants(variants)
+                variants = [VoicePersonaAgent.apply_persona(v) for v in enriched]
+            except Exception as enrich_exc:
+                logger.debug("[VISIONARY] hook/persona enrich skipped: %s", enrich_exc)
+
             logger.info(
                 "[VISIONARY] Meta готова: %d вариант(ов) для %s (ab_variant=%s)",
                 len(variants), video_path.name, ab_variant,
@@ -358,6 +368,17 @@ class Visionary(BaseAgent):
                 "ab_variant": ab_variant,
                 "context":    bool(context_hashtags),
             })
+            if variants:
+                first = variants[0] if isinstance(variants[0], dict) else {}
+                self.memory.emit_agent_event(
+                    "VISIONARY",
+                    "meta_enriched",
+                    {"file": video_path.name, "variants": len(variants)},
+                    creative_id=str(first.get("creative_id") or ""),
+                    hook_type=str(first.get("hook_type") or ""),
+                    experiment_id=str(first.get("ab_variant") or "meta_default"),
+                    agent_run_id=f"visionary:{video_path.stem}",
+                )
             self._set_status(AgentStatus.IDLE)
             return variants
 

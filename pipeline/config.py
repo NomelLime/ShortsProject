@@ -784,3 +784,12 @@ ANIMATEDIFF_SCRIPT        = os.getenv("ANIMATEDIFF_SCRIPT", "")   # exe: topic o
 ANIMATEDIFF_FF_FALLBACK   = os.getenv("ANIMATEDIFF_FF_FALLBACK", "1") == "1"
 ANIMATEDIFF_DURATION_SEC  = int(os.getenv("ANIMATEDIFF_DURATION_SEC", "5"))
 ANIMATEDIFF_SIZE          = os.getenv("ANIMATEDIFF_SIZE", "1280:720")  # ширина:высота для ffmpeg
+
+# ----------------------------------------------------------------------
+# Agent-first prepublish gates and experiments
+# ----------------------------------------------------------------------
+HOOK_LAB_ENABLED = os.getenv("HOOK_LAB_ENABLED", "1").strip().lower() not in ("0", "false", "no", "off")
+COMMENT_TO_CONTENT_ENABLED = os.getenv("COMMENT_TO_CONTENT_ENABLED", "1").strip().lower() not in ("0", "false", "no", "off")
+VOICE_PERSONA_ENABLED = os.getenv("VOICE_PERSONA_ENABLED", "1").strip().lower() not in ("0", "false", "no", "off")
+THUMB_STRESS_TEST_ENABLED = os.getenv("THUMB_STRESS_TEST_ENABLED", "1").strip().lower() not in ("0", "false", "no", "off")
+RISK_GUARD_BLOCK_ON_HIGH_RISK = os.getenv("RISK_GUARD_BLOCK_ON_HIGH_RISK", "1").strip().lower() not in ("0", "false", "no", "off")

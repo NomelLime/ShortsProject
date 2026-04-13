@@ -29,6 +29,9 @@ from pipeline.browser import launch_browser, close_browser, check_session_valid
 from pipeline.notifications import check_and_handle_captcha, send_telegram
 from pipeline.session_manager import ensure_session_fresh, mark_session_verified
 from pipeline.analytics import register_upload
+from pipeline.agents.hook_lab import HookLabAgent
+from pipeline.agents.risk_guard import RiskGuardAgent
+from pipeline.agent_memory import get_memory
 from pipeline.quarantine import is_quarantined, mark_error as q_mark_error, mark_success as q_mark_success
 from pipeline.upload_warmup import is_upload_blocked, is_upload_warmup_active
 from pipeline.locale_packaging import prepare_locale_pack_for_upload
@@ -41,6 +44,7 @@ from pipeline.publish_bridge import (
 )
 
 logger = logging.getLogger(__name__)
+_memory = get_memory()
 
 _uploader_h_cfg: contextvars.ContextVar[Optional[Dict]] = contextvars.ContextVar(
     "uploader_humanize_cfg",
@@ -72,6 +76,19 @@ def _up_pause(
         context=ctx,
         risk=risk,
     )
+
+
+def _evaluate_prepublish_gate(meta: Dict) -> Dict[str, object]:
+    hook_score = float(meta.get("hook_score") or HookLabAgent.score_hook(str(meta.get("hook_text") or "")))
+    risk_score, blocked, reason = RiskGuardAgent.score_metadata_risk(meta)
+    retention_prediction = round(min(0.95, max(0.05, 0.55 * hook_score + 0.45 * (1.0 - risk_score))), 4)
+    return {
+        "hook_score": round(hook_score, 4),
+        "risk_score": float(risk_score),
+        "retention_prediction": retention_prediction,
+        "blocked": bool(blocked),
+        "reason": reason,
+    }
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -710,6 +727,26 @@ def upload_all(dry_run: bool = False) -> List[Dict]:
                     video_path = item["video_path"]
                     # Фича B: A/B — берём назначенный вариант метаданных
                     meta = item.get("ab_meta") or item["meta"]
+                    gate = _evaluate_prepublish_gate(meta)
+                    if gate["blocked"] and bool(getattr(config, "RISK_GUARD_BLOCK_ON_HIGH_RISK", True)):
+                        _memory.emit_agent_event(
+                            "UPLOADER",
+                            "prepublish_blocked",
+                            {"platform": platform, "account": acc_name, "reason": gate["reason"]},
+                            creative_id=str(meta.get("creative_id") or Path(video_path).stem),
+                            hook_type=str(meta.get("hook_type") or "generic"),
+                            experiment_id=str(meta.get("experiment_id") or meta.get("ab_variant") or "default"),
+                            agent_run_id=f"uploader:{acc_name}:{platform}",
+                            severity="warning",
+                        )
+                        results.append({
+                            "status": "blocked_by_risk_guard",
+                            "platform": platform,
+                            "account_id": acc_name,
+                            "source_path": str(video_path),
+                            "error_msg": f"risk={gate['risk_score']} reason={gate['reason']}",
+                        })
+                        continue
 
                     if dry_run:
                         logger.info("[dry_run] %s -> %s", video_path.name, platform)
@@ -735,6 +772,9 @@ def upload_all(dry_run: bool = False) -> List[Dict]:
                         account_cfg=acc_cfg,
                         platform=platform,
                     )
+                    localized_meta["hook_score"] = gate["hook_score"]
+                    localized_meta["risk_score"] = gate["risk_score"]
+                    localized_meta["retention_prediction"] = gate["retention_prediction"]
                     clean_path = clean_video_metadata(localized_video)
                     video_url  = upload_video(
                         context, platform, clean_path, localized_meta,
@@ -776,6 +816,10 @@ def upload_all(dry_run: bool = False) -> List[Dict]:
                                         "platform": platform,
                                         "video_url": video_url,
                                         "account": acc_name,
+                                        "creative_id": localized_meta.get("creative_id") or video_path.stem,
+                                        "hook_type": localized_meta.get("hook_type") or "generic",
+                                        "experiment_id": localized_meta.get("experiment_id") or (localized_meta.get("ab_variant") or "default"),
+                                        "agent_run_id": f"uploader:{acc_name}:{platform}",
                                     },
                                     timeout=5,
                                 )
@@ -788,7 +832,19 @@ def upload_all(dry_run: bool = False) -> List[Dict]:
                             "status": "uploaded", "platform": platform,
                             "account_id": acc_name, "source_path": str(video_path),
                             "video_url": video_url,
+                            "hook_score": gate["hook_score"],
+                            "risk_score": gate["risk_score"],
+                            "retention_prediction": gate["retention_prediction"],
                         })
+                        _memory.emit_agent_event(
+                            "UPLOADER",
+                            "uploaded",
+                            {"platform": platform, "account": acc_name, "video_url": video_url},
+                            creative_id=str(localized_meta.get("creative_id") or Path(video_path).stem),
+                            hook_type=str(localized_meta.get("hook_type") or "generic"),
+                            experiment_id=str(localized_meta.get("experiment_id") or localized_meta.get("ab_variant") or "default"),
+                            agent_run_id=f"uploader:{acc_name}:{platform}",
+                        )
                     else:
                         q_mark_error(acc_name, platform, reason="upload_failed")
                         results.append({

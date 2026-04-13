@@ -75,6 +75,7 @@ class Strategist(BaseAgent):
 
             # 2в. Детектор серийного контента
             self._detect_serial_candidates()
+            self._refresh_comment_to_content_ideas()
 
             # 3. Кандидаты на репост
             repost_count = self._process_reposts()
@@ -112,6 +113,39 @@ class Strategist(BaseAgent):
             logger.error("[STRATEGIST] Ошибка анализа: %s", e)
         finally:
             self._set_status(AgentStatus.IDLE)
+
+    def _refresh_comment_to_content_ideas(self) -> None:
+        """
+        Формирует backlog идей для COMMENT_TO_CONTENT на базе наиболее обсуждаемых роликов.
+        """
+        try:
+            from pipeline.analytics import _load_analytics
+            from pipeline.agents.comment_to_content import CommentToContentAgent
+
+            analytics = _load_analytics()
+            seeds: List[str] = []
+            for stem, entry in analytics.items():
+                if not isinstance(entry, dict):
+                    continue
+                title = str(entry.get("title") or stem)
+                max_comments = 0
+                for upload in (entry.get("uploads") or {}).values():
+                    if isinstance(upload, dict):
+                        max_comments = max(max_comments, int(upload.get("comments") or 0))
+                if max_comments > 0:
+                    seeds.append(f"{title}?")
+                    seeds.append(f"Почему это работает: {title}")
+            ideas = CommentToContentAgent.build_ideas_from_comments(seeds[:100])
+            self.memory.set("comment_to_content_ideas", ideas)
+            self.memory.emit_agent_event(
+                "STRATEGIST",
+                "comment_ideas_refreshed",
+                {"ideas_count": len(ideas)},
+                experiment_id="comment_to_content",
+                agent_run_id=f"strategist_cycle_{self._cycle_count}",
+            )
+        except Exception as exc:
+            logger.debug("[STRATEGIST] comment_to_content refresh: %s", exc)
 
     # ------------------------------------------------------------------
     # LLM-рекомендации для агентов

@@ -30,6 +30,7 @@ import os
 import tempfile
 import logging
 import threading
+import uuid
 from collections import deque
 from datetime import datetime
 from pathlib import Path
@@ -59,6 +60,8 @@ class AgentMemory:
         self._agents: Dict[str, str] = {}
         self._events: Deque[Dict]   = deque(maxlen=_MAX_EVENTS)
         self._load()
+        if "agent_event_schema_version" not in self._kv:
+            self._kv["agent_event_schema_version"] = 1
 
     # ── Базовые операции KV ──────────────────────────────────────────────────
 
@@ -149,16 +152,71 @@ class AgentMemory:
         event: str,
         data: Optional[Dict] = None,
         ts: Optional[str] = None,
+        *,
+        severity: str = "info",
+        creative_id: Optional[str] = None,
+        hook_type: Optional[str] = None,
+        experiment_id: Optional[str] = None,
+        agent_run_id: Optional[str] = None,
     ) -> None:
         with self._lock:
+            payload = data or {}
+            payload_ids = payload.get("ids")
+            if not isinstance(payload_ids, dict):
+                payload_ids = {}
+            if creative_id:
+                payload_ids["creative_id"] = creative_id
+            if hook_type:
+                payload_ids["hook_type"] = hook_type
+            if experiment_id:
+                payload_ids["experiment_id"] = experiment_id
+            if agent_run_id:
+                payload_ids["agent_run_id"] = agent_run_id
+            if payload_ids:
+                payload["ids"] = payload_ids
             self._events.append({
+                "event_id": str(uuid.uuid4()),
+                "event_version": 1,
                 "ts":    ts or datetime.now().isoformat(timespec="seconds"),
                 "agent": agent,
                 "event": event,
-                "data":  data or {},
+                "severity": severity,
+                "data":  payload,
             })
             # Не сохраняем при каждом event — только KV/статусы
             # (события читаются из памяти, не с диска)
+
+    def emit_agent_event(
+        self,
+        agent: str,
+        event_type: str,
+        payload: Optional[Dict[str, Any]] = None,
+        *,
+        creative_id: Optional[str] = None,
+        hook_type: Optional[str] = None,
+        experiment_id: Optional[str] = None,
+        agent_run_id: Optional[str] = None,
+        severity: str = "info",
+    ) -> None:
+        """
+        Унифицированный контракт событий для межпроектной аналитики.
+
+        Все агентные события должны использовать поля IDs:
+        - creative_id
+        - hook_type
+        - experiment_id
+        - agent_run_id
+        """
+        self.log_event(
+            agent=agent,
+            event=event_type,
+            data=payload or {},
+            severity=severity,
+            creative_id=creative_id,
+            hook_type=hook_type,
+            experiment_id=experiment_id,
+            agent_run_id=agent_run_id,
+        )
 
     def get_events(
         self,

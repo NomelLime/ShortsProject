@@ -31,6 +31,12 @@ from pipeline.agents.metrics_scout_platform import MetricsScoutPlatform
 from pipeline.agents.curator    import Curator
 from pipeline.agents.visionary  import Visionary
 from pipeline.agents.narrator   import Narrator
+from pipeline.agents.hook_lab   import HookLabAgent
+from pipeline.agents.comment_to_content import CommentToContentAgent
+from pipeline.agents.voice_persona import VoicePersonaAgent
+from pipeline.agents.thumbnail_stress_test import ThumbnailStressTestAgent
+from pipeline.agents.auto_reporter import AutoReporterAgent
+from pipeline.agents.risk_guard import RiskGuardAgent
 from pipeline.agents.editor     import Editor
 from pipeline.agents.strategist import Strategist
 from pipeline.agents.guardian   import Guardian
@@ -68,7 +74,13 @@ class ShortsProjectCrew:
         self.curator    = Curator(memory=self.memory,    notify=notify)
         self.visionary  = Visionary(memory=self.memory,  notify=notify)
         self.narrator   = Narrator(memory=self.memory,   notify=notify)
+        self.hook_lab   = HookLabAgent(memory=self.memory, notify=notify)
+        self.comment_to_content = CommentToContentAgent(memory=self.memory, notify=notify)
+        self.voice_persona = VoicePersonaAgent(memory=self.memory, notify=notify)
+        self.thumbnail_stress = ThumbnailStressTestAgent(memory=self.memory, notify=notify)
+        self.auto_reporter = AutoReporterAgent(memory=self.memory, notify=notify)
         self.guardian   = Guardian(memory=self.memory,   notify=notify)
+        self.risk_guard = RiskGuardAgent(memory=self.memory, notify=notify)
         self.accountant = Accountant(memory=self.memory, notify=notify)
         self.strategist = Strategist(memory=self.memory, notify=notify)
 
@@ -107,10 +119,16 @@ class ShortsProjectCrew:
             self.curator,     # фильтрация
             self.visionary,   # AI метаданные
             self.narrator,    # TTS
+            self.hook_lab,    # hook scoring
+            self.comment_to_content,  # comment -> idea
+            self.voice_persona,  # persona hints
+            self.thumbnail_stress,  # thumbnail readability
             self.editor,      # монтаж
             self.strategist,  # аналитика
             self.guardian,    # безопасность
+            self.risk_guard,  # prepublish policy gate
             self.publisher,   # загрузка
+            self.auto_reporter,  # daily action report
             self.accountant,  # лимиты
         ]:
             self.director.register(agent)
